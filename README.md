@@ -90,12 +90,6 @@ Only tested against Sims 4, VRChat and Unreal Engine models for the time being. 
 - **Customize+:** the template math reproduces [Customize+](https://github.com/Aether-Tools/CustomizePlus) by Aether-Tools, worked out from its source code.
 - **Game data:** the skeleton and head data for Customize+ and Hair come from the game's files, through TexTools' skeleton and face exports and Instant Edit's game export, read with Yet Another Addon's reader. The IVCS and YAS bones come from the Yet Another Devkit's skeleton. Only bone positions and a rough head shape are included, none of the game's models. Bust Size uses the game's two bust ranges from its racial scaling table. Face includes none of the game's data: it reads the faces from your own game install and keeps them on your computer.
 
-FINAL FANTASY XIV © SQUARE ENIX CO., LTD. Magic Fit is a fan-made tool, not affiliated with or endorsed by Square Enix.
-
 ## License
 
 Magic Fit is licensed under the [GNU General Public License v3.0 or later](magic_fit/LICENSE). To build it from source, run the tests or see how the tools work inside, read the [development notes](docs/development.md).
-
-## Links
-
-[XIV Mod Archive](https://www.xivmodarchive.com/user/124593) · [GitHub](https://github.com/link-0402/MagicFit) · [Bluesky](https://bsky.app/profile/xiv-luci.bsky.social) · [Ko-fi](https://ko-fi.com/luci_xiv)
