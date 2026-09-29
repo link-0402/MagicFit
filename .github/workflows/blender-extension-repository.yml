@@ -1,0 +1,114 @@
+name: Publish Blender Extension Repository
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'magic_fit/**'
+      - 'blender_repo/**'
+      - 'tools/bundle-addon.ps1'
+      - 'tools/check_install.py'
+      - 'tools/extension-package.ps1'
+      - 'tools/generate-blender-repository.ps1'
+      - 'tools/verify-blender-repository.ps1'
+      - '.github/workflows/blender-extension-repository.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
+env:
+  BLENDER_VERSION: 5.2.0
+  BLENDER_RELEASE: Blender5.2
+
+jobs:
+  # Weight Transfer's SciPy wheels are built for Windows, so the package is checked there.
+  test:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Blender ${{ env.BLENDER_VERSION }}
+        shell: pwsh
+        run: |
+          curl.exe --fail --location --retry 3 --silent --show-error `
+            "https://download.blender.org/release/$env:BLENDER_RELEASE/blender-$env:BLENDER_VERSION-windows-x64.zip" `
+            --output "$env:RUNNER_TEMP\blender.zip"
+          tar -xf "$env:RUNNER_TEMP\blender.zip" -C "$env:RUNNER_TEMP"
+          "$env:RUNNER_TEMP\blender-$env:BLENDER_VERSION-windows-x64" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Build package and repository index
+        shell: pwsh
+        run: |
+          ./tools/generate-blender-repository.ps1 -RepositoryPath "$env:RUNNER_TEMP\site"
+          ./tools/verify-blender-repository.ps1 -RepositoryPath "$env:RUNNER_TEMP\site"
+
+      - name: Install from the repository like a user would
+        shell: pwsh
+        env:
+          BLENDER_USER_RESOURCES: ${{ runner.temp }}\profile
+        run: |
+          $index = ([uri] (Join-Path $env:RUNNER_TEMP 'site\index.json')).AbsoluteUri
+          blender --background --factory-startup --command extension repo-add --name "Magic Fit" --url $index magic_fit_repo
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          blender --background --factory-startup --online-mode --command extension install --sync --enable magic_fit
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Check the installed add-on (Weight Transfer with SciPy, Customize+, Hair)
+        shell: pwsh
+        run: |
+          $blender = (Get-Command blender).Source
+          python tools/check_install.py "$env:RUNNER_TEMP\site\MagicFit.zip" $blender --skip-face
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify the committed repository
+        shell: pwsh
+        run: |
+          ./tools/verify-blender-repository.ps1 -RepositoryPath ./blender_repo
+
+      - name: Set up GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Install Blender ${{ env.BLENDER_VERSION }}
+        run: |
+          curl --fail --location --retry 3 --silent --show-error \
+            "https://download.blender.org/release/${BLENDER_RELEASE}/blender-${BLENDER_VERSION}-linux-x64.tar.xz" \
+            --output /tmp/blender.tar.xz
+          tar -xJf /tmp/blender.tar.xz --directory /tmp
+          echo "/tmp/blender-${BLENDER_VERSION}-linux-x64" >> "$GITHUB_PATH"
+
+      - name: Build package and repository index
+        shell: pwsh
+        run: |
+          ./tools/generate-blender-repository.ps1 -RepositoryPath ./site
+          ./tools/verify-blender-repository.ps1 -RepositoryPath ./site
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./site
+
+  deploy:
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

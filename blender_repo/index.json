@@ -1,0 +1,34 @@
+{
+  "version": "v1",
+  "blocklist": [],
+  "data": [
+    {
+      "schema_version": "1.0.0",
+      "id": "magic_fit",
+      "name": "Magic Fit",
+      "tagline": "Transfer weights, line up, fit and resize to a body, relax UVs",
+      "version": "1.0.0",
+      "type": "add-on",
+      "maintainer": "Luci_xiv",
+      "license": [
+        "SPDX:GPL-3.0-or-later"
+      ],
+      "blender_version_min": "5.2.0",
+      "website": "https://github.com/link-0402/MagicFit",
+      "permissions": {
+        "files": "Read the game's faces from the FFXIV install folder"
+      },
+      "tags": [
+        "Paint",
+        "Sculpt",
+        "Rigging"
+      ],
+      "python_versions": [
+        "3.13"
+      ],
+      "archive_url": "./MagicFit.zip",
+      "archive_size": 32975692,
+      "archive_hash": "sha256:32f352bb604b4fdf1b11fa18c97e8116d995308ddf484fbd6b247305d815c880"
+    }
+  ]
+}
