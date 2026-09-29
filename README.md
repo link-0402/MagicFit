@@ -33,8 +33,6 @@ Add this repository to Blender to install the add-on and get automatic updates:
 
 The sidebar tab has five tabs: **Weights**, **Body Fit**, **Line Up**, **Texture Relax** and **Customize+**. The **Body** you pick below them is shared by every tool that works against a body.
 
-![The Magic Fit tab of the sidebar: Weights, Body Fit and Customize+](docs/images/sidebar.png)
-
 ### Weights
 
 **[Weight Transfer](docs/guide.md#weight-transfer)** gives whole meshes the body's weights in one click. Where the mesh lies on the body, it copies the body's weights. Everywhere else, it fills them in smoothly from the weights around them. Fabric between the legs, across the cleavage or under the arms then blends between both sides, so Customize+ scaling and walking don't pinch it or push the body through it.
