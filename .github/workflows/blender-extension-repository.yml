@@ -57,9 +57,9 @@ jobs:
           BLENDER_USER_RESOURCES: ${{ runner.temp }}\profile
         run: |
           $index = ([uri] (Join-Path $env:RUNNER_TEMP 'site\index.json')).AbsoluteUri
-          blender --background --factory-startup --command extension repo-add --name "Magic Fit" --url $index magic_fit_repo
+          blender --background --command extension repo-add --name "Magic Fit" --url $index magic_fit_repo
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          blender --background --factory-startup --online-mode --command extension install --sync --enable magic_fit
+          blender --background --online-mode --command extension install --sync --enable magic_fit
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Check the installed add-on (Weight Transfer with SciPy, Customize+, Hair)
