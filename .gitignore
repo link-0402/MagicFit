@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.blend1
+
+# Unpacked wheels for running the tests from source (tools/vendor_wheels.py)
+deps/
+
+# Local builds; the distributed package is the zip in blender_repo
+dist/
+*.zip
+!blender_repo/*.zip
+
+# Generated with the index; GitHub Pages builds its own copy
+blender_repo/index.html
+
+.claude/

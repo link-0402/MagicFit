@@ -1,0 +1,27 @@
+schema_version = "1.0.0"
+
+id = "magic_fit"
+version = "1.0.0"
+name = "Magic Fit"
+tagline = "Transfer weights, line up, fit and resize to a body, relax UVs"
+maintainer = "Luci_xiv"
+type = "add-on"
+website = "https://github.com/link-0402/MagicFit"
+
+blender_version_min = "5.2.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+tags = ["Paint", "Sculpt", "Rigging"]
+
+# SciPy and robust-laplacian for Weight Transfer, built for Blender 5.2's Python on Windows.
+# Blender installs them where they fit, shared with other extensions listing the same wheels (such as
+# the standalone Robust Weight Transfer, so keep its versions). Elsewhere the brushes still work and
+# the transfer panel says what's missing. tools/vendor_wheels.py puts them here.
+wheels = [
+  "./wheels/robust_laplacian-1.0.0-cp313-cp313-win_amd64.whl",
+  "./wheels/scipy-1.18.1-cp313-cp313-win_amd64.whl",
+]
+
+# Face reads the game's faces, face skeletons and face animations from the user's FFXIV install, read only.
+[permissions]
+files = "Read the game's faces from the FFXIV install folder"
