@@ -37,7 +37,7 @@ import numpy as np
 from . import gamefiles
 
 # Raise when what's read or how changes: the data kept in the user folder is read again.
-DATA_VERSION = 2
+DATA_VERSION = 3
 FILE_NAME = "face_data.npz"
 LEGACY_FOLDER = "magic_fit"
 
@@ -47,8 +47,12 @@ TO_BLENDER = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
 BODY_BONES = ("j_kao", "j_kubi", "j_sebo_c", "j_mimi_l", "j_mimi_r")
 MAX_WEIGHTS = 8
 # The poses kept: (name, the face.pap animation). Each is kept at its peak: the frame the bones turn most.
+# SHUT_EYES is the Shut Eyes expression (the Emote sheet's row 73 plays ActionTimeline facial/pose/bow, whose
+# .tmb plays cfxf_bow from face.pap; the Bow emote's face, nonresident/emot/bow.pap, is the same animation): a
+# pose the game holds as long as the expression lasts.
 POSES = (
     ("BLINK", "cfxb_blink1"),
+    ("SHUT_EYES", "cfxf_bow"),
     ("TALK", "cfxl_lip_nor2"),
     ("SHOUT", "cfxl_lip_sho2"),
     ("ANGRY", "cfxf_angry"),
@@ -56,7 +60,6 @@ POSES = (
     ("OUCH", "cfxf_ouch_st"),
     ("DIE", "cfxf_die"),
     ("SALUTE", "cfxf_salute"),
-    ("BOW", "cfxf_bow"),
 )
 # The faces read: those of the player races (race codes ending in 01) numbered up to 104, which are the faces
 # players wear (the clans wearing the models 100 above their face number included) and the NPC faces 91 and 92

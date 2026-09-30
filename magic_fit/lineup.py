@@ -8,23 +8,35 @@ way. Lining it up with the body (the devkit's Mannequin) gives refitting a place
 and pose, with its joints on the body's joints.
 
 Both skeletons are reduced to the same parts: the torso (pelvis, spine, chest, breasts...), the neck and
-head, and per side the clavicle, upper arm, forearm, hand, thigh, shin and foot. Bones are sorted into
-parts by their names, as the common naming schemes spell them (Unity and VRChat, Mixamo, Unreal, 3ds Max
-Biped, Rigify, DAZ, MMD, The Sims, FFXIV...); bones whose names say nothing (jiggle, skirt, tail bones...)
-join their parent's part. A part's joint is the head of its main bone, the one the next part hangs from.
-A model without a usable armature is sorted by the names of its vertex groups instead, and its joints are
-estimated from its weights, where one part's weight hands over to the next. When the names say nothing at
-all (bone_00, bone_01...), the groups are sorted by how they overlap and where they lie.
+head, and per side the clavicle, upper arm, forearm, hand, thigh, shin and foot, and three segments of
+each finger. Bones are sorted into parts by their names, as the common naming schemes spell them (Unity
+and VRChat, Mixamo, Unreal, 3ds Max Biped, Rigify, DAZ, MMD, The Sims, FFXIV..., and The Sims' names hashed,
+bone_1b82d8b2); bones whose names say nothing (jiggle, skirt, tail bones...) join their parent's part. A
+finger's bones are numbered from the hand out. A part's joint is the head of its main bone, the one the next
+part hangs from. A model without a usable armature is sorted by the names of its vertex groups instead, and
+its joints are estimated from its weights, where one part's weight hands over to the next. When the names
+say nothing at all (bone_00, bone_01...), the groups are sorted by how they overlap and where they lie on
+either side of the model's midline.
 
 Then, from the torso out:
 
 - The torso turns so its hips and shoulders face the body's way, scales so its shoulders are as high
-  above its hips as the body's are, and moves onto the body's hips.
-- Each limb segment turns about its joint, the least it takes to point the way the body's does, and
-  stretches along its length (not in girth) so its end lands on the body's next joint. Without
-  stretching, it keeps its length (scaled with the torso) and only turns.
-- Hands follow the forearms. Feet and the head keep their angle to the torso, so heels stay heels and
-  head pieces stay upright.
+  above its hips as the body's are, and moves onto the body's hips. Half a body (a top without hips, a
+  bottom without shoulders) stands upright like the body, is sized by its arms or legs, and moves onto the
+  body's shoulders or hips.
+- Each other part starts where the part above leaves its joint and turns about it, the least it takes to
+  point the way the body's does: limb segments at the next joint, hands at the knuckles, each finger
+  segment along the body's finger, which straightens curled fingers (or, where the body has no such
+  finger, along the finger's first segment).
+- The neck and head turn and move with the torso: rigs put those joints anywhere from the skull's base to
+  the jaw, so matching them would stretch necks for nothing. Clavicles turn with the torso too, since its
+  scale already puts the shoulders at the body's height, and rigs start them anywhere from the breastbone
+  to the side of the neck. Feet keep their angle to the torso, so heels stay heels.
+- With Stretch Limbs, each clavicle and limb segment then stretches lengthwise (not in girth) until its end
+  lands on the body's next joint: its points slide along, easing in from its joint (`ramp`), rather than
+  the segment being scaled. So the stretch changes smoothly where one segment's weight hands over to the
+  next, and nothing past a segment's end stretches on. Without it, segments keep their length (scaled
+  with the torso) and only turn.
 
 Every point then moves by the blend of its parts' moves, weighted by its vertex group weights, the way an
 armature bends a mesh (linear blend skinning).
@@ -42,6 +54,7 @@ import re
 
 import numpy as np
 from mathutils.bvhtree import BVHTree
+from mathutils.kdtree import KDTree
 
 from . import resizing
 
@@ -49,13 +62,22 @@ TORSO, NECK, HEAD = "torso", "neck", "head"
 SIDES = ("l", "r")
 ARM = ("clavicle", "upperarm", "forearm", "hand")
 LEG = ("thigh", "shin", "foot")
+FINGERS = ("thumb", "index", "middle", "ring", "little")
+# Segments per finger, from the hand out; a finger's bones past the third join the third.
+DIGITS = 3
 
 
 def part_name(kind, side=None):
     return kind if side is None else "{:s}_{:s}".format(kind, side)
 
 
-PARTS = (TORSO, NECK, HEAD) + tuple(part_name(kind, side) for side in SIDES for kind in ARM + LEG)
+def digit_name(finger, segment, side):
+    """Part of segment ``segment`` (1 to DIGITS, from the hand out) of a finger: "index2_l"."""
+    return part_name("{:s}{:d}".format(finger, segment), side)
+
+
+PARTS = (TORSO, NECK, HEAD) + tuple(part_name(kind, side) for side in SIDES for kind in ARM + LEG) + tuple(
+    digit_name(finger, segment, side) for side in SIDES for finger in FINGERS for segment in range(1, DIGITS + 1))
 PART_INDEX = {part: index for index, part in enumerate(PARTS)}
 # The part each part hangs from.
 PARENT = {NECK: TORSO, HEAD: NECK}
@@ -63,19 +85,58 @@ for _side in SIDES:
     for _chain in (ARM, LEG):
         _names = (TORSO,) + tuple(part_name(kind, _side) for kind in _chain)
         PARENT.update(zip(_names[1:], _names[:-1]))
-# Segments reaching from their joint to the next part's; the others (hands, feet, head) end in themselves.
+    for _finger in FINGERS:
+        _names = (part_name("hand", _side),) + tuple(digit_name(_finger, k, _side) for k in range(1, DIGITS + 1))
+        PARENT.update(zip(_names[1:], _names[:-1]))
+# Segments reaching from their joint to the next part's; the others (hands, feet, head, fingertips) end in
+# themselves.
 NEXT = {NECK: HEAD}
 for _side in SIDES:
     for _a, _b in (("clavicle", "upperarm"), ("upperarm", "forearm"), ("forearm", "hand"), ("thigh", "shin"),
                    ("shin", "foot")):
         NEXT[part_name(_a, _side)] = part_name(_b, _side)
-# Parts that keep their angle to the torso instead of turning with the part they hang from.
-UPRIGHT = {HEAD, "foot_l", "foot_r"}
+    for _finger in FINGERS:
+        for _k in range(1, DIGITS):
+            NEXT[digit_name(_finger, _k, _side)] = digit_name(_finger, _k + 1, _side)
+# The finger segment parts, and which finger each is (part -> (finger, segment, side)).
+DIGIT_PARTS = {digit_name(finger, segment, side): (finger, segment, side)
+               for side in SIDES for finger in FINGERS for segment in range(1, DIGITS + 1)}
+# Parts that keep their angle to the torso instead of turning with the part they hang from: rigs put the
+# neck and head joints in different places (the head's at the skull's base or up at the jaw), so a line
+# between them says nothing about the pose. Feet keep their angle so heels stay heels.
+UPRIGHT = {NECK, HEAD, "foot_l", "foot_r"}
+# Parts that turn with the torso: the torso's scale already puts the shoulders at the body's height, and
+# rigs start clavicles anywhere from the breastbone to the side of the neck.
+SHOULDERS = {"clavicle_l", "clavicle_r"}
+# Segments Stretch Limbs stretches: the others keep the model's proportions.
+STRETCHED = {part_name(kind, side) for side in SIDES
+             for kind in ("clavicle", "upperarm", "forearm", "thigh", "shin")}
 # Parts a model needs, by name or weights, to be lined up by its bones or groups.
 KEY_PARTS = ("thigh_l", "thigh_r", "upperarm_l", "upperarm_r")
+# The parts of each half of a body, fingers aside: what a top or a bottom lacks by being one.
+HALF_PARTS = {"upper": {NECK, HEAD} | {part_name(kind, side) for side in SIDES for kind in ARM},
+              "lower": {part_name(kind, side) for side in SIDES for kind in LEG}}
+# Half a body as sized, in torso lengths: a bottom reaches this far above its hips (a waistband, up to a
+# high-necked gown's collar, not a head), a top at most this far below its shoulders (see `_half_fits`).
+HALF_ABOVE = (0.1, 1.4)
+HALF_BELOW = 1.25
 
-# A limb segment stretches at most by this factor (or shrinks by its inverse) to reach the next joint.
+# A limb segment stretches at most by this factor (or shrinks by its inverse) to reach the next joint...
 MAX_STRETCH = 2.0
+# ...and a clavicle's end moves off its line by at most this angle (degrees) to reach the shoulder.
+MAX_SHEAR = 35.0
+# A stretched segment's stretch fades in over this share of its length from each end (see `ramp`).
+RAMP_EASE = 0.2
+# An armature's bones sit at one spot when their heads spread over at most this share of the model's size;
+# they're then put where their vertex groups are, at least this long (in torso lengths).
+BONE_SPOT = 0.001
+BONE_LEAST = 0.03
+# Unnamed groups: a hand's branch is its thumb when it starts at most this share as far from the wrist as
+# the other branches do...
+FINGER_THUMB = 0.75
+# ...and a side's only limb (a top's arm, a bottom's leg) is a leg when it drops at least this share of how
+# far it reaches: arms in an A-pose drop about 0.7 of it, legs nearly all.
+LEG_DROP = 0.85
 # Refining joints against the body: body vertices this far around a joint (in torso lengths, from the hips
 # to the shoulders)...
 REFINE_RADIUS = 0.19
@@ -90,6 +151,10 @@ REFINE_SHRINK = 0.8
 REFINE_ROUNDS = 3
 # Body vertices sampled around each joint at most.
 REFINE_SAMPLES = 600
+# The joints refined: those of the limbs. The others don't move the model's surface (the neck and head
+# turn and move with the torso; a clavicle only stretches toward its shoulder), or are too small.
+REFINED = {part_name(kind, side) for side in SIDES
+           for kind in ("upperarm", "forearm", "hand", "thigh", "shin", "foot")}
 
 
 class LineUpError(Exception):
@@ -110,7 +175,7 @@ _KIND_WORDS = (
               "wrist", "palm", "carpal", "metacarpal", "metacarpals")),
     ("forearm", ("forearm", "lowerarm", "loarm", "elbow", "ulna", "forearmbend", "forearmtwist")),
     ("upperarm", ("upperarm", "uparm", "arm", "bicep", "biceps", "becep", "tricep", "triceps", "brachi",
-                  "brochi", "deltoid", "humerus", "shldr", "shldrbend", "shldrtwist")),
+                  "brochi", "deltoid", "humerus", "shldr", "shldrbend", "shldrtwist", "shouldertwist")),
     ("clavicle", ("clavicle", "clav", "collar", "collarbone", "shoulder", "scapula", "trape", "trapezius")),
     ("thigh", ("thigh", "upleg", "upperleg", "femur", "thighbend", "thightwist")),
     ("shin", ("calf", "shin", "knee", "lowerleg", "loleg", "crus", "tibia")),
@@ -155,6 +220,40 @@ _JP_KINDS = (("足首", "foot"), ("つま先", "foot"), ("手首", "hand"), ("�
              ("ひじ", "forearm"), ("肘", "forearm"), ("腕", "upperarm"), ("肩", "clavicle"), ("ひざ", "shin"),
              ("膝", "shin"), ("足", "thigh"), ("首", "neck"), ("頭", "head"), ("上半身", "torso"), ("下半身", "torso"),
              ("腰", "torso"), ("胸", "torso"))
+# Fingers: words of most rigs, FFXIV's second word, MMD's names, and 3ds Max Biped's numbers (Finger0 is
+# the thumb, Finger12 the index finger's third bone).
+_FINGER_WORDS = (("thumb", ("thumb",)), ("index", ("index", "forefinger", "pointer")),
+                 ("middle", ("middle", "mid")), ("ring", ("ring",)), ("little", ("little", "pinky", "pinkie")))
+_XIV_FINGERS = {"oya": "thumb", "hito": "index", "naka": "middle", "kusu": "ring", "ko": "little"}
+_JP_FINGERS = (("親指", "thumb"), ("人指", "index"), ("人差指", "index"), ("中指", "middle"), ("薬指", "ring"),
+               ("小指", "little"))
+# Bones of the palm, though some rigs name them after a finger (index_metacarpal_l).
+_PALM_WORDS = ("metacarpal", "metacarpals", "carpal", "palm")
+# The Sims 4's bones, whose meshes store only a 32-bit FNV-1 hash of each name in lower case: imports that
+# couldn't look the names up call the groups "bone_" and the hash in hex (XIV Port Studio's .glb).
+_SIMS_BONES = ("b__Pelvis__", "b__Spine0__", "b__Spine1__", "b__Spine2__", "b__Neck__", "b__Head__") + tuple(
+    "b__{:s}_{:s}__".format(side, bone) for side in "LR" for bone in (
+        "Clavicle", "UpperArm", "ShoulderTwist", "Elbow", "ForeArm", "ForeArmTwist", "Hand", "Thigh", "ThighTwist",
+        "Calf", "Foot", "Thumb0", "Thumb1", "Thumb2", "Index0", "Index1", "Index2", "Mid0", "Mid1", "Mid2", "Ring0",
+        "Ring1", "Ring2", "Pinky0", "Pinky1", "Pinky2")) + ("b__CAS_L_Breast__", "b__CAS_R_Breast__")
+
+
+def _fnv1(text):
+    """32-bit FNV-1 hash of ``text``, as The Sims 4 hashes bone names."""
+    value = 0x811C9DC5
+    for byte in text.encode("ascii"):
+        value = (value * 0x01000193) & 0xFFFFFFFF
+        value ^= byte
+    return value
+
+
+_SIMS_HASHES = {"{:08x}".format(_fnv1(name.lower())): name for name in _SIMS_BONES}
+
+
+def unhashed(name):
+    """A bone name, with The Sims 4's for a group named after the hash of one ("bone_1b82d8b2")."""
+    match = re.fullmatch(r"bone_([0-9A-Fa-f]{8})", name)
+    return _SIMS_HASHES.get(match.group(1).lower(), name) if match else name
 
 
 def words(name):
@@ -187,6 +286,7 @@ def _kind_of(tokens):
 def classify(name):
     """(kind, side) of a bone name: kind is one of the part kinds, "leg" (thigh or shin, depending on the
     other bones) or None; side is "l", "r" or None."""
+    name = unhashed(name)
     jp_side = next((side for mark, side in _JP_SIDES if mark in name), None)
     for mark, kind in _JP_KINDS:
         if mark in name:
@@ -194,6 +294,8 @@ def classify(name):
     tokens = words(name)
     if not tokens:
         return None, jp_side
+    if tokens[0] == "b":
+        tokens = ["middle" if token == "mid" else token for token in tokens]  # The Sims' b__L_Mid0__
     raw = re.sub(r"[^0-9A-Za-z]+", " ", name).lower().split()
     # FFXIV: j_ude_a_l, n_hizasoubi_r...
     if raw[0] in ("j", "n", "iv", "ya") and len(raw) > 1:
@@ -219,6 +321,26 @@ def classify(name):
     if kind == TORSO and side is not None and any(token in ("hip", "hips") for token in rest):
         kind = "thigh"  # LeftHip, Hip_L: the thigh bone
     return kind, side
+
+
+def finger_of(name):
+    """The finger ("thumb", "index", "middle", "ring", "little") a hand bone's name says it belongs to, or
+    None (the palm, or a name that doesn't say)."""
+    name = unhashed(name)
+    for mark, finger in _JP_FINGERS:
+        if mark in name:
+            return finger
+    raw = re.sub(r"[^0-9A-Za-z]+", " ", name).lower().split()
+    if len(raw) > 1 and raw[0] in ("j", "n", "iv", "ya") and raw[1] in _XIV_FINGERS:
+        return _XIV_FINGERS[raw[1]]
+    tokens = words(name)
+    if any(token in _PALM_WORDS for token in tokens):
+        return None
+    for finger, keys in _FINGER_WORDS:
+        if any(key in tokens for key in keys):
+            return finger
+    match = re.search(r"finger([0-4])", name.lower())
+    return FINGERS[int(match.group(1))] if match else None
 
 
 # -----------------------------------------------------------------------------
@@ -270,7 +392,60 @@ def bone_parts(names, parents):
 
     for name in names:
         part_of(name)
-    return parts
+    return _split_fingers(names, parts, parents)
+
+
+def _split_fingers(names, parts, parents):
+    """Move a hand's bones named after a finger to that finger's segments, numbered by how many of the
+    finger's bones are above them. Bones below a finger's that say nothing go with it."""
+    hands = {part_name("hand", side) for side in SIDES}
+    fingers = {name: finger_of(name) for name in names if parts.get(name) in hands}
+    found = {}
+
+    def digit(name):
+        """(finger, segment) of a hand bone, or None for the palm."""
+        if name not in found:
+            parent = parents.get(name)
+            above = digit(parent) if parent in fingers else None
+            own = fingers[name]
+            if own is None:
+                found[name] = above
+            elif above is not None and above[0] == own:
+                found[name] = (own, min(above[1] + 1, DIGITS))
+            else:
+                found[name] = (own, 1)
+        return found[name]
+
+    result = dict(parts)
+    for name in fingers:
+        value = digit(name)
+        if value is not None:
+            result[name] = digit_name(value[0], value[1], parts[name][-1])
+    return result
+
+
+def split_finger_groups(parts, points, weights):
+    """Move a hand's vertex groups named after a finger (``parts``: group name -> part; ``weights`` over
+    the groups of ``points``) to that finger's segments. Without an armature to tell which hangs from
+    which, they're numbered by how far their weights lie from the rest of the hand."""
+    result = dict(parts)
+    centroids = weights.centroids(points)
+    mass = weights.mass()
+    index = {name: k for k, name in enumerate(weights.names)}
+    for side in SIDES:
+        hand = part_name("hand", side)
+        groups = [name for name, part in parts.items() if part == hand and name in index and mass[index[name]] > 0]
+        fingers = {name: finger_of(name) for name in groups}
+        palm = [index[name] for name in groups if fingers[name] is None] or [index[name] for name in groups]
+        if not palm or not any(fingers.values()):
+            continue
+        middle = np.average(centroids[palm], axis=0, weights=mass[palm])
+        for finger in FINGERS:
+            own = sorted((name for name in groups if fingers[name] == finger),
+                         key=lambda name: np.linalg.norm(centroids[index[name]] - middle))
+            for rank, name in enumerate(own):
+                result[name] = digit_name(finger, min(rank + 1, DIGITS), side)
+    return result
 
 
 def main_bones(parts, parents):
@@ -332,6 +507,13 @@ def has_key_parts(parts, count=3):
     """Whether ``parts`` (name -> part) include at least ``count`` of the thighs and upper arms."""
     found = set(parts.values())
     return sum(part in found for part in KEY_PARTS) >= count
+
+
+def has_half(parts):
+    """Whether ``parts`` (name -> part) are enough to line up by: three of the thighs and upper arms, or at
+    least both of either, half a body (a top or a bottom)."""
+    found = set(parts.values())
+    return has_key_parts(parts) or {"thigh_l", "thigh_r"} <= found or {"upperarm_l", "upperarm_r"} <= found
 
 
 # -----------------------------------------------------------------------------
@@ -483,23 +665,19 @@ def _polyline_lengths(points):
     return np.concatenate(([0.0], np.cumsum(steps)))
 
 
-def _best_cuts(positions, wanted):
-    """Increasing indices into ``positions``, one per ``wanted`` value (increasing), matching them best
-    (least squares)."""
-    best = None
-
-    def search(start, chosen, cost):
-        nonlocal best
-        k = len(chosen)
-        if k == len(wanted):
-            if best is None or cost < best[0]:
-                best = (cost, list(chosen))
-            return
-        for i in range(start, len(positions)):
-            search(i + 1, chosen + [i], cost + (positions[i] - wanted[k]) ** 2)
-
-    search(0, [], 0.0)
-    return None if best is None else best[1]
+def _arm_cuts(along, lengths):
+    """Where an arm's clavicle and upper arm end, as indices into ``along`` (distances along the arm to
+    where its groups hand over, the last at the wrist), from the body's arm (``lengths``: distances along
+    it to its upper arm, forearm and hand joints). The elbow is where it lies as far along as the body's;
+    the shoulder where the upper arm is as long for the forearm as the body's. Rigs start clavicles at very
+    different places, so their share of the arm says little. Returns [shoulder, elbow] or None."""
+    if len(along) < 3:
+        return None
+    share = along[1:-1] / max(along[-1], 1e-12)
+    elbow = 1 + int(np.argmin(np.abs(share - lengths[2] / lengths[3])))
+    upper = (along[-1] - along[elbow]) * (lengths[2] - lengths[1]) / max(lengths[3] - lengths[2], 1e-12)
+    shoulder = int(np.argmin(np.abs(along[elbow] - along[:elbow] - upper)))
+    return [shoulder, elbow]
 
 
 class _GroupTree:
@@ -549,6 +727,71 @@ class _GroupTree:
         return path[::-1]
 
 
+def _label_fingers(tree, hand, before, members, side):
+    """Finger segments among an arm's groups (``members``) hanging from its hand group ``hand``, which
+    hangs from group ``before`` (or None). Each branch off the hand is a finger, its groups numbered from
+    the hand out. The thumb is the branch starting nearest the wrist, clearly nearer than the others; the
+    others are named across the knuckles from the thumb's side, index to little. Without a thumb to tell
+    which side that is, fingers stay with the hand. Returns group -> part."""
+    wrist = tree.handover(before, hand) if before is not None else tree.centroids[hand]
+    branches = []
+    for child in tree.children[hand]:
+        if child not in members:
+            continue
+        chain = [child]
+        while True:
+            below = [group for group in tree.children[chain[-1]] if group in members]
+            if not below:
+                break
+            chain.append(max(below, key=lambda group: tree.mass[group]))
+        branches.append((chain, tree.handover(hand, child)))
+    if len(branches) < 3:
+        return {}
+    reach = np.array([np.linalg.norm(base - wrist) for _chain, base in branches])
+    thumb = int(np.argmin(reach))
+    rest = [k for k in range(len(branches)) if k != thumb]
+    if reach[thumb] >= FINGER_THUMB * np.median(reach[rest]):
+        return {}
+    bases = np.array([branches[k][1] for k in rest])
+    across = np.linalg.svd(bases - bases.mean(axis=0), full_matrices=False)[2][0]
+    if np.dot(branches[thumb][1] - bases.mean(axis=0), across) > 0.0:
+        across = -across
+    rest.sort(key=lambda k: float(np.dot(branches[k][1], across)))
+    result = {}
+    for finger, k in zip(FINGERS, [thumb] + rest):
+        for segment, group in enumerate(branches[k][0]):
+            result[group] = digit_name(finger, min(segment + 1, DIGITS), side)
+    return result
+
+
+def _mirror_axis(points, samples=1000, step=5.0):
+    """The horizontal direction from a model's right to its left (sign aside) and where its midline lies
+    along it: the one, to within ``step`` degrees, the model is mirrored across best for how far it spreads
+    along it. A body is mirrored left to right, not front to back, even where it spreads about as far front
+    to back (two legs close together); where it isn't quite mirrored (a hand held differently), it spreads
+    wider left to right. Returns (unit 2D vector, position of the midline along it)."""
+    flat = points[:, :2]
+    chosen = points[np.linspace(0, len(points) - 1, min(samples, len(points))).astype(np.int64)]
+    tree = KDTree(len(points))
+    for index, point in enumerate(points):
+        tree.insert(point, index)
+    tree.balance()
+    best = None
+    for angle in np.radians(np.arange(0.0, 180.0, step)):
+        axis = np.array((np.cos(angle), np.sin(angle)))
+        low, high = np.percentile(flat @ axis, (0.5, 99.5))
+        midline = (low + high) / 2.0
+        mirrored = chosen.copy()
+        mirrored[:, :2] -= 2.0 * np.outer(chosen[:, :2] @ axis - midline, axis)
+        # On average: legs, round as they are, mirror front to back about as well as across; the rest tells.
+        mismatch = np.mean([tree.find(point)[2] for point in mirrored]) / max(high - low, 1e-6)
+        if best is None or mismatch < best[0]:
+            best = (mismatch, axis, midline)
+    _mismatch, axis, midline = best
+    sign = np.sign(axis[0]) if abs(axis[0]) >= abs(axis[1]) else np.sign(axis[1])
+    return axis * sign, midline * sign
+
+
 def label_anonymous(points, weights, target_joints):
     """Part of each vertex group when their names say nothing (bone_00, bone_01...), from how the groups
     overlap and where they lie. The model is taken to stand upright (+Z) with its left on +X, or on +Y
@@ -559,18 +802,33 @@ def label_anonymous(points, weights, target_joints):
     if alive.sum() < 3:
         return {name: TORSO for name in names}
 
-    # Sideways: the horizontal direction the groups spread the most along (arms, shoulders, hips).
-    flat = centroids[alive][:, :2]
-    middle = np.average(flat, axis=0, weights=mass[alive])
-    spread = np.cov((flat - middle).T, aweights=mass[alive])
-    lateral = np.linalg.eigh(spread)[1][:, -1]
-    lateral = lateral * (np.sign(lateral[0]) if abs(lateral[0]) >= abs(lateral[1]) else np.sign(lateral[1]))
-    across = (centroids[:, :2] - middle) @ lateral
+    # Sideways: the horizontal direction the model spreads the most along (arms, shoulders, hips), and its
+    # midline, both from where its points are rather than how much weight each group has: a skirt weighted
+    # to one leg would pull a weighted midline off the body's.
+    lateral, midline = _mirror_axis(points[np.unique(weights.vertex)])
+    across = centroids[:, :2] @ lateral - midline
     heights = centroids[:, 2]
-    height = max(np.ptp(heights[alive]), 1e-6)
-    central = alive & (np.abs(across) < 0.03 * height)
+    # The model's size: how far its groups spread, whichever way (half a body spreads less high than wide).
+    size = max(np.ptp(centroids[alive], axis=0).max(), 1e-6)
+    # In the middle: groups with a fifth of their own points well to each side of the midline (a pelvis whose
+    # weight an uneven skirt pulls to one side still does), and those lying there that don't keep to one side
+    # of it (a leg whose skirt bunches toward the middle does).
+    straddles = np.zeros(len(names), dtype=bool)
+    one_sided = np.zeros(len(names), dtype=bool)
+    for group in np.flatnonzero(alive):
+        own = tree.column(group) >= 0.5
+        if own.sum() >= 3:
+            spread = points[own][:, :2] @ lateral - midline
+            low, high = np.percentile(spread, (20, 80))
+            straddles[group] = low < -0.02 * size and high > 0.02 * size
+            low, high = np.percentile(spread, (5, 95))
+            one_sided[group] = high < 0.005 * size or low > -0.005 * size
+    central = alive & (straddles | (~one_sided & (np.abs(across) < 0.03 * size)))
     if not central.any():
         central = alive & (np.abs(across) <= np.abs(across[alive]).min() + 1e-9)
+    # No group hangs from one on the other side: what joins them (a skirt weighted to both legs) isn't a limb.
+    off = alive & ~central
+    tree.overlap[off[:, None] & off[None, :] & (across[:, None] * across[None, :] < 0.0)] = 0.0
     # The tree hangs from the heaviest group in the middle (the chest or pelvis), so limbs run outward.
     tree.grow(int(np.argmax(np.where(central, mass, -1.0))))
 
@@ -593,7 +851,6 @@ def label_anonymous(points, weights, target_joints):
         components.append(members)
 
     parts = {}
-    trunk_height = np.average(heights[central], weights=mass[central])
     limbs, bits = [], []
     for members in components:
         root = next((g for g in members if tree.parent[g] < 0 or central[tree.parent[g]]), members[0])
@@ -602,8 +859,9 @@ def label_anonymous(points, weights, target_joints):
         extent = max(np.linalg.norm(centroids[g] - base) for g in members)
         side = "l" if np.average(across[members], weights=mass[members]) > 0.0 else "r"
         lowest = min(heights[g] for g in members)
-        (limbs if extent >= 0.2 * height else bits).append((members, root, attach, side, base[2], lowest))
-    # Per side, the leg is the limb reaching lowest, the arm the other one hanging from highest up.
+        (limbs if extent >= 0.2 * size else bits).append((members, root, attach, side, base[2], lowest, extent))
+    # Per side, the leg is the limb reaching lowest, the arm the other one hanging from highest up. A side with
+    # only one (a top or a bottom) has a leg when it hangs about straight down.
     arms, legs = {}, {}
     for side in SIDES:
         mine = [limb for limb in limbs if limb[3] == side]
@@ -611,7 +869,8 @@ def label_anonymous(points, weights, target_joints):
             legs[side] = min(mine, key=lambda limb: limb[5])
             arms[side] = max((limb for limb in mine if limb is not legs[side]), key=lambda limb: limb[4])
         elif len(mine) == 1:
-            (arms if mine[0][4] > trunk_height else legs)[side] = mine[0]
+            _members, _root, _attach, _side, base_height, lowest, extent = mine[0]
+            (legs if base_height - lowest > LEG_DROP * extent else arms)[side] = mine[0]
 
     def fill(members, fallback):
         """Groups of a limb off its main chain take the part of the group they hang from."""
@@ -629,7 +888,7 @@ def label_anonymous(points, weights, target_joints):
         return _polyline_lengths(np.array([target_joints[part] for part in chain_parts]))
 
     shoulders, spans = [], []
-    for side, (members, root, attach, _side, _base, _lowest) in arms.items():
+    for side, (members, root, attach, _side, _base, _lowest, _extent) in arms.items():
         inside = set(members)
         chain = tree.chain(root, inside)
         order = [part_name(kind, side) for kind in ARM]
@@ -645,7 +904,7 @@ def label_anonymous(points, weights, target_joints):
             points_ = [start] + [tree.handover(a, b) for a, b in zip(arm, arm[1:])]
             points_.append(tree.handover(arm[-1], chain[hand]))
             along = _polyline_lengths(np.array(points_))
-            cuts = _best_cuts(along[:-1] / max(along[-1], 1e-12), list(lengths[1:3] / lengths[3]))
+            cuts = _arm_cuts(along, lengths)
             if cuts is not None:
                 bounds = cuts + [len(arm)]
                 for kind, (first, end) in zip(ARM[:3], zip([0] + bounds[:-1], bounds)):
@@ -656,12 +915,15 @@ def label_anonymous(points, weights, target_joints):
         for group in chain[hand:]:
             parts[names[group]] = order[3]
         fill(members, order[1])
+        wrist = chain[hand - 1] if hand > 0 else (attach if attach >= 0 else None)
+        for group, part in _label_fingers(tree, chain[hand], wrist, inside, side).items():
+            parts[names[group]] = part
 
     # The model's size from the arms (shoulder to wrist), else from the legs themselves.
     scale = None
     if spans:
         scale = float(np.mean([model / max(body, 1e-12) for model, body in spans]))
-    for side, (members, root, attach, _side, _base, _lowest) in legs.items():
+    for side, (members, root, attach, _side, _base, _lowest, _extent) in legs.items():
         inside = set(members)
         chain = tree.chain(root, inside)
         order = [part_name(kind, side) for kind in LEG]
@@ -675,6 +937,8 @@ def label_anonymous(points, weights, target_joints):
                 lowest = min(tree.points[tree.column(g) > 0.5][:, 2].min(initial=centroids[g][2]) for g in chain)
                 scale = (start[2] - lowest) / max(target_joints[order[0]][2], 1e-12)
             knee = 1 + int(np.argmin(np.abs(along[1:] - lengths[1] * scale)))
+            if along[knee] < 0.6 * lengths[1] * scale:
+                knee = len(chain)  # a stub (a top's shorts) ending well above where a knee would be
             ankle = None
             if knee + 1 < len(along):
                 k = knee + 1 + int(np.argmin(np.abs(along[knee + 1:] - lengths[2] * scale)))
@@ -697,7 +961,7 @@ def label_anonymous(points, weights, target_joints):
         for group in above[1:]:
             parts[names[group]] = HEAD
     # Bits (breasts, ears...) go with what they hang from; anything else left (wings, say) with the torso.
-    for members, _root, attach, _side, _base, _lowest in bits:
+    for members, _root, attach, _side, _base, _lowest, _extent in bits:
         for group in members:
             parts[names[group]] = parts.get(names[attach], TORSO) if attach >= 0 else TORSO
     for name in names:
@@ -744,12 +1008,10 @@ def swing(a, b):
     return np.eye(3) + k + k @ k / (1.0 + c)
 
 
-def affine(pivot, target, rotation, scale, direction=None, stretch=1.0):
-    """4x4 matrix of x -> target + scale * rotation (I + (stretch - 1) d d^T) (x - pivot): stretched
-    along ``direction`` d, turned, scaled and moved from ``pivot`` to ``target``."""
+def affine(pivot, target, rotation, scale):
+    """4x4 matrix of x -> target + scale * rotation (x - pivot): turned, scaled and moved from ``pivot``
+    to ``target``."""
     linear = scale * rotation
-    if direction is not None and stretch != 1.0:
-        linear = linear @ (np.eye(3) + (stretch - 1.0) * np.outer(direction, direction))
     matrix = np.eye(4)
     matrix[:3, :3] = linear
     matrix[:3, 3] = target - linear @ pivot
@@ -774,18 +1036,52 @@ def _mid(joints, a, b):
 
 
 class Solution:
-    """How each part moves (``transforms``: part -> 4x4 world matrix; ``rotations``: part -> 3x3), and
-    what it took: the ``scale`` of the whole model, the ``stretches`` of limb segments, how far the torso
-    turned about the vertical (``turn``, degrees), and the parts only one side has (``missing``)."""
+    """How each part moves: it turns and scales about its joint (``transforms``: part -> 4x4 world matrix,
+    whose turn is in ``rotations``: part -> 3x3) and, stretched, slides along its length (``ramps``: part
+    -> (joint, axis, correction), see `move`). And what it took: the ``scale`` of the whole model, each
+    stretched segment's length factor (``stretches``), how far the torso turned about the vertical
+    (``turn``, degrees), how many fingers turned to point like the body's (``fingers``), the parts only one
+    side has (``missing``), and which half of a body the model is when it's only that ("upper" or "lower",
+    ``half``; see `solve`)."""
 
     def __init__(self):
         self.transforms = {}
         self.rotations = {}
+        self.ramps = {}
         self.stretches = {}
         self.scale = 1.0
         self.turn = 0.0
+        self.fingers = 0
         self.missing = []
+        self.half = None
         self.torso_length = 0.0
+
+    def move(self, part, points):
+        """``points`` (world, one or n x 3) moved by ``part``: turned and scaled by its transform, then, if
+        stretched, slid by its correction as far as they lie along the part (`ramp`): not at all at its
+        joint, fully at the next part's. So its end lands where the next part starts, points past it slide
+        along instead of stretching on, and where the weights of two parts blend, the stretch doesn't
+        change abruptly."""
+        points = np.asarray(points, dtype=np.float64)
+        moved = apply_matrix(self.transforms[part], points)
+        stretch = self.ramps.get(part)
+        if stretch is not None:
+            joint, axis, correction = stretch
+            moved = moved + np.multiply.outer(ramp((points - joint) @ axis / np.dot(axis, axis)), correction)
+        return moved
+
+
+def ramp(along):
+    """Share of a stretched segment's correction a point gets, by how far along the segment it lies (0 at
+    its joint, 1 at the next part's): none before, all beyond, and in between easing in and out over
+    RAMP_EASE of the length at each end. The segment then stretches evenly in its middle and not at all
+    at its joints, so a squashed thigh doesn't crease against a stretched shin."""
+    along = np.clip(along, 0.0, 1.0)
+    ease = RAMP_EASE
+    curve = 1.0 / (2.0 * ease * (1.0 - ease))
+    middle = (along - ease / 2.0) / (1.0 - ease)
+    return np.where(along < ease, along * along * curve,
+                    np.where(along > 1.0 - ease, 1.0 - (1.0 - along) ** 2 * curve, middle))
 
 
 # The top of the torso: between the upper arms' joints, else the clavicles', else the neck's.
@@ -804,73 +1100,190 @@ def torso_ends(joints, other=None):
     return hips, None
 
 
-def solve(source, target, stretch=True):
-    """How to move each part of a model whose joints are ``source`` (part -> world position) so it lines
-    up with a body whose joints are ``target``. Raises LineUpError without hips or shoulders."""
-    result = Solution()
-    ends = (torso_ends(source, target), torso_ends(target, source))
-    for (hips, top), what in zip(ends, ("model", "body")):
-        if hips is None:
-            raise LineUpError("Found no hips (thigh bones or groups) in the {:s}".format(what))
-        if top is None:
-            raise LineUpError("Found no shoulders or neck in the {:s}".format(what))
-    (hips_s, top_s), (hips_t, top_t) = ends
-    frames = []
-    for joints, hips, top in ((source, hips_s, top_s), (target, hips_t, top_t)):
-        lateral = _unit(joints["thigh_l"] - joints["thigh_r"])
-        for a, b in (("upperarm_l", "upperarm_r"), ("clavicle_l", "clavicle_r")):
+def _aim(joints, part, tips=None, other=None):
+    """Where ``part`` of a skeleton (``joints``) points, as a vector from its joint, or None: at the next
+    part's joint, else at its tip (``tips``: part -> point); a hand at its knuckles (the middle of its
+    fingers' first joints, thumb left out, of the fingers ``other`` has too); a finger's last segment
+    without a tip on along the segment before it."""
+    joint = joints[part]
+    after = NEXT.get(part)
+    if after in joints:
+        return joints[after] - joint
+    if tips is not None and part in tips:
+        return tips[part] - joint
+    if part in (part_name("hand", side) for side in SIDES):
+        firsts = [digit_name(finger, 1, part[-1]) for finger in FINGERS[1:]]
+        knuckles = [joints[first] for first in firsts if first in joints and (other is None or first in other)]
+        return np.mean(knuckles, axis=0) - joint if len(knuckles) >= 2 else None
+    if part in DIGIT_PARTS and PARENT[part] in joints:
+        return joint - joints[PARENT[part]]
+    return None
+
+
+def _stretch(result, part, joint, end, goal):
+    """Stretch ``part`` (its joint and the next part's, ``joint`` and ``end``, in the model) so its end
+    lands on ``goal``, or as close as MAX_STRETCH and MAX_SHEAR let it."""
+    matrix = result.transforms[part]
+    start, reach = apply_matrix(matrix, joint), apply_matrix(matrix, end)
+    length = max(np.linalg.norm(reach - start), 1e-12)
+    correction = goal - reach
+
+    def fits(share):
+        wanted = reach + share * correction - start
+        size = np.linalg.norm(wanted)
+        if not 1.0 / MAX_STRETCH <= size / length <= MAX_STRETCH:
+            return False
+        cosine = np.dot(wanted, reach - start) / max(size * length, 1e-24)
+        return cosine >= np.cos(np.radians(MAX_SHEAR)) - 1e-9
+
+    share = 1.0
+    if not fits(share):
+        low, high = 0.0, 1.0
+        for _step in range(30):
+            middle = (low + high) / 2.0
+            low, high = (middle, high) if fits(middle) else (low, middle)
+        share = low
+    correction = share * correction
+    result.ramps[part] = (np.array(joint, dtype=np.float64), end - joint, correction)
+    result.stretches[part] = float(np.linalg.norm(reach + correction - start) / length)
+
+
+# Half a body is as big as its arms (upper arms and forearms) or its legs (thighs) say: over whole bodies the
+# arms follow the torso's size within a few percent, far closer than the shoulders' or hips' width do.
+_ARM_SEGMENTS = (("upperarm", "forearm"), ("forearm", "hand"))
+_LEG_SEGMENTS = (("thigh", "shin"),)
+
+
+def _limb_scale(source, target, segments):
+    """How much bigger the body's limb segments (``segments``: pairs of part kinds, joint to joint) are than
+    the model's, over those both have, or None."""
+    model = body = 0.0
+    for side in SIDES:
+        for a, b in segments:
+            a, b = part_name(a, side), part_name(b, side)
             if all(part in source and part in target for part in (a, b)):
-                lateral = lateral + _unit(joints[a] - joints[b])
-                break
+                model += np.linalg.norm(source[b] - source[a])
+                body += np.linalg.norm(target[b] - target[a])
+    return body / model if model > 1e-9 else None
+
+
+def solve(source, target, stretch=True, tips=None):
+    """How to move each part of a model whose joints are ``source`` (part -> world position) so it lines
+    up with a body whose joints are ``target``; ``tips`` (part -> point) are where the model's segments
+    end that it lacks the next part of (see `segment_tips`). A model with shoulders but no hips (a top), or
+    hips but no shoulders (a bottom), is taken to stand upright like the body and sized by its arms or legs.
+    Raises LineUpError with neither, or without the arms or legs to size half a body by.
+
+    Each part starts where the part above puts its joint, and turns the least it takes to point the way
+    the body's does. Stretching then slides the end of each limb segment onto the body's next joint (see
+    `Solution.move`); one whose end the model lacks (a leg without a foot) stretches like the limb
+    segment above it. The neck, head and feet keep their angle to the torso, and clavicles turn with it."""
+    result = Solution()
+    (hips_s, top_s), (hips_t, top_t) = torso_ends(source, target), torso_ends(target, source)
+    if top_t is None:
+        top_t = torso_ends(target)[1]  # the model has no shoulders or neck at all (a bottom)
+    if hips_t is None:
+        raise LineUpError("Found no hips (thigh bones or groups) in the body")
+    if top_t is None:
+        raise LineUpError("Found no shoulders or neck in the body")
+    scale = None
+    if hips_s is None or top_s is None:
+        # Half a body (a top without hips, or a bottom without shoulders) stands upright like the body, as big as
+        # its arms or legs say, and lines up by the end it has.
+        if top_s is not None:
+            scale, result.half = _limb_scale(source, target, _ARM_SEGMENTS), "upper"
+        elif hips_s is not None:
+            scale, result.half = _limb_scale(source, target, _LEG_SEGMENTS), "lower"
+        if scale is None:
+            raise LineUpError("Found no hips (thigh bones or groups) in the model" if hips_s is None else
+                              "Found no shoulders or neck in the model")
+        if hips_s is None:
+            hips_s = top_s - (top_t - hips_t) / scale
+        else:
+            top_s = hips_s + (top_t - hips_t) / scale
+    frames = []
+    shoulders = next(((a, b) for a, b in (("upperarm_l", "upperarm_r"), ("clavicle_l", "clavicle_r"))
+                      if all(part in source and part in target for part in (a, b))), None)
+    for joints, hips, top in ((source, hips_s, top_s), (target, hips_t, top_t)):
+        lateral = np.zeros(3)
+        for pair in (("thigh_l", "thigh_r"), shoulders):
+            if pair is not None and all(part in source and part in target for part in pair):
+                lateral = lateral + _unit(joints[pair[0]] - joints[pair[1]])
+        if np.linalg.norm(lateral) < 1e-9:
+            raise LineUpError("Found no left and right in the model")
         frames.append(_frame(top - hips, lateral))
     torso_rotation = frames[1] @ frames[0].T
-    scale = np.linalg.norm(top_t - hips_t) / max(np.linalg.norm(top_s - hips_s), 1e-12)
+    if scale is None:
+        scale = np.linalg.norm(top_t - hips_t) / max(np.linalg.norm(top_s - hips_s), 1e-12)
     result.scale = float(scale)
     result.torso_length = float(np.linalg.norm(top_t - hips_t))
     forward = frames[0][:, 2]
     turned = torso_rotation @ forward
     result.turn = float(np.degrees(np.arctan2(forward[0] * turned[1] - forward[1] * turned[0],
                                               forward[0] * turned[0] + forward[1] * turned[1])))
-    transforms, rotations = result.transforms, result.rotations
+    transforms, rotations, ramps = result.transforms, result.rotations, result.ramps
     transforms[TORSO] = affine(hips_s, hips_t, torso_rotation, scale)
     rotations[TORSO] = torso_rotation
 
     for part in PARTS[1:]:
         parent = PARENT[part]
-        if part not in source or part not in target:
+        straight = None
+        if part in DIGIT_PARTS and part in source and part not in target:
+            # A finger segment the body doesn't have (FFXIV's thumbs have two) goes on along the body's finger;
+            # of a finger the body has none of, along the finger's first segment.
+            above = parent
+            while above in DIGIT_PARTS and above not in target:
+                above = PARENT[above]
+            if above in DIGIT_PARTS:
+                straight = _aim(target, above, None, source)
+            elif parent in DIGIT_PARTS:
+                finger, _segment, side = DIGIT_PARTS[part]
+                first = digit_name(finger, 1, side)
+                aim = _aim(source, first, tips) if first in source else None
+                if aim is not None:
+                    straight = rotations[first] @ _unit(aim)
+        if (part not in source or part not in target) and straight is None:
             if part in source or part in target:
                 result.missing.append(part)
             # Missing on either side: it moves with the part above it.
             transforms[part] = transforms[parent]
             rotations[part] = rotations[parent]
+            if parent in ramps:
+                ramps[part] = ramps[parent]
             continue
         pivot = source[part]
-        goal = target[part] if stretch else apply_matrix(transforms[parent], pivot)
         after = NEXT.get(part)
+        stretched = stretch and part in STRETCHED and after in source and after in target
+        if stretch and part in STRETCHED and parent != TORSO and (parent not in source or parent not in target):
+            base = target[part]  # nothing above stretched to it (no clavicle): it starts at the body's joint
+        else:
+            base = result.move(parent, pivot)
+        rotation = rotations[parent]
         if part in UPRIGHT:
             rotation = torso_rotation
-            transforms[part] = affine(pivot, goal, rotation, scale)
-        elif after is not None and after in source and after in target:
-            direction = _unit(source[after] - pivot)
-            wanted = _unit(target[after] - target[part])
-            rotation = swing(rotations[parent] @ direction, wanted) @ rotations[parent]
-            factor = 1.0
-            if stretch:
-                factor = np.linalg.norm(target[after] - target[part]) / max(
-                    scale * np.linalg.norm(source[after] - pivot), 1e-12)
-                factor = float(np.clip(factor, 1.0 / MAX_STRETCH, MAX_STRETCH))
-                result.stretches[part] = factor
-            transforms[part] = affine(pivot, goal, rotation, scale, direction, factor)
-        else:
-            rotation = rotations[parent]
-            transforms[part] = affine(pivot, goal, rotation, scale)
+        elif part not in SHOULDERS:
+            aim = _aim(source, part, tips, target)
+            wanted = straight if straight is not None else _aim(target, part, None, source)
+            if stretched:
+                wanted = target[after] - base  # from where it starts, at the body's next joint
+            if aim is not None and wanted is not None:
+                rotation = swing(rotations[parent] @ _unit(aim), _unit(wanted)) @ rotations[parent]
+                if DIGIT_PARTS.get(part, (None, 0))[1] == 1:
+                    result.fingers += 1
+        transforms[part] = affine(pivot, base, rotation, scale)
         rotations[part] = rotation
+        if stretched:
+            _stretch(result, part, pivot, source[after], target[after])
+        elif (stretch and part in STRETCHED and after in target and tips is not None and part in tips and
+              parent in result.stretches and parent not in SHOULDERS):
+            start, reach = apply_matrix(transforms[part], pivot), apply_matrix(transforms[part], tips[part])
+            _stretch(result, part, pivot, tips[part], start + result.stretches[parent] * (reach - start))
     return result
 
 
-def deform(points, part_weights, transforms):
-    """``points`` (world) moved by their parts' transforms, blended by ``part_weights`` (points x PARTS;
-    unweighted points move with the torso)."""
+def deform(points, part_weights, solution):
+    """``points`` (world) moved by their parts (`Solution.move`), blended by ``part_weights`` (points x
+    PARTS; unweighted points move with the torso)."""
     weights = part_weights.copy()
     weights[weights.sum(axis=1) <= 0.0, PART_INDEX[TORSO]] = 1.0
     result = np.zeros_like(points)
@@ -878,7 +1291,7 @@ def deform(points, part_weights, transforms):
         column = weights[:, index]
         used = column > 0.0
         if used.any():
-            result[used] += column[used, None] * apply_matrix(transforms[part], points[used])
+            result[used] += column[used, None] * solution.move(part, points[used])
     return result
 
 
@@ -917,7 +1330,7 @@ def refine_joints(source, target, points, tris, part_weights, body_points, round
     radius, reach, slack = REFINE_RADIUS * size, REFINE_REACH * size, REFINE_SLACK * size
     samples = {}
     for part, joint in target.items():
-        if part in (TORSO, HEAD) or part not in joints:
+        if part not in REFINED or part not in joints:
             continue
         near = np.flatnonzero(np.linalg.norm(body_points - joint, axis=1) < radius)
         if len(near) > REFINE_SAMPLES:
@@ -928,7 +1341,7 @@ def refine_joints(source, target, points, tris, part_weights, body_points, round
     # The last round only checks the moves of the one before.
     for round_ in range(rounds + 1):
         solution = solve(joints, target, stretch=True)
-        moved = deform(points, part_weights, solution.transforms)
+        moved = deform(points, part_weights, solution)
         tree = BVHTree.FromPolygons(moved.tolist(), tris.tolist(), all_triangles=True)
         changed = dict(joints)
         for part, near in samples.items():
@@ -1018,7 +1431,9 @@ def armature_rig(armature, depsgraph=None):
 
 def spread_out(joints):
     """Whether joints are at distinct places (an armature whose bones all sit at one spot has none)."""
-    points = [joints[part] for part in KEY_PARTS + (NECK,) if part in joints]
+    points = [joints[part] for part in KEY_PARTS + (NECK,) + tuple(part_name(kind, side) for side in SIDES
+                                                                   for kind in ("forearm", "shin"))
+              if part in joints]
     return len(points) >= 3 and np.ptp(np.array(points), axis=0).max() > 0.05
 
 
@@ -1074,7 +1489,9 @@ def body_rig(body, depsgraph):
     if not has_key_parts(parts, 4):
         raise LineUpError("Can't tell the joints of '{:s}': it needs an armature, or vertex groups named after "
                           "the bones of its thighs and arms".format(body.name))
-    return joints_from_weights(mesh_positions(body), weights.by_part(parts)), None
+    points = mesh_positions(body)
+    parts = split_finger_groups(parts, points, weights)
+    return joints_from_weights(points, weights.by_part(parts)), None
 
 
 def body_surface(body, depsgraph):
@@ -1092,8 +1509,9 @@ def body_surface(body, depsgraph):
 class Plan:
     """How Line Up moves a model (``meshes`` and ``armature``, which can be None) onto a body: the
     ``solution``, each mesh's part weights (``mesh_parts``), each bone's part (``bone_parts``, for an
-    armature whose rest pose moves along), and how the joints were found (``how``: "bones", "weights",
-    "unnamed")."""
+    armature whose rest pose moves along), where to put the bones of an armature whose bones all sit at
+    one spot (``bone_places``: bone name -> world head and tail), and how the joints were found (``how``:
+    "bones", "weights", "unnamed")."""
 
     def __init__(self):
         self.meshes = []
@@ -1101,6 +1519,7 @@ class Plan:
         self.move_armature = False
         self.mesh_parts = []
         self.bone_parts = {}
+        self.bone_places = {}
         self.solution = None
         self.how = ""
         self.refined = 0
@@ -1116,13 +1535,13 @@ def plan(meshes, armature, body, depsgraph, stretch=True):
     target, _body_armature = body_rig(body, depsgraph)
     result.target_joints = target
 
-    all_parts, deform = {}, None
+    all_parts, deforming = {}, None
     bone_joints = {}
     if armature is not None:
-        all_parts, deform, bone_joints = armature_rig(armature)
-    named_bones = deform is not None and has_key_parts(deform)
+        all_parts, deforming, bone_joints = armature_rig(armature)
+    named_bones = deforming is not None and has_half(deforming)
     if named_bones:
-        names = sorted({group.name for obj in meshes for group in obj.vertex_groups if group.name in deform})
+        names = sorted({group.name for obj in meshes for group in obj.vertex_groups if group.name in deforming})
     else:
         names = sorted({group.name for obj in meshes for group in obj.vertex_groups})
     sets, positions, tris, first = [], [], [], 0
@@ -1137,12 +1556,20 @@ def plan(meshes, armature, body, depsgraph, stretch=True):
     tris = np.concatenate(tris) if tris else np.zeros((0, 3), dtype=np.int64)
 
     if named_bones:
-        group_parts = {name: deform[name] for name in names}
+        group_parts = {name: deforming[name] for name in names}
         result.how = "bones"
+        if not spread_out(bone_joints):
+            # Bones at one spot (The Sims') may not hang from each other either: number each finger's segments
+            # by where their groups lie instead.
+            hands = {name: part_name("hand", DIGIT_PARTS[part][2]) if part in DIGIT_PARTS else part
+                     for name, part in group_parts.items()}
+            group_parts = split_finger_groups(hands, points, weights)
     else:
         group_parts, _named = group_parts_by_name(names, weights)
         result.how = "weights"
-        if not has_key_parts(group_parts):
+        if has_half(group_parts):
+            group_parts = split_finger_groups(group_parts, points, weights)
+        else:
             group_parts = label_anonymous(points, weights, target)
             result.how = "unnamed"
     part_weights = weights.by_part(group_parts)
@@ -1154,9 +1581,9 @@ def plan(meshes, armature, body, depsgraph, stretch=True):
         if result.how == "bones":
             result.how = "weights"  # named bones, all at one spot: joints from the weights
         source = joints_from_weights(points, part_weights)
-        if not has_key_parts({part: part for part in source}):
+        if not has_half({part: part for part in source}):
             raise LineUpError("Found too few joints in the model: it needs an armature, or vertex groups for "
-                              "its thighs and arms")
+                              "its thighs or arms")
         # Refining finds where the model's own joints are: it puts them on the body's, so with stretching
         # whatever the setting.
         try:
@@ -1165,20 +1592,122 @@ def plan(meshes, armature, body, depsgraph, stretch=True):
         except LineUpError:
             pass
     result.source_joints = source
-    result.solution = solve(source, target, stretch=stretch)
+    result.solution = solve(source, target, stretch=stretch, tips=segment_tips(points, part_weights, source))
+    if result.solution.half is not None and len(points) and not _half_fits(result.solution, source, target, points):
+        raise LineUpError("Found only part of a body in the model, and it isn't shaped like a top or a bottom: "
+                          "it needs both arms or both legs, and the body around them")
     offsets = np.cumsum([0] + [len(p) for p in positions])
     result.mesh_parts = [part_weights[a:b] for a, b in zip(offsets[:-1], offsets[1:])]
+    if armature is not None and not result.move_armature and len(points):
+        bones = armature.data.bones
+        heads = apply_matrix(_matrix(armature), np.array([bone.head_local for bone in bones]).reshape(-1, 3))
+        if not len(heads) or np.ptp(heads, axis=0).max() <= BONE_SPOT * np.ptp(points, axis=0).max():
+            # Its bones sit at one spot: they go where their groups end up.
+            places = group_bones(deform(points, part_weights, result.solution), weights, group_parts,
+                                 BONE_LEAST * result.solution.torso_length)
+            result.bone_places = {name: place for name, place in places.items() if name in bones}
+        else:
+            # Bones in places of their own, but named so they say nothing: each moves with its group's part,
+            # a bone without a group with the nearest bone above it that has one.
+            def part_of(bone):
+                while bone is not None and bone.name not in group_parts:
+                    bone = bone.parent
+                return group_parts[bone.name] if bone is not None else TORSO
+
+            result.bone_parts = {bone.name: part_of(bone) for bone in bones}
+            result.move_armature = True
     return result
 
 
-def _write_mesh(obj, part_weights, transforms):
-    """Move mesh ``obj`` (every shape key) by the parts' transforms, blended by its ``part_weights``."""
+def _half_fits(solution, source, target, points):
+    """Whether a model lined up as half a body (``solution.half``) is shaped like one, as sized: a bottom
+    reaches up past its hips, but not to a head; a top hangs from its shoulders no further than a torso and
+    a quarter (arms in an A-pose, a long top). Pieces cut out of a garment (a skirt starting at the knees, a
+    bodice whose hanging bits looked like legs) aren't: sized by limbs they don't have, they would come out
+    far too big or small."""
+    hips, top = torso_ends(source, target)
+    torso = solution.torso_length
+    if solution.half == "lower":
+        above = (points[:, 2].max() - hips[2]) * solution.scale
+        return HALF_ABOVE[0] * torso <= above <= HALF_ABOVE[1] * torso
+    below = (top[2] - points[:, 2].min()) * solution.scale
+    return below <= HALF_BELOW * torso
+
+
+def group_bones(points, weights, parts, least):
+    """Rest positions (group name -> (head, tail)) for bones named after the vertex groups of ``points``
+    (``weights``; ``parts``: group name -> part), for an armature whose bones say nothing about where they
+    are (all at one spot, like The Sims' exports). Each bone starts where its group's weight hands over
+    from the group it shares the most with toward the torso (along the tree of what the groups share, see
+    `_GroupTree`), and ends where the heaviest group hanging from it starts, or as far past its group's
+    middle. Bones are at least ``least`` long."""
+    tree = _GroupTree(points, weights)
+    torso = [group for group, name in enumerate(weights.names) if parts.get(name) == TORSO and tree.alive[group]]
+    if not torso:
+        return {}
+    tree.grow(max(torso, key=lambda group: tree.mass[group]))
+    places = {}
+    for group, name in enumerate(weights.names):
+        if not tree.alive[group]:
+            continue
+        parent = tree.parent[group]
+        head = tree.handover(parent, group) if parent >= 0 else tree.centroids[group]
+        children = [child for child in tree.children[group] if tree.alive[child]]
+        if children:
+            tail = tree.handover(group, max(children, key=lambda child: tree.mass[child]))
+        else:
+            tail = 2.0 * tree.centroids[group] - head
+        if np.linalg.norm(tail - head) < least:
+            direction = _unit(tail - head) if np.linalg.norm(tail - head) > 1e-12 else np.array((0.0, 0.0, 1.0))
+            tail = head + least * direction
+        places[name] = (head, tail)
+    return places
+
+
+def place_bones(result):
+    """Put the bones of the Plan's armature named after its vertex groups where the groups lie as lined up
+    (``bone_places``, see `group_bones`). At rest, where they are doesn't change the meshes. The armature
+    must be in Edit Mode."""
+    inverse = np.linalg.inv(_matrix(result.armature))
+    edit_bones = result.armature.data.edit_bones
+    for name, (head, tail) in result.bone_places.items():
+        bone = edit_bones.get(name)
+        if bone is not None:
+            bone.use_connect = False
+            bone.head, bone.tail = apply_matrix(inverse, head).tolist(), apply_matrix(inverse, tail).tolist()
+
+
+def segment_tips(points, part_weights, joints):
+    """Where a model's segments end that it lacks the next part of (part -> point), which its joints
+    (``joints``) alone can't tell: the last segments of its fingers, or a shin without a foot. Each points
+    at the middle of the points weighted to it, and reaches as far along as nearly all of them."""
+    tips = {}
+    for part in PARTS:
+        if part not in joints or (part not in NEXT and part not in DIGIT_PARTS) or NEXT.get(part) in joints:
+            continue
+        column = part_weights[:, PART_INDEX[part]]
+        total = column.sum()
+        if total <= 0.0:
+            continue
+        direction = (points * column[:, None]).sum(axis=0) / total - joints[part]
+        length = np.linalg.norm(direction)
+        if length <= 1e-12:
+            continue
+        direction /= length
+        own = column >= 0.5
+        reach = np.percentile((points[own] - joints[part]) @ direction, 95) if own.any() else length
+        tips[part] = joints[part] + direction * max(reach, length)
+    return tips
+
+
+def _write_mesh(obj, part_weights, solution):
+    """Move mesh ``obj`` (every shape key) by the parts' moves, blended by its ``part_weights``."""
     mesh = obj.data
     matrix = _matrix(obj)
     inverse = np.linalg.inv(matrix)
 
     def moved(local):
-        return apply_matrix(inverse, deform(apply_matrix(matrix, local), part_weights, transforms))
+        return apply_matrix(inverse, deform(apply_matrix(matrix, local), part_weights, solution))
 
     keys = mesh.shape_keys
     if keys is None:
@@ -1207,8 +1736,7 @@ def move_rest_pose(result):
         bone.use_connect = False
     for bone in edit_bones:
         part = result.bone_parts.get(bone.name, TORSO)
-        transform = solution.transforms[part]
-        head, tail = (apply_matrix(inverse, apply_matrix(transform, apply_matrix(matrix, np.array(point))))
+        head, tail = (apply_matrix(inverse, solution.move(part, apply_matrix(matrix, np.array(point))))
                       for point in (bone.head, bone.tail))
         z_axis = np.linalg.solve(axes, solution.rotations[part] @ (axes @ np.array(bone.z_axis)))
         bone.head, bone.tail = head.tolist(), tail.tolist()
@@ -1221,4 +1749,4 @@ def move_rest_pose(result):
 def write_meshes(result):
     """Move the Plan's meshes (every shape key) onto the body."""
     for obj, part_weights in zip(result.meshes, result.mesh_parts):
-        _write_mesh(obj, part_weights, result.solution.transforms)
+        _write_mesh(obj, part_weights, result.solution)

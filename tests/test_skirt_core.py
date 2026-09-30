@@ -108,6 +108,8 @@ def test_rig_detection():
     check(sorted(found.bone_names) == sorted(skirt.skirt_bone_names()), "rig: all 18 skirt bones")
     front = found.chains[2]
     check(abs(math.degrees(front.angles[2]) + 66.2) < 0.5, "rig: the front chain splays outward as it hangs")
+    arms = {name + side for name in ("j_sako_", "j_ude_a_", "j_ude_b_", "j_te_", "j_hito_a_") for side in "lr"}
+    check(found.arms_and_head == arms | {"j_kubi", "j_kao"}, "rig: the arms and the head, fingers included")
     check(skirting.has_skirt_bones(rig), "has_skirt_bones: the rig has them")
 
     plain = skirt.build_rig("Plain", chains={})
@@ -429,6 +431,42 @@ def test_no_body():
     share = skirting.height_fraction(heights(obj)[middle], 0.10, 0.30)
     check(middle not in stroke.unweighted and abs(skirt_total(after)[middle] - share) < 1e-4,
           "body: a vertex without body weights takes them from the body")
+
+
+def test_sleeves():
+    rig, body, _obj = skirt.build()
+    sleeve = skirt.build_sleeve(rig)
+    check(float(heights(sleeve).min()) < -0.10, "sleeves: the cuff hangs well below the hips")
+    start = by_name(sleeve)
+    stroke = new_stroke(sleeve, body, skin_weight=0.0)
+    paint_everything(stroke, sleeve)
+    check(not stroke.modified and same_weights(start, by_name(sleeve), 0.0),
+          "sleeves: cloth weighted to the arm keeps its weights below the hips")
+
+    # Skirt weights it got before go back to the arm.
+    for vert in sleeve.data.vertices:
+        for elem in vert.groups:
+            elem.weight *= 0.6
+    sleeve.vertex_groups.new(name="j_sk_s_b_l").add(list(range(len(sleeve.data.vertices))), 0.4, 'REPLACE')
+    paint_everything(new_stroke(sleeve, body, skin_weight=0.0), sleeve)
+    after = by_name(sleeve)
+    arm = {name: values for name, values in after.items() if not name.startswith("j_sk_")}
+    check(not skirt_total(after).any() and same_weights(start, arm, 1e-4), "sleeves: skirt weights go back to the arm")
+
+    # Half on the hand (13 cm off the body, so no Skin Weight): only the other half gives way to the
+    # skirt bones.
+    _rig, body, obj = skirt.build()
+    hem = skirt.index(skirt.ROWS - 1, 10)
+    for elem in obj.data.vertices[hem].groups:
+        elem.weight *= 0.5
+    obj.vertex_groups.new(name="j_te_l").add([hem], 0.5, 'REPLACE')
+    paint_everything(new_stroke(obj, body), obj)
+    after = by_name(obj)
+    check(abs(skirt_total(after)[hem] - 0.5) < 1e-4 and abs(after["j_te_l"][hem] - 0.25) < 1e-4,
+          "sleeves: a vertex half on the hand is half skirt, and keeps half its hand weight")
+    again = new_stroke(obj, body)
+    paint_everything(again, obj)
+    check(not again.modified and same_weights(after, by_name(obj), 1e-6), "sleeves: a second pass changes nothing")
 
 
 def test_strength():

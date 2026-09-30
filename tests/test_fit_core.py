@@ -469,6 +469,41 @@ def test_seams_pinned_by_unmovable_side():
     check(not np.array_equal(co[:len(co) // 2], start[:len(co) // 2]), "seams: the rest of the movable part moved")
 
 
+def crease_strip():
+    """A flat strip 2.5 mm apart in x, spanning the valley of `valley_body` 3 cm above its crease and
+    reaching into both breasts. Returns positions, edges and the vertex index per (x, z)."""
+    xs = np.linspace(-0.1, 0.1, 81)
+    zs = np.linspace(-0.02, 0.02, 9)
+    co = np.array([(x, -0.07, z) for x in xs for z in zs])
+    index = np.arange(len(co)).reshape(len(xs), len(zs))
+    edges = np.concatenate((np.stack((index[:-1].ravel(), index[1:].ravel()), axis=1),
+                            np.stack((index[:, :-1].ravel(), index[:, 1:].ravel()), axis=1)))
+    return co, edges, index
+
+
+def test_crease_keeps_vertices_together():
+    # Across a crease the closest body point jumps from one side to the other, and moving along its
+    # normal slid the vertices on either side apart (Tighten) or into each other (Push Out).
+    body = valley_body()
+    for mode in ('PUSH', 'TIGHTEN', 'FIT'):
+        co, edges, index = crease_strip()
+        start = co.copy()
+        stroke = fitting.FitStroke(body, co, np.ones(len(co), bool), mode=mode, offset=0.001, layer_radius=0.02,
+                                   max_distance=0.05, edges=edges, smooth=0.5)
+        for i in range(4):
+            xs = np.linspace(-0.06, 0.06, 41)
+            for x in (xs if i % 2 == 0 else xs[::-1]):
+                stroke.dab(np.array([x, -0.075, 0.0]), 0.03, 0.5)
+        middle = len(index) // 2
+        spacing = np.diff(co[index[middle - 4:middle + 5], 0], axis=0)  # between columns 1 cm around it
+        slid = np.abs(co[index[middle], 0]).max()
+        uneven = np.abs(np.diff(spacing, axis=0)).max()
+        check(np.abs(co - start).max() > 0.002, "crease, {}: the strip moved".format(mode))
+        check(slid < 1e-4, "crease, {}: the middle stayed over the crease ({:.2f} mm off)".format(mode, slid * 1000))
+        check(uneven < 0.0008, "crease, {}: vertices stayed evenly spaced across it (gaps {:.2f} to {:.2f} mm)".format(
+            mode, spacing.min() * 1000, spacing.max() * 1000))
+
+
 def open_torso(columns=48, rings=13):
     """An open tube like a torso on its own, from its waist edge at z 0 up to z 0.6. It widens toward
     the waist edge, so its normals there tilt up, as on the devkit's torso."""
@@ -500,8 +535,7 @@ def test_open_body_has_no_inside_past_its_edge():
     near = body.nearest(below)
     check(near.beyond.all(), "open body: points below its edge are past it ({} of {})".format(near.beyond.sum(), len(below)))
     to_edge = np.linalg.norm(below - near.location, axis=1)
-    check(np.allclose(near.distance, to_edge) and np.allclose(near.height, to_edge),
-          "open body: their distance is the distance to the edge, outside")
+    check(np.allclose(near.distance, to_edge), "open body: their distance is the distance to the edge, outside")
     # Above the edge, inside the tube and outside it, and just inside its rim: as before.
     inner, outer, rim = body.nearest(ring(0.1, 0.3)), body.nearest(ring(0.4, 0.3)), body.nearest(ring(0.28, 0.005))
     check(not inner.beyond.any() and (inner.distance < 0).all(), "open body: inside the tube is inside")
@@ -536,9 +570,10 @@ def same_surface(a, b):
     near_a, near_b = a.nearest(points), b.nearest(points)
     return (
         np.allclose(a.co[a._weld], b.co[b._weld]) and np.allclose(a.normals[a._weld], b.normals[b._weld]) and
+        np.allclose(a.area_normals[a._weld], b.area_normals[b._weld]) and
         np.array_equal(a.open_vertex[a._weld], b.open_vertex[b._weld]) and len(a.edges) == len(b.edges) and
         math.isclose(a.edge_length, b.edge_length) and np.array_equal(near_a.beyond, near_b.beyond) and
-        all(np.allclose(getattr(near_a, name), getattr(near_b, name)) for name in ("location", "normal", "distance", "height"))
+        all(np.allclose(getattr(near_a, name), getattr(near_b, name)) for name in ("location", "normal", "distance"))
     )
 
 

@@ -23,11 +23,12 @@ see facedata):
   from its weights, the custom face's from where it lies around the margins and the lip line, spread a
   few millimetres inward along the surface), and preferably from a surface facing the same way: lips
   touch and the gums sit right behind them, so this keeps them apart.
-- The eyes must close as early in the game's blink (its face animation) as the game's face does, since
-  the game shows the blink's peak for an instant only. The lids of a bigger eye may stop short: where the
-  eyeball still shows, the lid weights are raised (fading out away from the margin) until it's covered, or
-  until they can't go higher, which is reported. The game's lid weights close a smaller eye much too early,
-  and its lids slide on past each other: they're lowered.
+- The eyes must be shut in the game's Shut Eyes expression (a face animation it holds for as long as the
+  expression lasts, its lids turned about as far as at the blink's peak), with the lids just meeting there.
+  The lids of a bigger eye may stop short: where the eyeball still shows, the lid weights are raised (fading
+  out away from the margin) until it's covered, or until they can't go higher, which is reported. Lids that
+  meet well before it (a smaller eye with the game's lid weights, and many of the game's own faces) slide on
+  past each other and fold: they're lowered, as far as the blink's peak still closes the eyes.
 - The neck ring (where the face meets the body) must be exactly the game's, or a seam shows: its
   positions, normals and weights are copied from the game's face.
 
@@ -63,10 +64,11 @@ LIP_BONES = ("j_f_ulip_01_l", "j_f_ulip_01_r", "j_f_dlip_01_l", "j_f_dlip_01_r")
 UPPER_MOUTH = ("j_f_ulip", "j_f_umlip", "j_f_uslip", "j_f_hagukiup")
 LOWER_MOUTH = ("j_f_dlip", "j_f_dmlip", "j_f_dslip", "j_f_dago", "j_f_hagukidn", "j_f_bero")
 FACE_NAME = re.compile(r"c(\d{4})f(\d{4})", re.IGNORECASE)
-# Poses of the game's face animations, kept at their peak (see facedata.POSES); the Test Poses show the blink at
-# the closing share of the game's face (see FaceModel.closing_share), since the game shows its peak for an instant.
+# Poses of the game's face animations, kept at their peak (see facedata.POSES).
 POSES = (
-    ('BLINK', "Blink", "The game's blink, at the moment its own face's eyes are shut"),
+    ('BLINK', "Blink", "The game's blink, at its peak"),
+    ('SHUT_EYES', "Shut Eyes", "The Shut Eyes expression (the Bow emote's face too): the eyes held shut, "
+                               "the lids just meeting"),
     ('TALK', "Talk", "Mouth open, as when talking"),
     ('SHOUT', "Shout", "Mouth open, as when shouting"),
     ('ANGRY', "Angry", "The angry expression"),
@@ -74,8 +76,10 @@ POSES = (
     ('OUCH', "Ouch", "The pained expression, mouth open"),
     ('DIE', "Die", "The expression when knocked out"),
     ('SALUTE', "Salute", "The salute expression"),
-    ('BOW', "Bow", "The bow expression"),
 )
+# The pose the eyes must be shut in, and the one that must close them at its peak too (see close_eyes).
+SHUT_POSE = 'SHUT_EYES'
+BLINK_POSE = 'BLINK'
 
 # Side labels: which side of a feature a vertex is on, so it never takes weights from the other.
 NEUTRAL, LEFT_UPPER, LEFT_LOWER, RIGHT_UPPER, RIGHT_LOWER, MOUTH_UPPER, MOUTH_LOWER = range(7)
@@ -87,8 +91,9 @@ EYE_LABELS = {"l": (LEFT_UPPER, LEFT_LOWER), "r": (RIGHT_UPPER, RIGHT_LOWER)}
 SCAN_STEP = 0.00025
 # The eye scan reaches this much beyond the eyeball's radius around the eye bone, at least EYE_WINDOW.
 EYE_WINDOW = (0.026, 0.02)
-# Closure checks (the eyes in the blink) cast rays only this far around the opening at rest (its lid margins),
-# since closing lids only cover more of it; an opening found reaching that box's edge is scanned in full after all.
+# Closure checks (the eyes in the Shut Eyes expression) cast rays only this far around the opening at rest (its lid
+# margins), since closing lids only cover more of it; an opening found reaching that box's edge is scanned in full
+# after all.
 OPENING_MARGIN = 0.003
 # The lip scan: half width and half height around the lip bones.
 MOUTH_WINDOW = (0.032, 0.016)
@@ -134,14 +139,18 @@ SIDE_THRESHOLD = 0.05
 NORMAL_PENALTY = 0.002
 NORMAL_SEARCH = 0.003
 NORMAL_GOOD = 0.95
-# Eyelid closing. The game shows its blink's peak for an instant only (5 ms within 1 % of the turn; at 60 frames
-# a second the most closed frame shows 97 % of it at worst), and its own faces close well before it: at 75 to 100 %
-# of the turn, 92 % for the median face (its closing share). So lids should meet by the closing share of the game's
-# face, overlapping this much there; a raise fades out over LID_FALLOFF from the margin and is spread over
-# LID_SMOOTH scan columns. Lids meeting more than CLOSE_SLACK of the turn earlier slide on past each other (small
-# eyes given the game's big-eyed lid weights): all of the eye's lid weights are lowered alike. At most LID_ROUNDS
-# rounds; shares are found to CLOSE_PRECISION.
+# Eyelid closing. Lids should meet in the Shut Eyes expression (SHUT_POSE), which the game holds with the lids
+# turned about as far as at its blink's peak (91 to 102 % of it, 100 % on the median face skeleton), overlapping
+# this much there; a raise fades out over LID_FALLOFF from the margin and is spread over LID_SMOOTH scan columns.
+# Lids meeting more than CLOSE_SLACK of the pose's turn earlier slide on past each other and fold while it's held
+# (smaller eyes given the game's big-eyed lid weights, and the game's own faces, which close their eyes a bit before
+# it): all of the eye's lid weights are lowered alike. The blink's peak (BLINK_POSE) must close the eyes too, and
+# closes them up to 7 % less than Shut Eyes on the game's faces: lids are raised for it, and lowered only as far as
+# it allows. Since the game shows it for an instant, it may leave a slit up to BLINK_SLIT tall (a row of the scan),
+# which the lashes hide: holding lids up for that made some lids meet a quarter of the turn early in Shut Eyes. At
+# most LID_ROUNDS rounds; shares are found to CLOSE_PRECISION.
 LID_OVERLAP = 0.0004
+BLINK_SLIT = 0.0003
 LID_FALLOFF = 0.012
 LID_SMOOTH = 9
 LID_ROUNDS = 5
@@ -382,7 +391,6 @@ class FaceModel:
         self._extras_transfer = None
         self._ring = None
         self._bvh = None
-        self._closing = None
 
     def bvh(self):
         """BVHTree of the skin."""
@@ -401,16 +409,6 @@ class FaceModel:
         if self._features is None:
             self._features = Features(self.points, self.tris, self.skeleton, self.eyes())
         return self._features
-
-    def closing_share(self):
-        """The share of the game's blink by which this face has closed its eyes, with its own weights (see
-        `closing_share`; scanned around its openings at rest); 1 when it only does at the peak, or not even then."""
-        if self._closing is None:
-            features = self.features()
-            boxes = {side: features.opening_box(side) for side in features.eyes}
-            self._closing = closing_share(self.points, self.tris, self.names, self.weights, self.eyes(),
-                                          self.skeleton, boxes) or 1.0
-        return self._closing
 
     def transfer(self):
         """SidedTransfer of the skin, with the parts that belong to it (ears, horns, scales, beards)."""
@@ -1382,28 +1380,29 @@ def open_area(skin_bvh, eye):
     return float(mask.sum() * (xs[1] - xs[0]) * (zs[1] - zs[0]) * 1e6)
 
 
-def blink_opening(points, tris, names, weights, eye, side, skeleton, share, step=SCAN_STEP, box=None):
+def posed_opening(points, tris, names, weights, eye, side, skeleton, pose, share=1.0, step=SCAN_STEP, box=None):
     """`eye_opening` of eyeball ``eye`` (side ``side``) through the skin (``points``/``tris``, ``weights`` over
-    ``names``) at ``share`` of the game's blink, with rays ``step`` apart, within ``box`` when given."""
-    deform = skeleton.deformations('BLINK', share)
+    ``names``) at ``share`` of the game's face animation ``pose`` (see Skeleton.deformations), with rays ``step``
+    apart, within ``box`` when given."""
+    deform = skeleton.deformations(pose, share)
     posed = skin_points(points, names, weights, deform)
     return eye_opening(bvh_of(posed, tris), eye.moved(deform.get(EYEBALL_BONE.format(side), np.eye(4))), step,
                        box=box)
 
 
-def closing_share(points, tris, names, weights, eyes, skeleton, boxes=None):
-    """The share of the game's blink (see Skeleton.deformations) by which the skin (``points``/``tris``,
-    ``weights`` over ``names``) covers all of the eyeballs ``eyes`` ({side: Eye}) seen from the front, to
-    CLOSE_PRECISION; None when it doesn't even at the blink's peak. ``boxes`` ({side: box}, see
-    `Features.opening_box`) limit the scans to the openings at rest."""
+def closing_share(points, tris, names, weights, eyes, skeleton, boxes=None, pose=SHUT_POSE):
+    """The share of ``pose`` (see Skeleton.deformations) by which the skin (``points``/``tris``, ``weights`` over
+    ``names``) covers all of the eyeballs ``eyes`` ({side: Eye}) seen from the front, to CLOSE_PRECISION; None
+    when it doesn't even in the whole pose. ``boxes`` ({side: box}, see `Features.opening_box`) limit the scans
+    to the openings at rest."""
     boxes = boxes or {}
 
     def closed(share):
-        return not any(blink_opening(points, tris, names, weights, eye, side, skeleton, share,
+        return not any(posed_opening(points, tris, names, weights, eye, side, skeleton, pose, share,
                                      box=boxes.get(side))[3].any()
                        for side, eye in eyes.items())
 
-    if not eyes or not skeleton.deformations('BLINK') or not closed(1.0):
+    if not eyes or not skeleton.deformations(pose) or not closed(1.0):
         return None
     low, high = 0.0, 1.0
     while high - low > CLOSE_PRECISION:
@@ -1415,23 +1414,25 @@ def closing_share(points, tris, names, weights, eyes, skeleton, boxes=None):
     return high
 
 
-def close_eyes(points, tris, names, weights, features, labels, skeleton, share):
-    """Make each eye of the skin (``points``/``tris``, weights over ``names``) close by ``share`` of the game's
-    blink, the closing share of the game's face: where the eyeball still shows there, the lid weights are
-    raised, fading out LID_FALLOFF from the margin; then, when the lids meet more than CLOSE_SLACK earlier, all
-    of the eye's lid weights are lowered alike. Returns (weights, {side: report}), a report having the
-    ``target`` share, how much of the eyeball showed there ``before`` and ``after`` (mm²), how far apart the lids
-    stop where their weights can't go higher (``stuck``, mm), and for lids that met too early about the share
-    they met at (``early``, else None) and what their weights were scaled by (``lowered``)."""
+def close_eyes(points, tris, names, weights, features, labels, skeleton):
+    """Make each eye of the skin (``points``/``tris``, weights over ``names``) shut in the game's Shut Eyes
+    expression (SHUT_POSE), the lids just meeting, and closed at the peak of its blink (BLINK_POSE) too: where
+    the eyeball still shows in either, the lid weights are raised, fading out LID_FALLOFF from the margin; then,
+    when the lids meet more than CLOSE_SLACK of the Shut Eyes turn earlier, all of the eye's lid weights are
+    lowered alike, as far as the blink's peak still closes the eye. Returns (weights, {side: report}), a report
+    having how much of the eyeball showed in Shut Eyes ``before`` and ``after`` (mm²) and at the blink's peak
+    after (``blink``, mm²), how far apart the lids stop in Shut Eyes where their weights can't go higher
+    (``stuck``, mm), and for lids that met too early about the share of Shut Eyes they met at (``early``, else
+    None), what their weights were scaled by (``lowered``) and about the share they meet at now (``meets``)."""
     weights = weights.copy()
     report = {}
-    blink = skeleton.deformations('BLINK', share)
+    poses = [(pose, skeleton.deformations(pose)) for pose in (SHUT_POSE, BLINK_POSE)]
     head = names.index(HEAD) if HEAD in names else None
     for side, (upper, lower, eye) in features.eyes.items():
         up_cols, down_cols = lid_columns(names, side)
-        m_up = blink.get(UPPER_LID + "01_" + side)
-        m_down = blink.get(LOWER_LID + "01_" + side)
-        if m_up is None or not up_cols:
+        # The poses that turn this eye's upper lid; none without Shut Eyes.
+        turned = [(pose, deform) for pose, deform in poses if UPPER_LID + "01_" + side in deform]
+        if not turned or turned[0][0] != SHUT_POSE or not up_cols:
             continue
         up_label, down_label = EYE_LABELS[side]
         inner = (upper[0] + lower[0]) / 2.0
@@ -1453,71 +1454,86 @@ def close_eyes(points, tris, names, weights, features, labels, skeleton, share):
         order_l = np.argsort(lower[:, 0])
         box = features.opening_box(side)
 
-        def opening(at, lid_weights=None, step=SCAN_STEP):
-            return blink_opening(points, tris, names, weights if lid_weights is None else lid_weights, eye, side,
-                                 skeleton, at, step, box)
+        def opening(pose, at=1.0, lid_weights=None, step=SCAN_STEP):
+            return posed_opening(points, tris, names, weights if lid_weights is None else lid_weights, eye, side,
+                                 skeleton, pose, at, step, box)
 
-        before = after = None
-        stuck = 0.0
-        for round_ in range(LID_ROUNDS + 1):
-            xs, zs, _hits, mask = opening(share)
-            area = float(mask.sum() * (xs[1] - xs[0]) * (zs[1] - zs[0]) * 1e6)
-            before = area if before is None else before
-            after = area
-            if not mask.any() or round_ == LID_ROUNDS:
-                break
-            need_up = np.ones(len(xs))
-            need_down = np.ones(len(xs))
+        def area_of(pose, xs, zs, mask):
+            """How much of the eyeball an opening in ``pose`` shows (mm²); 0 for a slit the blink's peak may leave."""
+            if not mask.any() or pose == BLINK_POSE and mask.sum(0).max() * (zs[1] - zs[0]) <= BLINK_SLIT:
+                return 0.0
+            return float(mask.sum() * (xs[1] - xs[0]) * (zs[1] - zs[0]) * 1e6)
+
+        # Raised for the whole Shut Eyes expression, then for the blink's peak: {pose: (before, after, stuck)}.
+        shown = {}
+        for pose, deform in turned:
+            m_up = deform[UPPER_LID + "01_" + side]
+            m_down = deform.get(LOWER_LID + "01_" + side)
+            before = after = None
             stuck = 0.0
-            cols = np.flatnonzero(mask.any(0))
-            xq = xs[cols]
-            pu = np.stack([np.interp(xq, upper[order_u, 0], upper[order_u, k]) for k in range(3)], 1)
-            pl = np.stack([np.interp(xq, lower[order_l, 0], lower[order_l, k]) for k in range(3)], 1)
-            tri_u, loc_u, _d = nearest_on(features.bvh, pu)
-            tri_l, loc_l, _d = nearest_on(features.bvh, pl)
-            wu = interpolate(weights, tris, tri_u, barycentric(points, tris, tri_u, loc_u))
-            wl = interpolate(weights, tris, tri_l, barycentric(points, tris, tri_l, loc_l))
-            for k, j in enumerate(cols):
-                rows = np.flatnonzero(mask[:, j])
-                gap = (zs[rows.max()] - zs[rows.min()]) + (zs[1] - zs[0]) + LID_OVERLAP
-                u = wu[k, up_cols].sum()
-                d = wl[k, down_cols].sum() if down_cols else 0.0
-                du = (m_up[:3, :3] @ pu[k] + m_up[:3, 3] - pu[k])[2]
-                if du < -1e-9 and u < 1.0:
-                    target = min(1.0, u + gap / -du)
-                    need_up[j] = target / max(u, 0.05)
-                    gap -= (target - u) * -du
-                if gap > 0 and m_down is not None and down_cols and d < 1.0:
-                    dd = (m_down[:3, :3] @ pl[k] + m_down[:3, 3] - pl[k])[2]
-                    if dd > 1e-9:
-                        target = min(1.0, d + gap / dd)
-                        need_down[j] = target / max(d, 0.05)
-                        gap -= (target - d) * dd
-                stuck = max(stuck, gap)
-            changed = False
-            for need, verts, columns, fall in ((need_up, up_verts, up_cols, up_fall),
-                                               (need_down, down_verts, down_cols, down_fall)):
-                if np.all(need <= 1.0) or not len(verts):
-                    continue
-                pad = LID_SMOOTH // 2
-                padded = np.pad(need, pad, mode="edge")
-                widest = np.array([padded[i:i + LID_SMOOTH].max() for i in range(len(need))])
-                smoothed = np.convolve(np.pad(widest, pad, mode="edge"), np.ones(LID_SMOOTH) / LID_SMOOTH,
-                                       mode="valid")
-                factor = np.interp(points[verts, 0], xs, np.maximum(smoothed, 1.0))
-                previous = weights[verts][:, columns].sum(1)
-                _scale_lid(weights, verts, columns, 1.0 + (factor - 1.0) * fall)
-                changed |= bool(np.abs(weights[verts][:, columns].sum(1) - previous).max() > 1e-4)
-            if not changed:
-                break
-        # Lids meeting much earlier slide on past each other: all of the eye's lid weights are scaled by the
-        # least that still closes it CLOSE_SLACK / 2 before the target (bisection with rays twice as far apart,
-        # then checked at the target). A lid's travel goes with its weight, so they met at about that share
-        # times the scale.
-        early = None
+            for round_ in range(LID_ROUNDS + 1):
+                xs, zs, _hits, mask = opening(pose)
+                area = area_of(pose, xs, zs, mask)
+                before = area if before is None else before
+                after = area
+                if area <= 0.0 or round_ == LID_ROUNDS:
+                    break
+                need_up = np.ones(len(xs))
+                need_down = np.ones(len(xs))
+                stuck = 0.0
+                cols = np.flatnonzero(mask.any(0))
+                xq = xs[cols]
+                pu = np.stack([np.interp(xq, upper[order_u, 0], upper[order_u, k]) for k in range(3)], 1)
+                pl = np.stack([np.interp(xq, lower[order_l, 0], lower[order_l, k]) for k in range(3)], 1)
+                tri_u, loc_u, _d = nearest_on(features.bvh, pu)
+                tri_l, loc_l, _d = nearest_on(features.bvh, pl)
+                wu = interpolate(weights, tris, tri_u, barycentric(points, tris, tri_u, loc_u))
+                wl = interpolate(weights, tris, tri_l, barycentric(points, tris, tri_l, loc_l))
+                for k, j in enumerate(cols):
+                    rows = np.flatnonzero(mask[:, j])
+                    gap = (zs[rows.max()] - zs[rows.min()]) + (zs[1] - zs[0]) + LID_OVERLAP
+                    u = wu[k, up_cols].sum()
+                    d = wl[k, down_cols].sum() if down_cols else 0.0
+                    du = (m_up[:3, :3] @ pu[k] + m_up[:3, 3] - pu[k])[2]
+                    if du < -1e-9 and u < 1.0:
+                        target = min(1.0, u + gap / -du)
+                        need_up[j] = target / max(u, 0.05)
+                        gap -= (target - u) * -du
+                    if gap > 0 and m_down is not None and down_cols and d < 1.0:
+                        dd = (m_down[:3, :3] @ pl[k] + m_down[:3, 3] - pl[k])[2]
+                        if dd > 1e-9:
+                            target = min(1.0, d + gap / dd)
+                            need_down[j] = target / max(d, 0.05)
+                            gap -= (target - d) * dd
+                    stuck = max(stuck, gap)
+                changed = False
+                for need, verts, columns, fall in ((need_up, up_verts, up_cols, up_fall),
+                                                   (need_down, down_verts, down_cols, down_fall)):
+                    if np.all(need <= 1.0) or not len(verts):
+                        continue
+                    pad = LID_SMOOTH // 2
+                    padded = np.pad(need, pad, mode="edge")
+                    widest = np.array([padded[i:i + LID_SMOOTH].max() for i in range(len(need))])
+                    smoothed = np.convolve(np.pad(widest, pad, mode="edge"), np.ones(LID_SMOOTH) / LID_SMOOTH,
+                                           mode="valid")
+                    factor = np.interp(points[verts, 0], xs, np.maximum(smoothed, 1.0))
+                    previous = weights[verts][:, columns].sum(1)
+                    _scale_lid(weights, verts, columns, 1.0 + (factor - 1.0) * fall)
+                    changed |= bool(np.abs(weights[verts][:, columns].sum(1) - previous).max() > 1e-4)
+                if not changed:
+                    break
+            shown[pose] = (before, after, stuck)
+        before, after, stuck = shown[SHUT_POSE]
+        # The blink's peak is only kept closed when raising closed it.
+        blink = shown.get(BLINK_POSE, (0.0, 0.0, 0.0))[1]
+        # Lids meeting much earlier slide on past each other while the eyes stay shut: all of the eye's lid weights
+        # are scaled by the least that still closes it CLOSE_SLACK / 2 before the whole Shut Eyes expression (by
+        # bisection with rays twice as far apart) and at the blink's peak (with all of them, for its slit), then
+        # checked with all of them. A lid's travel goes with its weight, so they met at about that share times
+        # the scale.
+        early = meets = None
         lowered = 1.0
-        aim = share - CLOSE_SLACK
-        if after <= 0.0 and aim > 0.0 and not opening(aim)[3].any():
+        if after <= 0.0 and not opening(SHUT_POSE, 1.0 - CLOSE_SLACK)[3].any():
             lids = np.flatnonzero(near)
             columns = up_cols + down_cols
 
@@ -1526,21 +1542,37 @@ def close_eyes(points, tris, names, weights, features, labels, skeleton, share):
                 _scale_lid(out, lids, columns, factor, head)
                 return out
 
-            low, high = 0.0, 1.0
-            while high - low > CLOSE_PRECISION:
-                middle = (low + high) / 2.0
-                if opening(share - CLOSE_SLACK / 2.0, scaled(middle), 2.0 * SCAN_STEP)[3].any():
-                    low = middle
-                else:
-                    high = middle
-            while high < 1.0 and opening(share, scaled(high))[3].any():
+            def shows(pose, at, factor, step=SCAN_STEP):
+                xs, zs, _hits, mask = opening(pose, at, scaled(factor), step)
+                return area_of(pose, xs, zs, mask) > 0.0
+
+            def least(pose, at, low, step):
+                high = 1.0
+                while high - low > CLOSE_PRECISION:
+                    middle = (low + high) / 2.0
+                    if shows(pose, at, middle, step):
+                        low = middle
+                    else:
+                        high = middle
+                return high
+
+            shut_factor = least(SHUT_POSE, 1.0 - CLOSE_SLACK / 2.0, 0.0, 2.0 * SCAN_STEP)
+            high = shut_factor
+            keep_blink = BLINK_POSE in shown and blink <= 0.0
+            if keep_blink and shows(BLINK_POSE, 1.0, high):
+                high = least(BLINK_POSE, 1.0, high, SCAN_STEP)
+            while high < 1.0 and (shows(SHUT_POSE, 1.0, high) or keep_blink and shows(BLINK_POSE, 1.0, high)):
                 high = min(1.0, high * 1.05)
             if high < 1.0:
                 weights = scaled(high)
                 lowered = high
-                early = (share - CLOSE_SLACK / 2.0) * high
-        report[side] = {"target": share, "before": before, "after": after,
-                        "stuck": stuck * 1000.0 if after > 0.0 else 0.0, "early": early, "lowered": lowered}
+                early = (1.0 - CLOSE_SLACK / 2.0) * shut_factor
+                meets = min(1.0, early / high)
+        if blink > 0.0 and early is not None:
+            xs, zs, _hits, mask = opening(BLINK_POSE)
+            blink = area_of(BLINK_POSE, xs, zs, mask)
+        report[side] = {"before": before, "after": after, "stuck": stuck * 1000.0 if after > 0.0 else 0.0,
+                        "blink": blink, "early": early, "lowered": lowered, "meets": meets}
     return weights, report
 
 
@@ -1601,9 +1633,8 @@ def skin_weights(fit, *, close=True, max_groups=DEFAULT_MAX_GROUPS):
     ring = reference.ring()
     if ring is not None and fit.features.ring is not None:
         weights = _ring_weights(fit.points, fit.tris, weights, ring)
-    if close and reference.skeleton.deformations('BLINK'):
-        weights, eyes = close_eyes(fit.points, fit.tris, names, weights, fit.features, fit.labels, reference.skeleton,
-                                   reference.closing_share())
+    if close and reference.skeleton.deformations(SHUT_POSE):
+        weights, eyes = close_eyes(fit.points, fit.tris, names, weights, fit.features, fit.labels, reference.skeleton)
     return names, limit_weights(weights, max_groups), eyes
 
 
@@ -2219,7 +2250,7 @@ def plan_face(meshes, skin_index, reference, *, skin='ALL', parts='ALL', targets
     ``parts``: which loose parts of the other meshes (``targets``, indices; None for all) get weights, by
     what they are (see PART_CHOICES): 'ALL', 'EYES' (lashes, films, and what's around the eyes), 'MOUTH'
     (what's inside the mouth or around it), 'LASHES' or 'NONE'.
-    ``close``: raise lid weights until the blink closes the eyes (with 'ALL' and 'EYES').
+    ``close``: fit the lid weights so the eyes are shut in the Shut Eyes expression (with 'ALL' and 'EYES').
     ``neck``: plan making the neck ring the game's (positions, normals, weights).
     ``snap_lashes``: plan moving the lashes' roots onto the lash lines, ``lash_lift`` out from the eye.
     Raises FaceError when 'EYES' or 'MOUTH' can't find what they fit to: the eye openings, the lip line.
@@ -2277,9 +2308,9 @@ def plan_face(meshes, skin_index, reference, *, skin='ALL', parts='ALL', targets
                 new = _ring_weights(points, fit.tris, new, (ring[0], ring[1], over(reference.names, ring[2], names)))
                 mask[found[2]] = 1.0
         skin_w = mask[:, None] * new + (1.0 - mask[:, None]) * current
-        if skin == 'EYES' and close and skeleton.deformations('BLINK'):
+        if skin == 'EYES' and close and skeleton.deformations(SHUT_POSE):
             skin_w, plan.report["eyes"] = close_eyes(points, fit.tris, names, skin_w, fit.features, fit.labels,
-                                                     skeleton, reference.closing_share())
+                                                     skeleton)
         skin_w = limit_weights(skin_w, max_groups)
     else:
         skin_w = current

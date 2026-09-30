@@ -3,6 +3,8 @@
 Rig: j_sebo_a (spine) and j_kosi (hips) at the hip height of the Yet Another Devkit skeleton, thighs
 (j_asi_a/b), butt bones (iv_shiri), and the 18 skirt bones at the rest positions they have in the game's
 skeleton: chains front / side / back, segments a to c, left and right, splaying outward as they hang.
+Above them the rest of the spine, the neck and head, and the arms hanging in the game's A-pose, the
+hands a little below the hips, with an index finger.
 
 Body: a closed vertical cylinder around the hips and legs (meters), weighted like a body: j_sebo_a at
 the top, j_kosi at the hips, the thighs below them (split left / right across the middle), the calves
@@ -71,10 +73,21 @@ def build_rig(name="Rig", chains=CHAINS, sides="lr", body_bones=True):
     bone("j_kosi", HIP, (0.0, 0.0958, 1.0223))
     if body_bones:
         bone("j_sebo_a", HIP, (0.0, 0.0124, 1.1576))
+        bone("j_sebo_b", (0.0, 0.0124, 1.1576), (0.0, 0.0151, 1.2825), "j_sebo_a")
+        bone("j_sebo_c", (0.0, 0.0151, 1.2825), (0.0, 0.0, 1.40), "j_sebo_b")
+        bone("j_kubi", (0.0, 0.0, 1.40), (0.0, 0.0, 1.48), "j_sebo_c")
+        bone("j_kao", (0.0, 0.0, 1.48), (0.0, 0.0, 1.62), "j_kubi")
         for side, sign in (("l", 1.0), ("r", -1.0)):
             bone("j_asi_a_" + side, (sign * 0.086, -0.017, 0.9223), (sign * 0.086, -0.0283, 0.5552), "j_kosi")
             bone("j_asi_b_" + side, (sign * 0.086, -0.0283, 0.5552), (sign * 0.086, -0.0283, 0.1), "j_asi_a_" + side)
             bone("iv_shiri_" + side, (sign * 0.0717, 0.0558, 0.9173), (sign * 0.0717, 0.0354, 0.8226), "j_kosi")
+            arm = [(0.025, 0.0196, 1.3143), (0.1277, 0.0137, 1.3449), (0.3094, 0.0405, 1.1632),
+                   (0.4699, 0.0142, 1.0027), (0.52, -0.01, 0.95), (0.55, -0.01, 0.91)]
+            parent = "j_sebo_c"
+            for k, name in enumerate(("j_sako_", "j_ude_a_", "j_ude_b_", "j_te_", "j_hito_a_")):
+                head, tail = ((sign * x, y, z) for x, y, z in arm[k:k + 2])
+                bone(name + side, head, tail, parent)
+                parent = name + side
     for position, heads in chains.items():
         for side in sides:
             sign = 1.0 if side == "l" else -1.0
@@ -179,6 +192,25 @@ def build():
     copy.apply(list(range(count)), [1.0] * count)
     skirt.data.update()
     return rig, body, skirt
+
+
+def build_sleeve(rig):
+    """A wide cuff around the left hand, from 6 cm above the hips to 14 cm below them, weighted to the
+    forearm, the hand and the index finger. Returns the object."""
+    zs = np.linspace(1.10, 0.90, 11)
+    sleeve = tube("Sleeve", zs, np.full(len(zs), 0.07), 16)
+    sleeve.location = (0.47, 0.0, 0.0)
+    z = rest_co(sleeve)[:, 2]
+    forearm = smoothstep(0.98, 1.06, z)
+    finger = 0.3 * smoothstep(0.94, 0.90, z)
+    for name, values in (("j_ude_b_l", forearm), ("j_te_l", 1.0 - forearm - finger), ("j_hito_a_l", finger)):
+        group = sleeve.vertex_groups.new(name=name)
+        for i, weight in enumerate(values.tolist()):
+            if weight > 1e-4:
+                group.add([i], weight, 'REPLACE')
+    sleeve.modifiers.new("Armature", 'ARMATURE').object = rig
+    bpy.context.view_layer.update()
+    return sleeve
 
 
 def index(ring, column):

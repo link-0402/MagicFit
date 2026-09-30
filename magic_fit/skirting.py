@@ -17,6 +17,9 @@ Skirt mode works the skirt bones' weights out from where the bones hang, in the 
   between the two chains around it, as a fraction of the gap between them, with each chain reaching
   Spread gaps to either side. Within a chain it is split between the segments by height, blending over
   Joint Blend around each joint. The chains' angles follow the bones down, since they splay outward.
+- Cloth weighted to the arms or the head (sleeves, gloves, hair) hangs from them, however low it
+  reaches in the rest pose: the skirt share only goes to the part of a vertex's body weight on other
+  bones.
 
 The body share is made of the vertex's own body bone weights, as fractions of one. So applying Skirt
 again changes nothing, and it goes on top of whatever transfer gave the mesh its body weights. A vertex
@@ -38,6 +41,9 @@ from .goals import DEFAULT_MAX_GROUPS, smoothstep
 # Skirt bones: j_sk_<position>_<segment>_<side>.
 SKIRT_BONE = re.compile(r"^j_sk_([a-z])_([a-z])_([lr])$")
 HIP_BONE = "j_kosi"
+# The arms and the head, with every bone below them (fingers, hair): cloth weighted to them hangs from
+# them, not the hips.
+ARMS_AND_HEAD = re.compile(r"^(j_sako|j_ude_[ab]|j_te|n_hkata|n_hhiji|n_hte)_[lr]$|^(j_kubi|j_kao)$")
 # The up axis is the scene's Z, unless the skirt chains hang along a direction farther from it than this.
 MAX_TILT = math.radians(30.0)
 # Shares below this don't count.
@@ -152,16 +158,18 @@ class SkirtRig:
     ``hip`` is the head of the hip bone, ``up`` points up (the scene's Z unless the chains hang along
     something else) and ``ax``, ``ay`` span the plane angles are measured in. ``chains`` are ordered by
     angle; ``bone_names`` lists their bones, chain by chain from the top down: the columns of
-    `distribution`.
+    `distribution`. ``arms_and_head`` names the deforming bones of the arms and the head (see
+    `ARMS_AND_HEAD`).
     """
 
-    def __init__(self, hip, up, ax, ay, chains):
+    def __init__(self, hip, up, ax, ay, chains, arms_and_head=frozenset()):
         self.hip = hip
         self.up = up
         self.ax = ax
         self.ay = ay
         self.chains = chains
         self.bone_names = [name for chain in chains for name in chain.bones]
+        self.arms_and_head = frozenset(arms_and_head)
 
     @classmethod
     def from_object(cls, armature_object):
@@ -171,11 +179,14 @@ class SkirtRig:
         matrix = armature_object.matrix_world
         found = {}
         hip = None
+        arms_and_head = set()
         for bone in armature_object.data.bones:
             if bone.name == HIP_BONE:
                 hip = np.array(matrix @ bone.head_local, dtype=np.float64)
             if not bone.use_deform:
                 continue
+            if any(ARMS_AND_HEAD.match(item.name) for item in (bone, *bone.parent_recursive)):
+                arms_and_head.add(bone.name)
             match = SKIRT_BONE.match(bone.name)
             if match is not None:
                 position, segment, side = match.groups()
@@ -211,7 +222,7 @@ class SkirtRig:
             chain.angles = np.unwrap(np.arctan2(relative @ ay, relative @ ax))
             chains.append(chain)
         chains.sort(key=lambda chain: math.atan2(math.sin(chain.angles[0]), math.cos(chain.angles[0])))
-        return cls(hip, up, ax, ay, chains)
+        return cls(hip, up, ax, ay, chains, arms_and_head)
 
     def cylindrical(self, points):
         """Height above the hip and angle around it of world space ``points`` (n, 3)."""
@@ -339,14 +350,18 @@ class SkirtStroke(goals.GoalStroke):
     # Public API
 
     def body_fractions(self, verts):
-        """The body bones' share of ``verts`` (their skirt weights leave that much to the body)."""
+        """The body bones' share of ``verts`` (their skirt weights leave that much to the body), for
+        vertices without weights on the arms or the head."""
         return self.body_fractions_of(self.weld[np.asarray(verts, dtype=np.int64)])
 
-    def body_fractions_of(self, groups):
+    def body_fractions_of(self, groups, scale=1.0):
+        """The body bones' share of welded ``groups``, with their skirt share times ``scale`` (the part of
+        their body weight not on the arms and the head)."""
+        skirt_share = self.skirt_share[groups] * scale
         if self.skin_weight > 0.0:
-            self._measure(np.unique(groups[self.skirt_share[groups] > 0.0]))
+            self._measure(np.unique(groups[skirt_share > 0.0]))
         return body_fraction(
-            self.skirt_share[groups], self.distance[groups] if self.skin_weight > 0.0 else None,
+            skirt_share, self.distance[groups] if self.skin_weight > 0.0 else None,
             skin_weight=self.skin_weight, skin_distance=self.skin_distance, body_weight=self.body_weight,
         )
 
@@ -367,8 +382,14 @@ class SkirtStroke(goals.GoalStroke):
         )
 
     def _goal(self, vert, group, kept, shares):
-        skirt = 1.0 - kept
         base = self._body_shares(group, shares)
+        held = self._arms_and_head_share(base)
+        if held > SHARE_EPSILON:
+            # Sleeves and hair hang from the arms and the head, however low they reach.
+            kept = float(self.body_fractions_of(np.array([group]), max(1.0 - held, 0.0))[0])
+            if kept >= 1.0 - SHARE_EPSILON and not self.skirt_groups.intersection(shares):
+                return None
+        skirt = 1.0 - kept
         hanging = self._skirt_shares(group) if skirt > SHARE_EPSILON else {}
         if not base:
             if not hanging:
@@ -405,6 +426,14 @@ class SkirtStroke(goals.GoalStroke):
                     base[key] = base.get(key, 0.0) + weight
         total = sum(base.values())
         return {key: share / total for key, share in base.items()} if total > 1e-12 else {}
+
+    def _arms_and_head_share(self, base):
+        """How much of ``base`` (body shares, as from `_body_shares`) is on the arms and the head."""
+        names = self.rig.arms_and_head
+        return sum(
+            share for key, share in base.items()
+            if (key if isinstance(key, str) else self.group_names.get(key)) in names
+        )
 
     def _skirt_shares(self, group):
         """{group or name of a group to create: share} of the skirt bones, adding up to 1 (locked ones

@@ -5,9 +5,10 @@
 Shrinkwrap-like tools send every vertex to its own spot on the surface, which collapses the inner
 and outer layers of thick clothing into one shell. Here the mesh is treated as layers stacked on
 the body instead: for each spot *of the body*, a correction is worked out from the innermost layer
-above it, and every layer over that spot gets the same displacement along the body's normal (with
-the same brush falloff, which is measured along the body as well). Thickness, folds and other
-details ride along unchanged.
+above it, and every layer over that spot gets the same displacement away from the body (with the
+same brush falloff, which is measured along the body as well). Thickness, folds and other details
+ride along unchanged. Over creases, where the body's normal flips from one side to the other, the
+directions turn smoothly, so a mesh spanning a crease isn't pulled apart.
 
 Like `painting`, nothing here depends on the 3D view: `FitStroke` works on world space positions.
 """
@@ -38,9 +39,11 @@ MAX_SMOOTH_PASSES = 150
 # ...and smooths the mesh's height above the body, moving each vertex up to this fraction of the way
 # to its neighbours' average per dab.
 SMOOTH_RATE = 0.5
-# Heights are measured to the body with its triangles bent this far toward their vertex normals
-# (Phong tessellation). 0.5 matches round shapes: flat triangles sag, the full bend overshoots.
-PHONG_SHAPE = 0.5
+# A vertex moves no farther than 1 / this per unit of distance it gains from the body: its direction is
+# turned toward the body's normal until it gains at least this much (a cosine, about 75 degrees).
+MIN_GAIN = 0.25
+# Points per block when averaging the body around them (`BodySurface.smoothed`).
+SMOOTHED_CHUNK = 128
 
 
 def _barycentric(p, a, b, c):
@@ -183,7 +186,7 @@ def _same_groups(a, b, count):
 class Nearest:
     """Closest body points for a set of query points, see `BodySurface.nearest`."""
 
-    __slots__ = ("found", "location", "normal", "distance", "height", "corners", "bary", "beyond")
+    __slots__ = ("found", "location", "normal", "distance", "corners", "bary", "beyond")
 
     def take(self, mask):
         result = Nearest()
@@ -241,6 +244,8 @@ class BodySurface:
         center = self.co.mean(axis=0)
         if np.einsum("ij,ij->", a - center, np.cross(b - center, c - center)) < 0.0:
             normals = -normals
+        # Normals scaled by the area around each vertex, for averages that don't depend on the mesh density.
+        self.area_normals = normals
         self.normals = normals / np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12)
 
         lengths = np.linalg.norm(self.co[self.edges[:, 0]] - self.co[self.edges[:, 1]], axis=1)
@@ -283,13 +288,9 @@ class BodySurface:
     def nearest(self, points):
         """Closest body point, smooth normal and signed distance (negative inside) for (n, 3) points.
 
-        ``height`` is the signed distance to a smooth version of the body instead (Phong
-        tessellation: each flat triangle bent between its vertex normals), so a low-poly body's
-        facets don't show up in it.
-
         ``beyond`` marks points past an open edge of the body (below a torso's waist, say): their closest
         body point is on the edge and they lie off to its side. The body doesn't reach them, so they are
-        never inside it; their distance and height are the (positive) distance to the edge.
+        never inside it; their distance is the (positive) distance to the edge.
         """
         count = len(points)
         location = np.zeros((count, 3))
@@ -314,16 +315,71 @@ class BodySurface:
         result.beyond = self._beyond(result, offset, distance)
         inside = (np.einsum("ij,ij->i", offset, result.normal) < 0.0) & ~result.beyond
         result.distance = np.where(inside, -distance, distance)
-
-        corner_co = self.co[result.corners]
-        corner_normals = self.normals[result.corners]
-        along = np.einsum("ijk,ijk->ij", location[:, None, :] - corner_co, corner_normals)
-        projected = location[:, None, :] - along[:, :, None] * corner_normals
-        bulge = np.einsum("ij,ijk->ik", result.bary, projected) - location
-        # Half of the full Phong bulge, which follows a round surface best (the full one overshoots).
-        smooth_point = location + PHONG_SHAPE * bulge
-        result.height = np.where(result.beyond, distance, np.einsum("ij,ij->i", points - smooth_point, result.normal))
         return result
+
+    def smoothed(self, points, near, spread):
+        """The body under (n, 3) ``points`` (``near`` from `nearest`) smoothed over ``spread``: directions
+        away from it that turn smoothly over creases, and the points they start from.
+
+        Both are averages over the body around each point, by area, each part weighted down the
+        farther it is than the closest body point (smoothly, to nothing ``spread`` farther). The
+        closest body point jumps from one side of a crease to the other halfway across it, and so does
+        its normal; these directions turn gradually instead, pointing straight out of the crease
+        halfway, and the points lie between both sides. On smooth parts of the body the directions are
+        its normal, and a low-poly body's facets don't show in them.
+        """
+        count = len(points)
+        directions = near.normal.copy()
+        bases = near.location.copy()
+        if not count or spread <= 0.0:
+            return directions, bases
+        gap = np.abs(near.distance)
+        center = points.mean(axis=0)
+        points = points - center
+        co = self.co - center
+        span = math.sqrt(np.einsum("ij,ij->i", points, points).max()) + gap.max() + spread
+        nearby = np.flatnonzero(np.einsum("ij,ij->i", co, co) < span * span)
+        if not len(nearby):
+            return directions, bases
+        co = co[nearby]
+        normals = self.area_normals[nearby]
+        area = np.linalg.norm(normals, axis=1)
+        # Per point, weighted: normals, positions times area, and area.
+        sums = np.concatenate((normals, co * area[:, None], area[:, None]), axis=1).astype(np.float32)
+        # A body vertex at distance d weighs (1 - t)², where t = (d² - gap²) / ((gap + spread)² - gap²)
+        # runs from 0 at the closest body point to 1 at ``spread`` farther.
+        scale = (1.0 / (spread * (2.0 * gap + spread))).astype(np.float32)
+        gap_squared = np.square(gap).astype(np.float32)
+        total = np.zeros((count, 7))
+        # Blocks of points close together (sorted by cells ``spread`` wide), each against the body
+        # around it only.
+        order = np.lexsort(np.floor(points / spread).T[::-1])
+        for first in range(0, count, SMOOTHED_CHUNK):
+            rows = order[first:first + SMOOTHED_CHUNK]
+            part = points[rows]
+            middle = part.mean(axis=0)
+            part = part - middle
+            reach = math.sqrt(np.einsum("ij,ij->i", part, part).max()) + gap[rows].max() + spread
+            around = co - middle
+            squared = np.einsum("ij,ij->i", around, around)
+            close = np.flatnonzero(squared < reach * reach)
+            if not len(close):
+                continue
+            part = part.astype(np.float32)
+            weight = part @ around[close].astype(np.float32).T
+            weight *= -2.0
+            weight += (np.einsum("ij,ij->i", part, part) - gap_squared[rows])[:, None]
+            weight += squared[close].astype(np.float32)[None, :]
+            weight *= scale[rows, None]
+            np.subtract(1.0, weight, out=weight)
+            np.clip(weight, 0.0, 1.0, out=weight)
+            weight *= weight
+            total[rows] = weight @ sums[close]
+        length = np.linalg.norm(total[:, :3], axis=1)
+        found = (length > 1e-30) & (total[:, 6] > 1e-30)
+        directions[found] = total[found, :3] / length[found, None]
+        bases[found] = total[found, 3:6] / total[found, 6:] + center
+        return directions, bases
 
     def _beyond(self, near, offset, distance):
         """Which points lie past an open edge of the body: their closest body point (``near``) is on the
@@ -359,11 +415,13 @@ class FitStroke:
     ``mode``: 'PUSH' only moves layers that are too close (or inside), 'TIGHTEN' only pulls in layers
     that are too far, 'FIT' does both.
 
-    Every vertex heads for a goal: how far its stack's innermost layer has to move along the body
-    normal, measured from its reference position (where the stroke found it). Stacks within
-    ``layer_radius`` of each other share the largest (safest) goal, so layers lying beside each other
-    and small folds move as one piece. Goals don't change while vertices travel toward them, so dabs
-    settle instead of piling up; each dab covers strength x falloff of the remaining way.
+    Every vertex heads for a goal: how far its stack's innermost layer has to move away from the body,
+    measured from its reference position (where the stroke found it). Stacks within ``layer_radius``
+    of each other share the largest (safest) goal, so layers lying beside each other and small folds
+    move as one piece. Goals don't change while vertices travel toward them, so dabs settle instead
+    of piling up; each dab covers strength x falloff of the remaining way. Vertices move in straight
+    lines, along the body's normal smoothed over ``layer_radius`` (see `_aim`), so where the mesh
+    spans a crease, vertices on either side of it don't slide apart or into each other.
 
     Auto Smooth (``smooth`` 0..1) keeps the result smooth in two ways, both scaled by it:
 
@@ -371,8 +429,8 @@ class FitStroke:
       rim), goals ease out over up to ``SMOOTH_REACH`` x ``layer_radius``, like cloth draped over
       what needs to move, never below what a stack needs.
     - The mesh under the brush is smoothed like the Auto-Smooth of Blender's sculpt brushes (needs the
-      mesh's ``edges``): the height of the reference positions above the body is smoothed, so the
-      body's curvature doesn't shrink the mesh and layers keep their distance. It never moves a vertex
+      mesh's ``edges``): the height of the reference positions above the (smoothed) body is smoothed,
+      so the body's curvature doesn't shrink the mesh and layers keep their distance. It never moves a vertex
       closer to the body than the offset and keeps vertices split along seams together. The fit
       carries on from the smoothed shape.
 
@@ -397,6 +455,11 @@ class FitStroke:
         self.layer_radius = layer_radius
         self.max_distance = max_distance
         self.moved = np.zeros(len(co), dtype=bool)
+        # The direction each vertex moves in and the smoothed body point it's measured from, picked
+        # where the stroke first reached it (see `_aim`).
+        self.direction = np.zeros((len(co), 3))
+        self.base = np.zeros((len(co), 3))
+        self.aimed = np.zeros(len(co), dtype=bool)
         self.smooth = smooth
         edge = body.edge_length
         if edge > 0.0:
@@ -472,11 +535,14 @@ class FitStroke:
         edges = edges[(edges >= 0).all(axis=1)]
         corners = local[near.corners]
 
-        # How far each vertex has to travel, from its reference position, to sit at the offset.
-        # Measured from its current distance minus how far it came, which also corrects for the
-        # distance gained per step differing from the step (curved or tilted body surfaces).
-        travel = np.einsum("ij,ij->i", self.co[candidates] - self.start[candidates], near.normal)
-        start_distance = near.distance - travel
+        # How far each vertex has come from its reference position along its direction, and how far it
+        # has to rise from there to sit at the offset: measured from its current distance minus what
+        # it gained, which also corrects for the distance gained per step differing from the step
+        # (curved or tilted body surfaces).
+        direction, gain = self._aim(candidates, near, inside | self.moved[candidates])
+        came = self.co[candidates] - self.start[candidates]
+        travel = np.einsum("ij,ij->i", came, direction)
+        start_distance = near.distance - np.einsum("ij,ij->i", came, near.normal)
         need = self.offset - start_distance
 
         # Per body vertex: the stack above it follows its innermost layer, which needs the most.
@@ -505,11 +571,13 @@ class FitStroke:
         known = np.isfinite(target)
         target = _smooth_above(target, stack, known, edges, self.passes)
 
-        # Each vertex heads for the target of the spot below it, along the body normal.
+        # Each vertex heads for the target of the spot below it, along its direction, so the layers over
+        # a spot move alike. Over a crease, where its direction leans away from the body's normal and
+        # gains distance more slowly, a vertex that is too close itself goes as far as it needs to.
         weights = np.where(corners >= 0, near.bary, 0.0)
         weights /= np.maximum(weights.sum(axis=1, keepdims=True), 1e-12)
         goal = (weights * np.where(known, target, 0.0)[np.maximum(corners, 0)]).sum(axis=1)
-        step = alpha * (goal - travel)
+        step = alpha * np.maximum(goal - travel, (self.offset - near.distance) / gain)
         if self.mode == 'PUSH':
             step = np.maximum(step, 0.0)
         elif self.mode == 'TIGHTEN':
@@ -518,12 +586,13 @@ class FitStroke:
         step = np.clip(step, -limit, limit)
         moving = np.abs(step) > 1e-9
         indices = candidates[moving]
-        self.co[indices] += step[moving, None] * near.normal[moving]
+        self.co[indices] += step[moving, None] * direction[moving]
 
         if self.smooth_mesh:
-            distance = near.distance + np.where(moving, step, 0.0)
+            distance = near.distance + np.where(moving, step * gain, 0.0)
+            height = np.einsum("ij,ij->i", self.start[candidates] - self.base[candidates], direction)
             smoothed = self._auto_smooth(
-                candidates, near.normal, near.height - travel, distance, SMOOTH_RATE * self.smooth * weight,
+                candidates, direction, gain, height, distance, SMOOTH_RATE * self.smooth * weight,
             )
             indices = np.union1d(indices, smoothed)
         if self.linked and len(indices):
@@ -532,6 +601,41 @@ class FitStroke:
             return nothing
         self.moved[indices] = True
         return indices
+
+    def _aim(self, candidates, near, needed):
+        """The directions ``candidates`` move in, and how fast they gain distance from the body along
+        them (the cosine to the body's normal at their closest point, ``near``). Only the ``needed``
+        ones get their own (those that may move); the others haven't moved and take the normal.
+
+        A vertex's direction is picked where the stroke first reaches it and kept, so it moves in a
+        straight line. It is the body's normal smoothed over the Keep Together distance
+        (`BodySurface.smoothed`): across a crease, the closest body point jumps from one side to the
+        other, and moving along its normal would pull neighbouring vertices apart (or push them into
+        each other). Where a direction gains less than ``MIN_GAIN`` (a very narrow crease, or the vertex
+        has moved to where the body faces another way), it's turned toward the normal.
+        """
+        fresh = needed & ~self.aimed[candidates]
+        if fresh.any():
+            new = candidates[fresh]
+            self.direction[new], self.base[new] = self.body.smoothed(
+                self.co[new], near.take(fresh), self.layer_radius,
+            )
+            self.aimed[new] = True
+        normal = near.normal
+        direction = np.where(self.aimed[candidates, None], self.direction[candidates], normal)
+        gain = np.einsum("ij,ij->i", direction, normal)
+        low = gain < MIN_GAIN
+        if low.any():
+            # Keep the direction's sideways part, at MIN_GAIN from the normal.
+            side = direction[low] - gain[low, None] * normal[low]
+            length = np.linalg.norm(side, axis=1, keepdims=True)
+            side = np.where(length > 1e-12, side / np.maximum(length, 1e-12), 0.0)
+            turned = MIN_GAIN * normal[low] + math.sqrt(1.0 - MIN_GAIN * MIN_GAIN) * side
+            turned[length[:, 0] <= 1e-12] = normal[low][length[:, 0] <= 1e-12]
+            direction = direction.copy()
+            direction[low] = turned
+            gain = np.einsum("ij,ij->i", direction, normal)
+        return direction, gain
 
     def _move_together(self, candidates, before, before_start):
         """Give every member of a welded group the group's average movement of this dab, so their
@@ -545,12 +649,14 @@ class FitStroke:
             positions[candidates] = old + (total / members)[inverse]
         return candidates[(self.co[candidates] != before).any(axis=1)]
 
-    def _auto_smooth(self, candidates, normals, height, distance, amount):
+    def _auto_smooth(self, candidates, direction, gain, height, distance, amount):
         """Smooth the height of the reference positions above the body, ``amount`` (0..1) per candidate.
 
-        ``height`` is each candidate's reference height above the (smoothed) body, ``distance`` its current
-        one. Heights rather than positions are smoothed, so the body's own curvature is left alone
-        (no shrinking) and vertices only move along the body normal, the same way the fit does.
+        ``height`` is each candidate's reference height along its ``direction`` above the smoothed body
+        (see `_aim`), ``distance`` its current distance to the body, and ``gain`` how much of that it
+        gains per unit along its direction. Heights rather than positions are smoothed, so the body's
+        own curvature is left alone (no shrinking), and vertices only move along their directions, the
+        same way the fit does. Over the smoothed body, a mesh spanning a crease isn't pulled into it.
         Smoothing never takes a vertex closer to the body than the offset (or than it already is).
         Returns the indices of the vertices that moved.
         """
@@ -558,7 +664,7 @@ class FitStroke:
         if not active.any():
             return np.empty(0, dtype=np.int64)
         candidates = candidates[active]
-        normals = normals[active]
+        direction = direction[active]
         unique, inverse = np.unique(self.weld[candidates], return_inverse=True)
         inverse = inverse.reshape(-1)
         count = len(unique)
@@ -574,7 +680,7 @@ class FitStroke:
         rate = np.zeros(count)
         rate[inverse] = amount[active]
         allowed = np.zeros(count)
-        allowed[inverse] = np.minimum(self.offset - distance[active], 0.0)
+        allowed[inverse] = np.minimum(self.offset - distance[active], 0.0) / gain[active]
 
         total = np.zeros(count)
         degree = np.zeros(count)
@@ -587,7 +693,7 @@ class FitStroke:
 
         moving = np.abs(change) > 1e-9
         indices = candidates[moving]
-        offset = change[moving, None] * normals[moving]
+        offset = change[moving, None] * direction[moving]
         self.start[indices] += offset
         self.co[indices] += offset
         return indices
