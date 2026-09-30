@@ -4,7 +4,7 @@ bl_info = {
     "name": "Magic Fit",
     "author": "Luci_xiv",
     "description": "Copy weights from a body, fit, resize and line up meshes on it, weight hair and custom faces like the game's, preview Customize+ templates and relax stretched textures",
-    "version": (1, 0, 0),
+    "version": (1, 0, 1),
     "blender": (5, 2, 0),
     "location": "3D Viewport > Sidebar (N) > Magic Fit tab, and the Weight Paint / Edit Mode toolbars",
     "doc_url": "https://github.com/link-0402/MagicFit",

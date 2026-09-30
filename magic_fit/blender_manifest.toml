@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "magic_fit"
-version = "1.0.0"
+version = "1.0.1"
 name = "Magic Fit"
 tagline = "Transfer weights, line up, fit and resize to a body, relax UVs"
 maintainer = "Luci_xiv"
