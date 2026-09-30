@@ -167,15 +167,17 @@ def steps():
     settings = bpy.context.scene.magic_fit
     check(len(skin.vertex_groups) > 10, "redo: all back")
 
-    # --- Test poses: the game's blink closes the eyes as displayed.
+    # --- Test poses: the game's Shut Eyes expression and its blink close the eyes as displayed.
     bpy.context.view_layer.objects.active = skin
-    with env.override(sidebar):
-        result = bpy.ops.magic_fit.face_pose('EXEC_DEFAULT', True, pose='BLINK')
-    env.redraw()
-    yield 0.4
-    area = open_area(skin, eyeball)
-    check(result == {'FINISHED'} and area < 1.0, "pose: the eye closes in the Blink pose ({:.2f} mm² open)".format(area))
-    env.screenshot("face_03_blink.png")
+    for pose, label in (('SHUT_EYES', "Shut Eyes"), ('BLINK', "Blink")):
+        with env.override(sidebar):
+            result = bpy.ops.magic_fit.face_pose('EXEC_DEFAULT', True, pose=pose)
+        env.redraw()
+        yield 0.4
+        area = open_area(skin, eyeball)
+        check(result == {'FINISHED'} and area < 1.0, "pose: the eye closes in the {:s} pose ({:.2f} mm² open)".format(
+            label, area))
+        env.screenshot("face_03_{:s}.png".format(pose.lower()))
     with env.override(sidebar):
         bpy.ops.magic_fit.face_pose('EXEC_DEFAULT', True, pose='REST')
     env.redraw()

@@ -17,6 +17,9 @@ joint when the model is lined up (with Stretch Limbs on).
   meshes.
 - "Anon" is a model whose vertex groups say nothing (bone_00, bone_01..., shuffled), like The Sims'
   exports, on an armature whose bones all sit at the origin, without feet, in an A-pose of its own.
+
+Humanoids can have fingers (`build_humanoid(fingers=...)`): five tubes off the end of each hand, spread
+across it with the thumb forward, three bones each (Thumb1_L... Little3_L), bent by a given curl.
 """
 
 import math
@@ -182,10 +185,52 @@ def tube(points, bones, radii, before_bone, lead=0.03):
     return vertices, faces, weights
 
 
-def build_humanoid(joints, bone_names, sides=("l", "r"), torso_only_head=False):
+FINGERS = ("thumb", "index", "middle", "ring", "little")
+FINGER_RADIUS = 0.008
+
+
+def finger_bone(finger, segment, side):
+    return "{:s}{:d}_{:s}".format(finger.capitalize(), segment, side.upper())
+
+
+def _turn(vector, axis, degrees):
+    """``vector`` turned ``degrees`` about unit ``axis`` (Rodrigues)."""
+    angle = math.radians(degrees)
+    return (vector * math.cos(angle) + np.cross(axis, vector) * math.sin(angle) +
+            axis * np.dot(axis, vector) * (1.0 - math.cos(angle)))
+
+
+def finger_chains(joints, side, curl=0.0, forward=(0.0, -1.0, 0.0)):
+    """Each finger of a hand (finger -> its 3 joints and tip): spread across the end of the hand (wrist to
+    hand_end), the thumb ``forward`` (the way the model faces) and starting near the wrist, every segment
+    bent ``curl`` degrees more than the one before, about the line across the knuckles: both hands curl
+    the same way, mirrored."""
+    wrist, end = np.asarray(joints["wrist_" + side], float), np.asarray(joints["hand_end_" + side], float)
+    along = (end - wrist) / np.linalg.norm(end - wrist)
+    across = np.asarray(forward, float) - along * np.dot(forward, along)
+    across /= np.linalg.norm(across)
+    bend = across if side == "l" else -across
+    size = np.linalg.norm(end - wrist) / 0.126
+    thumb = (along + 0.9 * across) / np.linalg.norm(along + 0.9 * across)
+    chains = {}
+    for finger, base, direction, lengths in (
+            ("thumb", wrist + size * (0.03 * along + 0.022 * across), thumb, (0.03, 0.025, 0.02)),
+            ("index", end + size * 0.021 * across, along, (0.035, 0.022, 0.018)),
+            ("middle", end + size * 0.007 * across, along, (0.038, 0.024, 0.019)),
+            ("ring", end - size * 0.007 * across, along, (0.035, 0.022, 0.018)),
+            ("little", end - size * 0.021 * across, along, (0.028, 0.018, 0.016))):
+        points = [base]
+        for k, length in enumerate(lengths):
+            points.append(points[-1] + _turn(direction, bend, curl * (k + 1)) * length * size)
+        chains[finger] = points
+    return chains
+
+
+def build_humanoid(joints, bone_names, sides=("l", "r"), torso_only_head=False, fingers=None):
     """Vertices, faces and weights of a humanoid built from tubes, and its markers (vertex index -> joint
     name). ``bone_names`` maps the chain joint names (hips, hip, knee...) to bone names, "{s}"/"{S}"
-    standing for the side."""
+    standing for the side. With ``fingers`` (a curl in degrees, see `finger_chains`), each hand gets
+    finger tubes weighted to Thumb1_L... Little3_L, blending in from the hand's bone."""
     def bone(key, side=None):
         name = bone_names[key]
         if side is not None:
@@ -220,6 +265,10 @@ def build_humanoid(joints, bone_names, sides=("l", "r"), torso_only_head=False):
                  bone("hips")))
         arm = [joints[n + "_" + side] for n in ("clavicle", "shoulder", "elbow", "wrist", "hand_end")]
         add(tube(arm, [bone(k, side) for k in ARM_CHAIN], [RADII[k] for k in ARM_CHAIN], bone("spine_c")))
+        if fingers is not None:
+            for finger, points in finger_chains(joints, side, fingers).items():
+                add(tube(points, [finger_bone(finger, k, side) for k in (1, 2, 3)], [FINGER_RADIUS] * 3,
+                         bone("wrist", side), lead=0.012))
         # Markers: one vertex per joint, weighted to the bone starting there.
         for key, joint in (("hip", "hip"), ("knee", "knee"), ("ankle", "ankle"), ("clavicle", "clavicle"),
                            ("shoulder", "shoulder"), ("elbow", "elbow"), ("wrist", "wrist")):
@@ -228,6 +277,13 @@ def build_humanoid(joints, bone_names, sides=("l", "r"), torso_only_head=False):
                 markers[len(vertices)] = name
                 vertices.append(np.array(joints[name]))
                 weights.append({bone(key, side): 1.0})
+        if fingers is not None:
+            # Finger markers: each joint, and the tip (on the last bone), named like "index2_l", "indextip_l".
+            for finger, points in finger_chains(joints, side, fingers).items():
+                for k, point in enumerate(points):
+                    markers[len(vertices)] = "{:s}{:s}_{:s}".format(finger, str(k + 1) if k < 3 else "tip", side)
+                    vertices.append(np.array(point))
+                    weights.append({finger_bone(finger, min(k + 1, 3), side): 1.0})
     for key in ("neck", "head"):
         markers[len(vertices)] = key
         vertices.append(np.array(joints[key]))
@@ -327,13 +383,16 @@ def clear():
     bpy.context.view_layer.update()
 
 
-def build_body():
-    """The body: FFXIV joints and bone names, A-pose, on its armature "Skeleton"."""
+def build_body(fingers=False):
+    """The body: FFXIV joints and bone names, A-pose, on its armature "Skeleton"; with ``fingers``,
+    straight ones (named Thumb1_L..., under j_te_l)."""
     joints = {name: np.array(point) for name, point in mirror(BODY_JOINTS).items()}
-    vertices, faces, weights, markers = build_humanoid(joints, XIV_BONES)
+    vertices, faces, weights, markers = build_humanoid(joints, XIV_BONES, fingers=0.0 if fingers else None)
     body = mesh_object("Body", vertices, faces, weights)
-    skeleton = armature_object("Skeleton", joints, XIV_BONES, bone_list(
-        joints, XIV_BONES, extra=[("n_root", None, (0.0, 0.0, 0.0), (0.0, 0.0, 0.2))]))
+    extra = [("n_root", None, (0.0, 0.0, 0.0), (0.0, 0.0, 0.2))]
+    if fingers:
+        extra += finger_bones(joints, wrist="j_te_{s}")
+    skeleton = armature_object("Skeleton", joints, XIV_BONES, bone_list(joints, XIV_BONES, extra=extra))
     modifier = body.modifiers.new("Armature", 'ARMATURE')
     modifier.object = skeleton
     body.parent = skeleton
@@ -345,12 +404,13 @@ BIPED_JOINTS = dict(scale=1.1, leg_scale=0.95, arm_angle=70.0, turn=90.0)
 ANON_JOINTS = dict(scale=1.2, leg_scale=1.0, arm_angle=30.0, feet=False)
 
 
-def build_vrc():
-    """The VRChat-style model on its armature "VRC Armature", with a shape key "Wave" (the hands 2 cm up)."""
+def build_vrc(fingers=None):
+    """The VRChat-style model on its armature "VRC Armature", with a shape key "Wave" (the hands 2 cm up);
+    with ``fingers`` (a curl in degrees), fingers too."""
     collection = bpy.data.collections.new("VRC")
     bpy.context.scene.collection.children.link(collection)
     joints = model_joints(**VRC_JOINTS)
-    vertices, faces, weights, markers = build_humanoid(joints, VRC_BONES)
+    vertices, faces, weights, markers = build_humanoid(joints, VRC_BONES, fingers=fingers)
     # A jiggle bone on the left thigh and a breast bone on the chest take some weight.
     for index, weight in enumerate(weights):
         if weight.get("Leg_L", 0.0) == 1.0 and vertices[index][2] < joints["hip_l"][2] - 0.1:
@@ -362,6 +422,8 @@ def build_vrc():
               joints["hip_l"] + np.array((0.0, -0.05, -0.2))),
              ("Boob_L", "Chest", joints["spine_c"] + np.array((0.05, -0.08, 0.0)),
               joints["spine_c"] + np.array((0.05, -0.14, 0.0)))]
+    if fingers is not None:
+        extra += finger_bones(joints, curl=fingers)
     armature = armature_object("VRC Armature", joints, VRC_BONES, bone_list(joints, VRC_BONES, extra=extra),
                                collection)
     modifier = model.modifiers.new("Armature", 'ARMATURE')
@@ -404,12 +466,72 @@ def build_biped():
     return objects, joints, part_markers
 
 
-def build_anon(seed=3):
-    """The anonymous model: groups bone_00.. in random order, on an armature with every bone at the origin."""
+def skirt(joints, bias=0.0, bones=VRC_BONES):
+    """A long skirt, flaring from the hips to below the knees, weighted like the legs under it: the hips'
+    bone near the waist, below it both thighs' bones, each more on its own side, and ``bias`` of the right
+    thigh's weight given to the left one instead (skirts are often weighted unevenly). Returns (vertices,
+    faces, weights)."""
+    hips = np.asarray(joints["hips"], dtype=np.float64)
+    knee = (np.asarray(joints["knee_l"]) + np.asarray(joints["knee_r"])) / 2.0
+    top, bottom = hips[2] - 0.02, knee[2] - 0.15
+    left, right = bones["hip"].replace("{S}", "L"), bones["hip"].replace("{S}", "R")
+    vertices, faces, weights = [], [], []
+    rings = 30
+    for i in range(rings + 1):
+        t = i / rings
+        z = top + (bottom - top) * t
+        radius = 0.19 + 0.12 * t
+        start = len(vertices)
+        for k in range(24):
+            angle = 2.0 * math.pi * k / 24
+            x, y = radius * math.cos(angle), radius * math.sin(angle)
+            vertices.append(np.array((hips[0] + x, hips[1] + y, z)))
+            waist = max(0.0, 1.0 - t / 0.25)  # the hips' bone near the waist only
+            side = 0.5 + 0.5 * x / radius  # 1 on the left, 0 on the right
+            w_left, w_right = (1.0 - waist) * side, (1.0 - waist) * (1.0 - side)
+            w_left, w_right = w_left + bias * w_right, (1.0 - bias) * w_right
+            weights.append({bones["hips"]: waist, left: w_left, right: w_right})
+        if i > 0:
+            previous = start - 24
+            for k in range(24):
+                faces.append((previous + k, previous + (k + 1) % 24, start + (k + 1) % 24, start + k))
+    return vertices, faces, weights
+
+
+def half_body(vertices, faces, weights, markers, keep_upper):
+    """Only the upper body (no legs, torso from the waist up) or the lower one (no arms or fingers, torso up
+    to the waist) of a humanoid from `build_humanoid`: its vertices, faces, weights and markers."""
+    joints_upper = ("Shoulder", "Arm", "Elbow", "Wrist", "Thumb", "Index", "Middle", "Ring", "Little", "Chest",
+                    "Neck", "Head")
+    keep = []
+    for weight in weights:
+        upper = any(name.startswith(joints_upper) for name in weight)
+        lower = any(name.startswith(("Leg", "Knee", "Foot", "Toe")) for name in weight)
+        keep.append(upper if keep_upper else lower or not upper and not lower)
+    keep = np.array(keep)
+    index = np.flatnonzero(keep)
+    remap = {int(old): new for new, old in enumerate(index)}
+    part_faces = [tuple(remap[i] for i in face) for face in faces if all(i in remap for i in face)]
+    part_markers = {remap[v]: joint for v, joint in markers.items() if v in remap}
+    return vertices[index], part_faces, [weights[i] for i in index], part_markers
+
+
+def build_anon(seed=3, fingers=None, skirt_bias=None, half=None):
+    """The anonymous model: groups bone_00.. in random order, on an armature with every bone at the origin;
+    with ``fingers`` (a curl in degrees), fingers too; with ``skirt_bias``, a long skirt (see `skirt`);
+    with ``half`` ("upper" or "lower"), only that half of the body."""
     collection = bpy.data.collections.new("Anon")
     bpy.context.scene.collection.children.link(collection)
     joints = model_joints(**ANON_JOINTS)
-    vertices, faces, weights, markers = build_humanoid(joints, VRC_BONES)
+    vertices, faces, weights, markers = build_humanoid(joints, VRC_BONES, fingers=fingers)
+    if half is not None:
+        vertices, faces, weights, markers = half_body(vertices, faces, weights, markers, half == "upper")
+    if skirt_bias is not None:
+        v, f, w = skirt(joints, skirt_bias)
+        first = len(vertices)
+        vertices = np.concatenate([vertices, np.array(v)])
+        faces = faces + [tuple(i + first for i in face) for face in f]
+        weights = weights + w
     real = sorted({g for w in weights for g in w})
     rng = np.random.default_rng(seed)
     order = rng.permutation(len(real))
@@ -422,9 +544,16 @@ def build_anon(seed=3):
     modifier = model.modifiers.new("Armature", 'ARMATURE')
     modifier.object = armature
     model.parent = armature
-    # The part each anonymous group really is, from its original bone name.
+    # The part each anonymous group really is, from its original bone name (and a finger's bones' order).
     from magic_fit import lineup
-    real_parts = lineup.bone_parts(real, {name: None for name in real})
+    parents = {name: None for name in real}
+    for side in ("l", "r"):
+        for finger in FINGERS:
+            for k in (1, 2, 3):
+                if finger_bone(finger, k, side) in parents:
+                    parents[finger_bone(finger, k, side)] = (finger_bone(finger, k - 1, side) if k > 1 else
+                                                            VRC_BONES["wrist"].replace("{S}", side.upper()))
+    real_parts = lineup.bone_parts(real, parents)
     truth = {rename[name]: real_parts[name] for name in real}
     return model, armature, joints, markers, truth
 
@@ -478,6 +607,22 @@ def displayed_positions(obj):
 
 
 def marker_errors(obj, markers, body_joints):
-    """Distance of each marker (vertex -> joint name) of ``obj`` from the body's joint of the same name."""
+    """Distance of each marker (vertex -> joint name) of ``obj`` from the body's joint of the same name
+    (markers the body has no joint for are left out)."""
     co = world_positions(obj)
-    return {joint: float(np.linalg.norm(co[v] - body_joints[joint])) for v, joint in markers.items()}
+    return {joint: float(np.linalg.norm(co[v] - body_joints[joint])) for v, joint in markers.items()
+            if joint in body_joints}
+
+
+def finger_bones(joints, sides=("l", "r"), wrist="Wrist_{S}", curl=0.0):
+    """Finger bones for `armature_object` (name, parent, head, tail) along the fingers of `finger_chains`,
+    under the hand bone ``wrist``."""
+    result = []
+    for side in sides:
+        for finger, points in finger_chains(joints, side, curl).items():
+            parent = wrist.replace("{S}", side.upper()).replace("{s}", side)
+            for k in (1, 2, 3):
+                name = finger_bone(finger, k, side)
+                result.append((name, parent, points[k - 1], points[k]))
+                parent = name
+    return result

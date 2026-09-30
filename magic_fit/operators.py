@@ -1820,22 +1820,25 @@ def face_parts_text(plan):
 
 
 def face_eyes_text(report):
-    """How the eyes fare in the game's blink, for the report: one line per eye."""
+    """How the eyes fare in the game's Shut Eyes expression, for the report: one line per eye."""
     lines = []
     for side, eye in sorted(report.items()):
         name = "Left eye" if side == 'l' else "Right eye"
         if eye["after"] <= 0.0:
-            line = "{:s} closes in the game's blink as early as the game's face does ({:.0%} of the way to its " \
-                   "peak)".format(name, eye["target"])
+            line = "{:s} is shut in the game's Shut Eyes expression".format(name)
             if eye["before"] > 0.05:
                 line += "; it left {:.1f} mm² of the eyeball showing there before".format(eye["before"])
             if eye["early"] is not None:
-                line += "; its lids would have met at about {:.0%} and slid on past each other, so their weights " \
-                        "were lowered to {:.0%}".format(eye["early"], eye["lowered"])
+                line += "; its lids would have met {:.0%} of the way into it and slid on past each other, so " \
+                        "their weights were lowered to {:.0%}".format(eye["early"], eye["lowered"])
+                if eye["meets"] < 1.0 - facing.CLOSE_SLACK:
+                    line += ", as far as the game's blink still closes it (they meet {:.0%} of the way " \
+                            "in)".format(eye["meets"])
         else:
-            line = "{:s}: {:.1f} mm² of the eyeball still shows where the game's face has closed its eyes in the " \
-                   "blink ({:.0%} of the way to its peak); the lids stop {:.1f} mm apart where their weights can't " \
-                   "go higher".format(name, eye["after"], eye["target"], eye["stuck"])
+            line = "{:s}: {:.1f} mm² of the eyeball still shows in the game's Shut Eyes expression; the lids stop " \
+                   "{:.1f} mm apart where their weights can't go higher".format(name, eye["after"], eye["stuck"])
+        if eye["blink"] > 0.05:
+            line += "; {:.1f} mm² shows at the peak of the game's blink".format(eye["blink"])
         lines.append(line)
     return lines
 
@@ -1980,7 +1983,7 @@ class _FaceTool:
 
 class MAGIC_FIT_OT_face_weights(_FaceTool, bpy.types.Operator):
     """Weight the selected face and its parts (eyes, lashes, teeth, piercings) like the game face it replaces,
-    fitted to its shape. The lids close when blinking and the neck matches the game's"""
+    fitted to its shape. The lids meet when the eyes are shut and the neck matches the game's"""
     bl_idname = "magic_fit.face_weights"
     bl_label = "Face Weights"
 
@@ -1993,8 +1996,8 @@ class MAGIC_FIT_OT_face_weights(_FaceTool, bpy.types.Operator):
 # (repair, label, description, icon, `facing.plan_face` arguments).
 FACE_REPAIRS = (
     ('EYES', "Fix Eyelids",
-     "Weight the eyelids like the game's face, so they close when blinking. Lashes and anything around the "
-     "eyes follow them",
+     "Weight the eyelids like the game's face, so they meet when the eyes are shut. Lashes and anything around "
+     "the eyes follow them",
      'HIDE_ON', dict(skin='EYES', parts='EYES', close=True)),
     ('LASHES', "Snap Lashes",
      "Move the roots of the selected lashes onto the lid edges (raised by Lash Lift) and make each lash follow "
@@ -2207,10 +2210,7 @@ class MAGIC_FIT_OT_face_pose(bpy.types.Operator):
                 bone.matrix_basis = Matrix.Identity(4)
         if self.pose == 'REST':
             return {'FINISHED'}
-        # The game shows the blink's peak for an instant only: the blink goes as far as the game's own face needs
-        # to close its eyes, which it then shows for a few frames.
-        share = face.closing_share() if self.pose == 'BLINK' and skeleton.deformations('BLINK') else 1.0
-        deformations = skeleton.deformations(self.pose, share)
+        deformations = skeleton.deformations(self.pose)
         if not deformations:
             self.report({'WARNING'}, "{:s} has no such animation".format(facing.face_title(race, number)))
             return {'CANCELLED'}
@@ -2383,13 +2383,17 @@ class MAGIC_FIT_OT_line_up(bpy.types.Operator):
             self.report({'ERROR'}, str(error))
             return {'CANCELLED'}
         lineup.write_meshes(result)
-        moved = result.move_armature and self._move_rest_pose(context, result)
+        moved = (result.move_armature or bool(result.bone_places)) and self._move_rest_pose(context, result)
 
         solution = result.solution
         what = "{:d} mesh{:s}".format(len(meshes), "es" if len(meshes) != 1 else "")
         if moved:
             what += " and '{:s}'".format(armature.name)
         details = ["{:.0f} % of its size".format(100.0 * solution.scale)]
+        if solution.half == "upper":
+            details.append("only an upper body (no hips), sized by its arms")
+        elif solution.half == "lower":
+            details.append("only a lower body (no shoulders), sized by its legs")
         if abs(solution.turn) >= 2.0:
             details.append("turned {:.0f}°".format(solution.turn))
         limbs = [factor for part, factor in solution.stretches.items()
@@ -2397,19 +2401,29 @@ class MAGIC_FIT_OT_line_up(bpy.types.Operator):
         if limbs:
             low, high = (int(round(100.0 * (factor - 1.0))) for factor in (min(limbs), max(limbs)))
             details.append("limbs stretched {:+d} to {:+d} %".format(low, high))
+        if solution.fingers:
+            details.append("{:d} finger{:s} turned like the body's".format(
+                solution.fingers, "s" if solution.fingers != 1 else ""))
         self.report({'INFO'}, "Lined up {:s} with '{:s}' in {:.1f} s: {:s}; joints {:s}".format(
             what, body.name, time.perf_counter() - started, ", ".join(details), _joints_note(result)))
-        missing = [part for part in solution.missing if part in result.target_joints]
+        # A top has no legs to warn about, a bottom no arms or head.
+        other_half = lineup.HALF_PARTS["lower" if solution.half == "upper" else "upper"] if solution.half else set()
+        missing = [part for part in solution.missing if part in result.target_joints and
+                   part not in lineup.DIGIT_PARTS and part not in other_half]
         if missing:
             self.report({'WARNING'}, "The model has no {:s}: moved with the part above".format(
                 _missing_note(missing)))
-        if armature is not None and not result.move_armature:
+        if moved and result.bone_places:
+            self.report({'WARNING'}, "The bones of '{:s}' all sat at one spot: they were put where their vertex "
+                                     "groups are".format(armature.name))
+        elif armature is not None and not result.move_armature and not result.bone_places:
             self.report({'WARNING'}, "'{:s}' has no usable joints (its bones sit at one spot or have unknown "
                                      "names), so its rest pose was left as it was".format(armature.name))
         return {'FINISHED'}
 
     def _move_rest_pose(self, context, result):
-        """Move the armature's rest pose along, in its Edit Mode. Returns whether it could."""
+        """Move the armature's rest pose along, or put its bones where their vertex groups are, in its Edit
+        Mode. Returns whether it could."""
         armature = result.armature
         view_layer = context.view_layer
         active = view_layer.objects.active
@@ -2428,7 +2442,10 @@ class MAGIC_FIT_OT_line_up(bpy.types.Operator):
             armature.select_set(True)
             bpy.ops.object.mode_set(mode='EDIT')
             try:
-                lineup.move_rest_pose(result)
+                if result.move_armature:
+                    lineup.move_rest_pose(result)
+                else:
+                    lineup.place_bones(result)
             finally:
                 bpy.ops.object.mode_set(mode='OBJECT')
             return True

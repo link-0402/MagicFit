@@ -90,8 +90,16 @@ def test_reference():
           and "j_f_mabup_01_l" not in skeleton.deformations('BLINK', 0.0),
           "reference: a share of the blink turns the lid that share of the way ({:.1f} degrees at half)".format(
               turn(half) if half is not None else 0.0))
-    share = data.closing_share()
-    check(0.75 <= share < 1.0, "reference: the game's face has closed its eyes before the blink's peak ({:.0%})".format(share))
+    shut = skeleton.deformations('SHUT_EYES').get("j_f_mabup_01_l")
+    check(shut is not None and 0.9 < turn(shut) / turn(lid) <= 1.0,
+          "reference: the Shut Eyes expression turns the upper lid about as far as the blink's peak ({:.1f} degrees)".format(
+              turn(shut) if shut is not None else 0.0))
+    features = data.features()
+    share = facing.closing_share(data.points, data.tris, data.names, data.weights, data.eyes(), skeleton,
+                                 {side: features.opening_box(side) for side in features.eyes})
+    check(share is not None and 1.0 - facing.CLOSE_SLACK <= share <= 1.0,
+          "reference: the game's face is shut in the Shut Eyes expression, its lids meeting just before ({:.0%})".format(
+              share or 0.0))
     check(data.weights.shape == (len(data.points), len(data.names)) and np.allclose(data.weights.sum(1), 1.0, atol=0.01),
           "reference: the skin's weights add up to 1")
     elezen = face.reference('c0501', 1)
@@ -284,17 +292,17 @@ def test_closure_box():
     box = features.opening_box('l')
     check(box[0] < min(upper[:, 0].min(), lower[:, 0].min()) and box[1] > max(upper[:, 0].max(), lower[:, 0].max())
           and box[2] < lower[:, 2].min() and box[3] > upper[:, 2].max(), "closure box: around the lid margins")
-    args = (data.points, data.tris, data.names, data.weights, eye, 'l', data.skeleton)
-    for share in (0.0, 0.5, data.closing_share() - facing.CLOSE_SLACK):
-        whole = facing.blink_opening(*args, share)
-        boxed = facing.blink_opening(*args, share, box=box)
+    args = (data.points, data.tris, data.names, data.weights, eye, 'l', data.skeleton, 'SHUT_EYES')
+    for share in (0.0, 0.5, 0.85):
+        whole = facing.posed_opening(*args, share)
+        boxed = facing.posed_opening(*args, share, box=box)
         check(whole[3].any() and np.array_equal(whole[0], boxed[0]) and np.array_equal(whole[1], boxed[1])
               and np.array_equal(whole[3], boxed[3]) and np.isnan(boxed[2]).sum() > np.isnan(whole[2]).sum(),
-              "closure box: fewer rays find the same opening at {:.0%} of the blink ({:d} cells open)".format(
-                  share, int(whole[3].sum())))
+              "closure box: fewer rays find the same opening at {:.0%} of the Shut Eyes expression ({:d} cells "
+              "open)".format(share, int(whole[3].sum())))
     x, z = eye.center[0], eye.center[2]
-    whole = facing.blink_opening(*args, 0.0)
-    boxed = facing.blink_opening(*args, 0.0, box=(x - 0.001, x + 0.001, z - 0.001, z + 0.001))
+    whole = facing.posed_opening(*args, 0.0)
+    boxed = facing.posed_opening(*args, 0.0, box=(x - 0.001, x + 0.001, z - 0.001, z + 0.001))
     check(np.array_equal(whole[3], boxed[3]) and np.array_equal(whole[2], boxed[2], equal_nan=True),
           "closure box: an opening reaching past a small box is scanned in full")
 
@@ -329,9 +337,32 @@ def test_face_weights():
     check(all(armature_of(obj) is armature for obj in objects.values()), "face weights: every part got the armature")
 
 
-def test_blink_closes():
-    """The whole chain in Blender: weights, armature and the game's blink close the eyes of a face whose
-    eyes were opened wider than the game's."""
+def shut_share(objects, skin, data):
+    """The share of the Shut Eyes expression by which the lids of ``skin`` (weights as Blender has them) cover
+    the eyeballs among ``objects`` (see facing.closing_share), or None."""
+    world = [facing.object_mesh(obj) for obj in objects.values()]
+    index = list(objects.values()).index(skin)
+    eyes = facing.find_eyes(world, data.skeleton, data.radius, skip=index)
+    mesh = world[index]
+    return facing.closing_share(mesh.points, mesh.tris, mesh.names, mesh.weights, eyes, data.skeleton)
+
+
+def posed_open_areas(objects, skin):
+    """{side: mm² of the eyeball showing through ``skin``} as Blender displays them."""
+    bvh = facing.bvh_of(posed_points(skin), facing.mesh_tris(skin.data))
+    areas = {}
+    for side in 'lr':
+        eyeball = objects["eye_" + side]
+        points = posed_points(eyeball)
+        eye = facing.Eye(points.mean(0), float(np.linalg.norm(points - points.mean(0), axis=1).mean()), points,
+                         facing.mesh_tris(eyeball.data), True)
+        areas[side] = facing.open_area(bvh, eye)
+    return areas
+
+
+def test_shut_eyes():
+    """The whole chain in Blender: weights, armature and the game's Shut Eyes expression shut the eyes of a face
+    whose eyes were opened wider than the game's, the lids just meeting there; the blink's peak closes them too."""
     face.clear_scene()
     use_settings()
     objects = face.build()
@@ -339,64 +370,76 @@ def test_blink_closes():
     data = face.reference()
     face.reshape(skin, face.widen_eyes(data))
     face.select(objects.values(), skin)
-    check(bpy.ops.magic_fit.face_weights() == {'FINISHED'}, "blink: Face Weights on wider eyes")
-    check(bpy.ops.magic_fit.face_pose(pose='BLINK') == {'FINISHED'}, "blink: the Blink test pose")
+    check(bpy.ops.magic_fit.face_weights() == {'FINISHED'}, "shut eyes: Face Weights on wider eyes")
+    share = shut_share(objects, skin, data)
+    check(share is not None and 1.0 - facing.CLOSE_SLACK - facing.CLOSE_PRECISION <= share <= 1.0,
+          "shut eyes: the lids meet in the Shut Eyes expression, not much before ({:.2f})".format(share or 0.0))
     armature = armature_of(skin)
-    check(abs(armature.pose.bones["j_f_mabup_01_l"].matrix_basis.to_quaternion().angle) > 0.5,
-          "blink: the upper lid bone turned")
-    posed = posed_points(skin)
-    tris = facing.mesh_tris(skin.data)
-    bvh = facing.bvh_of(posed, tris)
-    for side in 'lr':
-        eyeball = objects["eye_" + side]
-        points = posed_points(eyeball)
-        eye = facing.Eye(points.mean(0), float(np.linalg.norm(points - points.mean(0), axis=1).mean()), points,
-                         facing.mesh_tris(eyeball.data), True)
-        area = facing.open_area(bvh, eye)
-        check(area < 1.0, "blink: the {:s} eye closes in Blender ({:.2f} mm² open)".format(side, area))
+    for pose, label in (('SHUT_EYES', "Shut Eyes"), ('BLINK', "Blink")):
+        check(bpy.ops.magic_fit.face_pose(pose=pose) == {'FINISHED'} and
+              abs(armature.pose.bones["j_f_mabup_01_l"].matrix_basis.to_quaternion().angle) > 0.5,
+              "shut eyes: the {:s} test pose turns the upper lid bone".format(label))
+        for side, area in sorted(posed_open_areas(objects, skin).items()):
+            check(area < 1.0, "shut eyes: the {:s} eye is closed in Blender in the {:s} test pose ({:.2f} mm² "
+                              "open)".format(side, label, area))
     check(bpy.ops.magic_fit.face_pose(pose='REST') == {'FINISHED'} and
           armature.pose.bones["j_f_mabup_01_l"].matrix_basis.to_quaternion().angle < 1e-6,
-          "blink: Rest puts the lids back")
+          "shut eyes: Rest puts the lids back")
 
 
 def test_small_eyes():
     """A face whose eyes are narrower than the game's: the game's lid weights would close them long before the
-    game's face closes its eyes, and slide the lids on past each other. Face Weights lowers them, so the eyes
-    close when the game's face does, and they're closed in the Blink test pose."""
+    Shut Eyes expression is reached, and slide the lids on past each other and fold them there. Face Weights
+    lowers them, so the lids just meet in it."""
     face.clear_scene()
     settings = use_settings()
     objects = face.build()
     skin = objects["skin"]
     data = face.reference()
     face.reshape(skin, face.widen_eyes(data, -0.004))
-    target = data.closing_share()
     job = facing.setup(list(objects.values()), settings)
     plan = facing.plan_face(job.meshes, job.skin, job.face, targets=job.parts)
     for side in 'lr':
         eye = plan.report["eyes"].get(side, {})
         early = eye.get("early")
-        check(early is not None and early < target - facing.CLOSE_SLACK and eye["lowered"] < 0.95,
+        check(early is not None and early < 1.0 - facing.CLOSE_SLACK and eye["lowered"] < 0.95,
               "small eyes: the game's lid weights close the {:s} eye too early ({:.2f}), so they're lowered ({:.2f})".format(
                   side, early if early is not None else 0.0, eye.get("lowered", 1.0)))
     face.select(objects.values(), skin)
     check(bpy.ops.magic_fit.face_weights() == {'FINISHED'}, "small eyes: Face Weights")
-    world = [facing.object_mesh(obj) for obj in objects.values()]
-    index = list(objects.values()).index(skin)
-    eyes = facing.find_eyes(world, data.skeleton, data.radius, skip=index)
-    mesh = world[index]
-    share = facing.closing_share(mesh.points, mesh.tris, mesh.names, mesh.weights, eyes, data.skeleton)
-    check(share is not None and target - facing.CLOSE_SLACK - facing.CLOSE_PRECISION <= share <= target,
-          "small eyes: they close when the game's face does ({:.2f}, the game's face {:.2f})".format(
-              share if share is not None else 1.0, target))
-    check(bpy.ops.magic_fit.face_pose(pose='BLINK') == {'FINISHED'}, "small eyes: the Blink test pose")
-    posed = posed_points(skin)
-    bvh = facing.bvh_of(posed, facing.mesh_tris(skin.data))
-    for side in 'lr':
-        points = posed_points(objects["eye_" + side])
-        eye = facing.Eye(points.mean(0), float(np.linalg.norm(points - points.mean(0), axis=1).mean()), points,
-                         facing.mesh_tris(objects["eye_" + side].data), True)
-        area = facing.open_area(bvh, eye)
-        check(area < 1.0, "small eyes: the {:s} eye is closed in the Blink test pose ({:.2f} mm² open)".format(side, area))
+    share = shut_share(objects, skin, data)
+    check(share is not None and 1.0 - facing.CLOSE_SLACK - facing.CLOSE_PRECISION <= share <= 1.0,
+          "small eyes: the lids meet in the Shut Eyes expression, not much before ({:.2f})".format(share or 0.0))
+    for pose, label in (('SHUT_EYES', "Shut Eyes"), ('BLINK', "Blink")):
+        check(bpy.ops.magic_fit.face_pose(pose=pose) == {'FINISHED'}, "small eyes: the {:s} test pose".format(label))
+        for side, area in sorted(posed_open_areas(objects, skin).items()):
+            check(area < 1.0, "small eyes: the {:s} eye is closed in the {:s} test pose ({:.2f} mm² open)".format(
+                side, label, area))
+
+
+def test_blink_peak():
+    """The blink's peak must close the eyes too, but for a hairline slit: on the game's Lalafell female face 1, lids
+    fitted to the Shut Eyes expression alone would leave the blink's peak half a millimetre open."""
+    data = face.reference('c1201', 1)
+    meshes = [facing.Mesh("skin", data.points, data.tris, [], np.zeros((len(data.points), 0)))]
+    for side, eye in data.eyes().items():
+        points, tris = face.sphere(eye.center, eye.radius * 0.97)
+        meshes.append(facing.Mesh("Eyeball_" + side, points, tris, [], np.zeros((len(points), 0))))
+    plan = facing.plan_face(meshes, 0, data, parts='NONE')
+    eyes = facing.find_eyes(meshes, data.skeleton, data.radius, skip=0)
+    features = facing.Features(data.points, data.tris, data.skeleton, eyes)
+    boxes = {side: features.opening_box(side) for side in features.eyes}
+    share = facing.closing_share(data.points, data.tris, plan.names, plan.goals[0], eyes, data.skeleton, boxes)
+    check(any(eye["lowered"] < 1.0 for eye in plan.report["eyes"].values()) and share is not None
+          and 1.0 - facing.CLOSE_SLACK - facing.CLOSE_PRECISION <= share <= 1.0,
+          "blink peak: lids are lowered, and meet in the Shut Eyes expression, not much before ({:.2f})".format(
+              share or 0.0))
+    for side, eye in sorted(eyes.items()):
+        xs, zs, _hits, mask = facing.posed_opening(data.points, data.tris, plan.names, plan.goals[0], eye, side,
+                                                   data.skeleton, 'BLINK')
+        gap = float(mask.sum(0).max() * (zs[1] - zs[0])) if mask.any() else 0.0
+        check(gap <= facing.BLINK_SLIT, "blink peak: the {:s} eye is closed at the blink's peak but for a slit "
+                                        "({:.2f} mm)".format(side, gap * 1000.0))
 
 
 def test_neck():
@@ -461,15 +504,9 @@ def test_moved_face():
     data = face.reference()
     error = 0.5 * np.abs(face.weights_of(skin, data.names) - data.weights).sum(1)
     check(error.mean() < 0.005, "moved: the same weights as in place ({:.4f})".format(error.mean()))
-    check(bpy.ops.magic_fit.face_pose(pose='BLINK') == {'FINISHED'}, "moved: the Blink pose")
-    posed = posed_points(skin)
-    bvh = facing.bvh_of(posed, facing.mesh_tris(skin.data))
-    eyeball = objects["eye_l"]
-    points = posed_points(eyeball)
-    eye = facing.Eye(points.mean(0), float(np.linalg.norm(points - points.mean(0), axis=1).mean()), points,
-                     facing.mesh_tris(eyeball.data), True)
-    area = facing.open_area(bvh, eye)
-    check(area < 1.0, "moved: ...closes the eyes where the face is now ({:.2f} mm² open)".format(area))
+    check(bpy.ops.magic_fit.face_pose(pose='SHUT_EYES') == {'FINISHED'}, "moved: the Shut Eyes pose")
+    area = posed_open_areas(objects, skin)['l']
+    check(area < 1.0, "moved: ...shuts the eyes where the face is now ({:.2f} mm² open)".format(area))
 
 
 def test_repairs():
@@ -748,7 +785,8 @@ def test_readiness():
 def main():
     magic_fit.register()
     try:
-        for test in (test_reference, test_game_data, test_saved_data_rules, test_textools, test_first_use, test_features, test_closure_box, test_face_weights, test_blink_closes, test_small_eyes, test_neck, test_moved_face,
+        for test in (test_reference, test_game_data, test_saved_data_rules, test_textools, test_first_use, test_features, test_closure_box, test_face_weights, test_shut_eyes, test_small_eyes,
+                     test_blink_peak, test_neck, test_moved_face,
                      test_repairs, test_repairs_need_features, test_body_selected, test_masks, test_snap_lashes,
                      test_detect, test_lashes_alone, test_left_out, test_brush, test_readiness):
             print("==", test.__name__)

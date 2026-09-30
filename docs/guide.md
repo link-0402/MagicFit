@@ -226,6 +226,7 @@ How the weights are worked out, in the rest pose:
 - **On the body.** Where the cloth lies on the body, it keeps **Skin Weight** (1.0) of its body weights, fading out by **Skin Distance** (7 cm). This keeps Customize+ pushing it out over the thighs and butt. **Body Weight** keeps some body weight everywhere, for dresses that should follow the legs a little.
 - **Around the hips,** each spot blends between the two nearest chains. **Spread** sets how far each chain reaches to the side.
 - **Down a chain,** the segments blend over **Joint Blend** (10 cm) at each joint.
+- **Sleeves, gloves and hair** keep their arm and head weights, however low they hang. Only the rest of a spot's body weight gives way to the skirt bones, and skirt weights a sleeve already has go back to the arm.
 - Applying it again changes nothing. Locked groups are never changed. Missing groups are created.
 
 Starting points:
@@ -345,13 +346,13 @@ FFXIV moves faces with a **face skeleton**: bones for the eyelids, eyeballs, bro
 2. Open the **Face** sub-tab.
 3. Set the **Game Face**. **Detect** reads it from a name like `c0801f0002` on the object, mesh or material. Without one, it guesses by shape: usually the right race, but often the wrong face number, and the report says so. **Pick** lets you choose the race and face from a list.
 4. Select the face and its parts and click **Face Weights**. It adds the face bones to the armature (or makes a new **Face Skeleton**), weights the face and each part, and reports what it did.
-5. Check the result with the **Test Poses**: **Blink**, **Talk**, **Shout**, **Angry**, **Clench**, **Ouch**, **Die**, **Salute** and **Bow**. **Rest** puts the bones back.
+5. Check the result with the **Test Poses**: **Blink**, **Shut Eyes** (the game's Shut Eyes expression, which the Bow emote's face uses too), **Talk**, **Shout**, **Angry**, **Clench**, **Ouch**, **Die** and **Salute**. **Rest** puts the bones back.
 6. To fix a spot, paint with **Paint Face Weights**. For a part, select the face too.
 
 How the face is weighted:
 
 - **Fitting.** Your face is warped onto the game's so the lid edges, lip line and neck opening line up. Each vertex then takes the game face's weights at that spot. An upper lid never gets lower lid weights, and a lower lip never gets upper lip weights.
-- **Closing the eyes.** The game shows its blink's peak for only an instant, so its own faces close their eyes a bit before the peak. With **Close Eyes** on, your lids are made to meet at the same moment. Where the eye still shows, the lid weights are raised. Where the lids would meet much too early (smaller eyes than the game's), they're lowered. The report says how well the lids meet.
+- **Closing the eyes.** The game's **Shut Eyes** expression holds the lids about as far closed as its blink goes, for as long as it lasts. With **Close Eyes** on, your lids are made to just meet there. Where the eye still shows, the lid weights are raised. Where the lids would meet much earlier (smaller eyes than the game's), they'd slide past each other and fold while the eyes stay shut, so they're lowered, but not so far that the blink leaves more than a hairline gap. The report says how well the lids meet.
 - **The neck.** With **Match Neck** on, the neck opening gets the game's positions, normals and weights, so no seam shows against the body.
 - **Parts** are weighted by what they are:
   - **Eyeballs** follow the eyeball bones.
@@ -368,7 +369,7 @@ The **Face Repairs** fix one thing on a face whose weights are otherwise fine. S
 
 | Repair | What it does |
 | --- | --- |
-| Fix Eyelids | Weights the lids like the game's face, closing at the right moment, with the lashes and films following them. |
+| Fix Eyelids | Weights the lids like the game's face, meeting in the Shut Eyes expression, with the lashes and films following them. |
 | Snap Lashes | Moves the lash roots onto the lids where the game's lashes grow (plus **Lash Lift** farther out), keeping their shape, then weights them. For lashes that float off or sink into the lids. Select only the face and the lashes. |
 | Fix Mouth | Weights the lips and mouth like the game's face, with teeth, tongue and lip piercings following. |
 | Attach Parts | Weights the selected parts to follow the face's current weights. The face keeps its weights. |
@@ -377,14 +378,14 @@ The **Face Repairs** fix one thing on a face whose weights are otherwise fine. S
 Good to know:
 
 - **Use the face the mod replaces,** the one in its file name. Au Ra and Viera faces 101 to 104 use faces 1 to 4.
-- **Select the eyeballs too.** The eye openings are measured against them. Eyeballs too big for the lids poke through in any blink, and the report says so.
+- **Select the eyeballs too.** The eye openings are measured against them. Eyeballs too big for the lids poke through when the eyes are shut, and the report says so.
 - **Face Weights replaces all bone weights.** Lock the groups you want to keep, or use a repair.
 - **NPC faces:** faces 91 and 92 have no eyeball bones, so eyeballs follow the eye bones. Other NPC faces aren't supported.
 
 | Option | What it does |
 | --- | --- |
 | Game Face | **Detect** finds the game face from names or shape. **Pick** uses the one you choose. |
-| Close Eyes | Makes the lids meet as early in the blink as the game's face does. |
+| Close Eyes | Makes the lids just meet in the game's Shut Eyes expression, without stopping short or sliding past each other. |
 | Match Neck | Gives the neck opening the game's positions, normals and weights. |
 | Max Groups | At most this many bone weights per vertex. |
 | Lash Lift | Snap Lashes: how much farther out from the eyeball the roots go. |
@@ -448,6 +449,8 @@ The panel warns you when a shape key or pose you see in Object Mode isn't shown 
 ### Why it doesn't flatten the mesh
 
 A Shrinkwrap moves every vertex onto the same surface, so a thick garment loses its thickness. Body Fit treats clothing as layers on the body instead. For each spot of the body, it works out how far the innermost layer must move, then moves every layer over that spot by the same amount. Layers within **Keep Together** of each other move as one piece.
+
+Clothing spanning a crease (the cleavage, under the bust, the butt cleft) moves straight out of it or into it, the way the body turns within Keep Together. Its vertices stay evenly spaced instead of sliding apart on either side of the crease.
 
 ### Body Fit's Auto Smooth
 
@@ -543,28 +546,33 @@ The meshes, their shape keys and the armature all change together, and one Ctrl 
 How it lines up:
 
 - **The torso** turns to face the front, scales to the body's size and moves onto the body's hips.
-- **Each arm and leg** turns at its joints to point like the body's. A T-pose ends up in the body's A-pose.
-- **Stretch Limbs** (off) also stretches each limb segment so every joint lands exactly on the body's. Off, limbs keep their own lengths.
-- **Hands** follow the forearms. **Feet** and the **head** keep their angle, so heels stay heels.
+- **The neck and head** move with the torso and keep the model's own proportions. Rigs put the head joint anywhere from the base of the skull to the jaw, so matching it would stretch the neck.
+- **Each arm and leg** turns at its joints to point like the body's. A T-pose ends up in the body's A-pose. **Clavicles** turn with the torso, which already puts the shoulders at the body's height.
+- **Hands and fingers** turn to point like the body's, which straightens curled fingers. A finger segment the body doesn't have (FFXIV's thumbs have two) carries on straight, and fingers the body has no bones for are straightened.
+- **Stretch Limbs** (off) also stretches the clavicles and each limb segment lengthwise, so the shoulders and every limb joint land exactly on the body's. The stretch eases in from each joint, so a squashed thigh doesn't crease against a stretched shin. A leg without a foot stretches as much as its thigh. Off, limbs keep their own lengths.
+- **Feet** keep their angle, so heels stay heels.
+- **Tops and bottoms.** A model with arms but no legs (a top) lines up by its shoulders, sized by its arms. One with legs but no arms (a bottom) lines up by its hips, sized by its legs. Either is taken to stand upright like the body.
 
 How it finds the joints:
 
-- **From bone names.** It knows Unity/VRChat, Mixamo, Unreal, 3ds Max Biped, Rigify, DAZ, VRoid, MMD, The Sims and FFXIV. Extra bones (jiggle, skirt, tail…) go with the bone they hang from.
+- **From bone names.** It knows Unity/VRChat, Mixamo, Unreal, 3ds Max Biped, Rigify, DAZ, VRoid, MMD, The Sims and FFXIV, fingers included. It also reads The Sims' bone names from the hashes some exports name their groups after (bone_1B82D8B2). Extra bones (jiggle, skirt, tail…) go with the bone they hang from.
 - **From vertex groups,** when there's no usable armature. This is a few centimetres less exact, so for bodies and skin-tight models, the joints are then checked against the body's shape.
-- **Unnamed groups** (bone_00, bone_01…) are sorted by where they lie. The model must stand upright, facing the front or +X.
+- **Unnamed groups** (bone_00, bone_01…) are sorted by where they lie. Each branch off a hand is a finger: the thumb is the one starting nearest the wrist. The model must stand upright, facing the front or +X. Long skirts weighted to the legs, even unevenly, still sort right, but can pull the hips a few centimetres off.
 
 Good to know:
 
 - **Keep the armature** if the import has one. Bones give exact joints.
+- **Bones all at one spot,** as in The Sims' exports, are put where their vertex groups are, so the armature fits the lined-up model.
 - **Rigs place joints differently,** so knees can end up a little off.
 - **A posed armature is refused.** Clear its pose first (Pose Mode: **Pose → Clear Transform → All**).
 - **One model at a time.** Meshes on two armatures are refused.
+- **It needs both arms or both legs.** A piece with neither (a corset on spine bones only), or one not shaped like a top or a bottom (a gown's separate skirt starting below the hips), can't be lined up on its own.
 - **Objects parented to a bone** follow it, but aren't scaled.
 - **For FFXIV,** give the meshes the body's weights afterwards with Weight Transfer.
 
 | Option | What it does |
 | --- | --- |
-| Stretch Limbs | Stretches each limb segment so the joints land on the body's. Off: keeps the model's limb lengths. |
+| Stretch Limbs | Stretches the clavicles and each limb segment so the joints land on the body's. Off: keeps the model's limb lengths. |
 
 ## Texture Relax
 

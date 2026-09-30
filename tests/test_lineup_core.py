@@ -68,6 +68,8 @@ def test_classify():
         "lthigh": ("thigh", "l"),
         # The Sims (named), FFXIV
         "b__L_UpperArm__": ("upperarm", "l"), "b__R_Calf__": ("shin", "r"), "b__Spine1__": ("torso", None),
+        "b__L_ShoulderTwist__": ("upperarm", "l"), "b__R_ForearmTwist__": ("forearm", "r"),
+        "b__L_Mid1__": ("hand", "l"), "b__CAS_R_Breast__": ("torso", "r"), "b__R_ThighTwist__": ("thigh", "r"),
         "j_kosi": ("torso", None), "j_sebo_c": ("torso", None), "j_kubi": ("neck", None), "j_kao": ("head", None),
         "j_sako_l": ("clavicle", "l"), "j_ude_a_l": ("upperarm", "l"), "j_ude_b_r": ("forearm", "r"),
         "j_te_l": ("hand", "l"), "j_oya_a_r": ("hand", "r"), "j_asi_a_l": ("thigh", "l"), "j_asi_c_r": ("shin", "r"),
@@ -111,6 +113,53 @@ def test_main_bones():
     check(mains["clavicle_l"] == "Bip001-L-Clavicle" and mains["upperarm_l"] == "Bip001-L-UpperArm",
           "main bones: the clavicle the arm hangs from, not a helper beside it ({})".format(mains["clavicle_l"]))
     check(mains["torso"] == "Bip001-Pelvis" and mains["neck"] == "Bip001-Neck", "main bones: pelvis and neck")
+
+
+def test_finger_names():
+    cases = {
+        # 3ds Max Biped (Finger0 is the thumb), Mixamo, Unreal
+        "Bip001-L-Finger0": "thumb", "Bip001-L-Finger12": "index", "Bip001-R-Finger21": "middle",
+        "Bip001-L-Finger3": "ring", "Bip001-L-Finger42": "little", "mixamorig:LeftHandIndex1": "index",
+        "mixamorig:RightHandPinky3": "little", "mixamorig:LeftHandThumb2": "thumb", "thumb_01_l": "thumb",
+        "index_02_r": "index", "middle_03_l": "middle", "ring_01_r": "ring", "pinky_02_l": "little",
+        "index_metacarpal_l": None,
+        # VRChat, VRoid, Unity, Rigify, DAZ
+        "Index Finger 02_L": "index", "Little Finger_R": "little", "Thumb 03_L": "thumb", "Ring Finger _L": "ring",
+        "J_Bip_L_Little1": "little", "Left Middle Intermediate": "middle", "DEF-f_index.01.L": "index",
+        "DEF-thumb.02.R": "thumb", "DEF-palm.01.L": None, "lIndex1": "index", "rMid2": "middle", "lCarpal1": None,
+        # The Sims, FFXIV, MMD
+        "b__L_Thumb0__": "thumb", "b__R_Mid2__": "middle", "b__L_Pinky1__": "little", "j_oya_a_l": "thumb",
+        "j_hito_b_r": "index", "iv_naka_c_l": "middle", "j_kusu_a_l": "ring", "j_ko_b_r": "little", "j_te_l": None,
+        "Wrist_L": None, "左親指１": "thumb", "右人指２": "index", "左中指３": "middle", "左薬指１": "ring", "右小指２": "little",
+    }
+    wrong = {name: (lineup.finger_of(name), want) for name, want in cases.items() if lineup.finger_of(name) != want}
+    check(not wrong, "fingers: {:d} finger bone names of 11 naming schemes ({})".format(
+        len(cases), wrong if wrong else "all right"))
+
+
+def test_finger_segments():
+    # Biped: Finger0 > Finger01 > Finger02 > Finger0Nub, numbered from the hand out (the nub joins the third);
+    # a helper on the hand stays with it.
+    parents = {"Bip001-Pelvis": None, "Bip001-L-Clavicle": "Bip001-Pelvis", "Bip001-L-UpperArm": "Bip001-L-Clavicle",
+               "Bip001-L-Forearm": "Bip001-L-UpperArm", "Bip001-L-Hand": "Bip001-L-Forearm",
+               "Bip001-L-Finger0": "Bip001-L-Hand", "Bip001-L-Finger01": "Bip001-L-Finger0",
+               "Bip001-L-Finger02": "Bip001-L-Finger01", "Bip001-L-Finger0Nub": "Bip001-L-Finger02",
+               "Bip001-L-Finger1": "Bip001-L-Hand", "Bip001-L-Finger11": "Bip001-L-Finger1",
+               "SC_Weapon": "Bip001-L-Hand"}
+    parts = lineup.bone_parts(list(parents), parents)
+    want = {"Bip001-L-Finger0": "thumb1_l", "Bip001-L-Finger01": "thumb2_l", "Bip001-L-Finger02": "thumb3_l",
+            "Bip001-L-Finger0Nub": "thumb3_l", "Bip001-L-Finger1": "index1_l", "Bip001-L-Finger11": "index2_l",
+            "SC_Weapon": "hand_l", "Bip001-L-Hand": "hand_l"}
+    wrong = {name: (parts[name], part) for name, part in want.items() if parts[name] != part}
+    check(not wrong, "finger segments: numbered from the hand out ({})".format(wrong or "all right"))
+    # Unreal 5: a metacarpal named after its finger is the palm's; the finger starts after it.
+    parents = {"pelvis": None, "clavicle_r": "pelvis", "upperarm_r": "clavicle_r", "lowerarm_r": "upperarm_r",
+               "hand_r": "lowerarm_r", "index_metacarpal_r": "hand_r", "index_01_r": "index_metacarpal_r",
+               "index_02_r": "index_01_r", "thumb_01_r": "hand_r"}
+    parts = lineup.bone_parts(list(parents), parents)
+    check(parts["index_metacarpal_r"] == "hand_r" and parts["index_01_r"] == "index1_r" and
+          parts["index_02_r"] == "index2_r" and parts["thumb_01_r"] == "thumb1_r",
+          "finger segments: metacarpals stay with the palm")
 
 
 # -----------------------------------------------------------------------------
@@ -169,11 +218,10 @@ def test_solve_lines_up_joints():
     solution = lineup.solve(model, body)
     worst = 0.0
     for part, joint in model.items():
-        worst = max(worst, np.linalg.norm(lineup.apply_matrix(solution.transforms[part], joint) - body[part]))
+        worst = max(worst, np.linalg.norm(solution.move(part, joint) - body[part]))
         after = lineup.NEXT.get(part)
         if after in model:
-            end = lineup.apply_matrix(solution.transforms[part], model[after])
-            worst = max(worst, np.linalg.norm(end - body[after]))
+            worst = max(worst, np.linalg.norm(solution.move(part, model[after]) - body[after]))
     check(worst < 1e-9, "solve: every joint and segment end lands on the body's ({:.1e} m)".format(worst))
     check(abs(abs(solution.turn) - 90.0) < 1e-6 and abs(solution.scale - 1.0 / 0.8) < 1e-6,
           "solve: turned {:.1f} degrees, scaled {:.3f}".format(solution.turn, solution.scale))
@@ -194,10 +242,9 @@ def test_solve_without_stretching():
     check(not solution.stretches, "no stretch: no segment stretched")
     worst_angle, worst_length, worst_gap = 0.0, 0.0, 0.0
     for part, after in lineup.NEXT.items():
-        if part not in model or after not in model:
+        if part not in model or after not in model or part in lineup.UPRIGHT | lineup.SHOULDERS:
             continue
-        matrix = solution.transforms[part]
-        start, end = (lineup.apply_matrix(matrix, model[p]) for p in (part, after))
+        start, end = (solution.move(part, model[p]) for p in (part, after))
         wanted = body[after] - body[part]
         cosine = np.dot(end - start, wanted) / np.linalg.norm(end - start) / np.linalg.norm(wanted)
         worst_angle = max(worst_angle, math.degrees(math.acos(min(1.0, cosine))))
@@ -205,9 +252,7 @@ def test_solve_without_stretching():
                                              solution.scale * np.linalg.norm(model[after] - model[part])))
         # Segments stay joined: each starts where the one above put its joint.
         parent = lineup.PARENT[part]
-        if parent != "torso":
-            worst_gap = max(worst_gap, np.linalg.norm(start - lineup.apply_matrix(solution.transforms[parent],
-                                                                                   model[part])))
+        worst_gap = max(worst_gap, np.linalg.norm(start - solution.move(parent, model[part])))
     check(worst_angle < 1e-4, "no stretch: every segment points the body's way ({:.1e} deg)".format(worst_angle))
     check(worst_length < 1e-9 and worst_gap < 1e-9, "no stretch: lengths kept, scaled with the torso, joined up")
     hips = (lineup.apply_matrix(solution.transforms["torso"], (model["thigh_l"] + model["thigh_r"]) / 2.0))
@@ -223,11 +268,150 @@ def test_solve_missing_parts():
     check(np.allclose(solution.transforms["foot_l"], solution.transforms["shin_l"]) and "foot_l" in solution.missing,
           "missing: a model without feet moves them with the shins")
     del model["thigh_l"]
+    check(lineup.solve(model, body).half == "upper", "missing: a model without hips lines up as an upper body")
+    for part in ("upperarm_l", "upperarm_r", "clavicle_l", "clavicle_r", "neck"):
+        model.pop(part, None)
     try:
         lineup.solve(model, body)
-        check(False, "missing: refuses a model without hips")
+        check(False, "missing: refuses a model without hips or shoulders")
     except lineup.LineUpError as error:
-        check("hips" in str(error), "missing: refuses a model without hips ({})".format(error))
+        check("hips" in str(error), "missing: refuses a model without hips or shoulders ({})".format(error))
+
+
+def test_solve_leg_without_foot():
+    # A body cut above the ankles (The Sims): its shins, whose ends it doesn't have, turn toward the body's
+    # ankles by where their points lie (their tips, here its ankles) and stretch as much as the thighs, so
+    # a leg as long as the body's in proportion reaches the body's ankle.
+    body = skeleton(fixture.mirror(fixture.BODY_JOINTS))
+    model = skeleton(fixture.model_joints(scale=0.9, arm_angle=10.0))
+    tips = {}
+    for side in lineup.SIDES:
+        hip = model["thigh_" + side]
+        model["shin_" + side] = hip + 0.85 * (model["shin_" + side] - hip)  # shorter legs, in proportion
+        tips["shin_" + side] = hip + 0.85 * (model.pop("foot_" + side) - hip)
+    solution = lineup.solve(model, body, tips=tips)
+    same = all(abs(solution.stretches["shin_" + side] - solution.stretches["thigh_" + side]) < 1e-9
+               for side in lineup.SIDES)
+    reach = max(np.linalg.norm(solution.move("shin_" + side, tips["shin_" + side]) - body["foot_" + side])
+                for side in lineup.SIDES)
+    check(same and solution.stretches["thigh_l"] > 1.1 and reach < 1e-9,
+          "no foot: the shins stretch like the thighs (x{:.2f}) and reach the body's ankles".format(
+              solution.stretches["shin_l"]))
+
+
+def with_fingers(joints, curl, thumb=3, forward=(0.0, -1.0, 0.0)):
+    """Line Up's joints of a fixture skeleton and its fingers (`fixture.finger_chains`, the thumb with
+    ``thumb`` segments), and the tips of the fingers' last segments."""
+    result, tips = skeleton(joints), {}
+    for side in lineup.SIDES:
+        for finger, points in fixture.finger_chains(joints, side, curl, forward).items():
+            count = thumb if finger == "thumb" else 3
+            for k in range(count):
+                result[lineup.digit_name(finger, k + 1, side)] = np.asarray(points[k])
+            tips[lineup.digit_name(finger, count, side)] = np.asarray(points[count])
+    return result, tips
+
+
+def test_solve_fingers():
+    # The body's fingers are straight, the model's (turned 90 degrees, T-pose) bent 30 degrees more at every
+    # joint, and its thumb has three segments to the body's two: lined up, every segment of the model's
+    # fingers points along the body's finger, keeps its length and stays joined.
+    body_joints = fixture.mirror(fixture.BODY_JOINTS)
+    body, _tips = with_fingers(body_joints, 0.0, thumb=2)
+    turned = fixture.model_joints(scale=0.9, arm_angle=0.0, turn=90.0)
+    model, tips = with_fingers(turned, 30.0, forward=fixture.rotate_z([(0.0, -1.0, 0.0)], 90.0)[0])
+    for stretch in (True, False):
+        solution = lineup.solve(model, body, stretch=stretch, tips=tips)
+        worst_angle, worst_length, worst_gap = 0.0, 0.0, 0.0
+        for side in lineup.SIDES:
+            for finger in fixture.FINGERS:
+                straight = fixture.finger_chains(body_joints, side)[finger]
+                wanted = straight[1] - straight[0]
+                for k in (1, 2, 3):
+                    part = lineup.digit_name(finger, k, side)
+                    end = model.get(lineup.digit_name(finger, k + 1, side), tips.get(part))
+                    start, stop = solution.move(part, model[part]), solution.move(part, end)
+                    cosine = np.dot(stop - start, wanted) / np.linalg.norm(stop - start) / np.linalg.norm(wanted)
+                    worst_angle = max(worst_angle, math.degrees(math.acos(min(1.0, cosine))))
+                    worst_length = max(worst_length, abs(np.linalg.norm(stop - start) -
+                                                         solution.scale * np.linalg.norm(end - model[part])))
+                    worst_gap = max(worst_gap, np.linalg.norm(start - solution.move(lineup.PARENT[part], model[part])))
+        check(worst_angle < 0.01 and worst_length < 1e-9 and worst_gap < 1e-9,
+              "fingers ({:s}): curled fingers straighten along the body's ({:.1e} deg), keep their lengths and "
+              "stay joined".format("stretched" if stretch else "not stretched", worst_angle))
+    # A body without finger bones: the model's fingers at least straighten, along their first segments.
+    plain = skeleton(body_joints)
+    solution = lineup.solve(model, plain, tips=tips)
+    worst = 0.0
+    for part, (finger, segment, side) in lineup.DIGIT_PARTS.items():
+        if segment == 1:
+            continue
+        first = lineup.digit_name(finger, 1, side)
+        end = model.get(lineup.digit_name(finger, segment + 1, side), tips.get(part))
+        along = solution.move(part, end) - solution.move(part, model[part])
+        wanted = solution.move(first, model[lineup.digit_name(finger, 2, side)]) - solution.move(first, model[first])
+        worst = max(worst, math.degrees(math.acos(min(1.0, np.dot(along, wanted) / np.linalg.norm(along) /
+                                                        np.linalg.norm(wanted)))))
+    check(worst < 0.01 and solution.fingers == 0,
+          "fingers: without the body's, straightened along their first segments ({:.1e} deg)".format(worst))
+
+
+def test_solve_neck_and_shoulders():
+    # Rigs put the head joint anywhere from the skull's base to the jaw: a model whose head joint sits 4 cm
+    # lower keeps its neck as it is, with the head, turned and moved with the torso, stretching or not.
+    body = skeleton(fixture.mirror(fixture.BODY_JOINTS))
+    model = skeleton(fixture.model_joints(scale=0.8, arm_angle=0.0, turn=90.0))
+    model["head"] = model["head"] - 0.04 * 0.8 * (model["head"] - model["neck"]) / np.linalg.norm(
+        model["head"] - model["neck"])
+    for stretch in (True, False):
+        solution = lineup.solve(model, body, stretch=stretch)
+        rigid = all(np.allclose(solution.transforms[part], solution.transforms["torso"]) for part in ("neck", "head"))
+        check(rigid and "neck" not in solution.stretches,
+              "neck: moves with the torso, unstretched ({:s})".format("stretched" if stretch else "not stretched"))
+    # Clavicles turn with the torso. A model with narrower shoulders and clavicles starting further out:
+    # stretched, its shoulders land on the body's, and the clavicles' other ends (toward the neck) move with
+    # the torso instead of being lifted like a hood.
+    model = skeleton(fixture.model_joints(scale=0.9, arm_angle=0.0))
+    for side, sign in (("l", 1.0), ("r", -1.0)):
+        model["upperarm_" + side] = model["upperarm_" + side] - np.array((sign * 0.02, 0.0, 0.0))
+        model["clavicle_" + side] = model["clavicle_" + side] + np.array((sign * 0.03, 0.0, -0.02))
+    solution = lineup.solve(model, body)
+    shoulder = solution.move("clavicle_l", model["upperarm_l"])
+    inside = model["clavicle_l"] + np.array((-0.05, 0.0, 0.03))
+    moved = np.linalg.norm(solution.move("clavicle_l", model["upperarm_l"]) -
+                           lineup.apply_matrix(solution.transforms["torso"], model["upperarm_l"]))
+    check(np.allclose(solution.rotations["clavicle_l"], solution.rotations["torso"]) and moved > 0.01 and
+          np.linalg.norm(shoulder - body["upperarm_l"]) < 1e-9 and
+          np.allclose(solution.move("clavicle_l", inside), lineup.apply_matrix(solution.transforms["torso"], inside)),
+          "clavicle: turns with the torso, reaches the body's shoulder ({:.0f} mm out), leaves the neck side where "
+          "it was".format(1000 * moved))
+
+
+def test_stretch_is_smooth():
+    # A thigh squashed and a shin stretched (the model's knee lower than the body's): along the leg,
+    # through points weighted to both around the knee, the leg never folds and its stretch changes gradually.
+    body = skeleton(fixture.mirror(fixture.BODY_JOINTS))
+    model = skeleton(fixture.model_joints(scale=1.0))
+    model["shin_l"] = model["shin_l"] + 0.1 * (model["foot_l"] - model["shin_l"])
+    solution = lineup.solve(model, body)
+    factors = solution.stretches["thigh_l"], solution.stretches["shin_l"]
+    hip, knee, ankle = model["thigh_l"], model["shin_l"], model["foot_l"]
+    line = np.concatenate([hip + np.outer(np.linspace(0.0, 1.0, 200, endpoint=False), knee - hip),
+                           knee + np.outer(np.linspace(0.0, 1.0, 201), ankle - knee)])
+    weights = np.zeros((len(line), len(lineup.PARTS)))
+    share = np.clip((np.linalg.norm(line - hip, axis=1) - np.linalg.norm(knee - hip) + 0.02) / 0.04, 0.0, 1.0)
+    weights[:, lineup.PART_INDEX["thigh_l"]] = 1.0 - share
+    weights[:, lineup.PART_INDEX["shin_l"]] = share
+    moved = lineup.deform(line, weights, solution)
+    steps = np.linalg.norm(np.diff(moved, axis=0), axis=1) / np.linalg.norm(np.diff(line, axis=0), axis=1)
+    top = max(factors) / (1.0 - lineup.RAMP_EASE)
+    check(factors[0] < 0.95 < 1.05 < factors[1] and steps.min() > 0.5 and steps.max() < top + 1e-6 and
+          np.abs(np.diff(steps)).max() < 0.05,
+          "stretch: thigh x{:.2f}, shin x{:.2f}, the leg stretched x{:.2f} to x{:.2f} along it, gradually".format(
+              factors[0], factors[1], steps.min(), steps.max()))
+    ramp = lineup.ramp(np.array((-0.5, 0.0, 1e-4, 0.5, 1.0 - 1e-4, 1.0, 1.5)))
+    check(np.allclose(ramp[[0, 1, 5, 6]], (0.0, 0.0, 1.0, 1.0)) and abs(ramp[3] - 0.5) < 1e-12 and
+          ramp[2] < 1e-6 and ramp[4] > 1.0 - 1e-6, "stretch: eases in from each joint")
 
 
 def test_deform():
@@ -238,7 +422,7 @@ def test_deform():
     points = rng.random((20, 3))
     weights = np.zeros((20, len(lineup.PARTS)))
     weights[:10, lineup.PART_INDEX["forearm_l"]] = 1.0
-    moved = lineup.deform(points, weights, solution.transforms)
+    moved = lineup.deform(points, weights, solution)
     before = np.linalg.norm(points[:10, None] - points[None, :10], axis=2)
     after = np.linalg.norm(moved[:10, None] - moved[None, :10], axis=2)
     check(np.allclose(after, solution.scale * before), "deform: a part without stretching moves rigidly (and scales)")
@@ -364,8 +548,37 @@ def test_unnamed_groups():
     errors = fixture.marker_errors(model, scene["anon_markers"], scene["body_joints"])
     check(result == {'FINISHED'} and max(errors.values()) < 0.006,
           "unnamed: joints land within {:s}".format(mm(max(errors.values()))))
-    heads = np.array([bone.head_local for bone in bpy.data.objects["Anon Armature"].data.bones])
-    check(np.abs(heads).max() < 1e-9, "unnamed: an armature without joints of its own is left as it was")
+    # Its bones, all at the origin, are put where their groups are: the knee's bone starts at the knee.
+    bones = bpy.data.objects["Anon Armature"].data.bones
+    co = fixture.world_positions(model)
+    knee = next(v for v, joint in scene["anon_markers"].items() if joint == "knee_l")
+    group = model.vertex_groups[model.data.vertices[knee].groups[0].group].name
+    off = np.linalg.norm(np.array(bones[group].head_local) - co[knee])
+    heads = np.array([bone.head_local for bone in bones])
+    shown = fixture.displayed_positions(model)
+    check(np.ptp(heads, axis=0).max() > 0.5 and off < 0.01 and np.abs(shown - co).max() < 1e-5,
+          "unnamed: bones all at one spot are put where their groups are (knee {:s} off), the mesh stays".format(
+              mm(off)))
+
+
+def test_unnamed_bones_in_place():
+    # Bones where they belong, but named so they say nothing: the rest pose moves along with their groups.
+    scene = fresh()
+    model, armature = scene["vrc"], scene["vrc_armature"]
+    original = {bone.name: "bone_{:02d}".format(k) for k, bone in enumerate(armature.data.bones)}
+    for bone in armature.data.bones:
+        bone.name = original[bone.name]  # renames the vertex groups too
+    fixture.select([model])
+    result = bpy.ops.magic_fit.line_up()
+    heads = {name: np.array(armature.matrix_world @ armature.data.bones[anon].head_local)
+             for name, anon in original.items()}
+    body = scene["body_joints"]
+    errors = [np.linalg.norm(heads[name] - body[joint]) for name, joint in
+              (("Knee_L", "knee_l"), ("Elbow_R", "elbow_r"), ("Wrist_L", "wrist_l"), ("Foot_R", "ankle_r"))]
+    still = np.abs(fixture.displayed_positions(model) - fixture.world_positions(model)).max() < 1e-5
+    check(result == {'FINISHED'} and max(errors) < 0.006 and still,
+          "unnamed bones in place: the rest pose moves along ({:s} off at most), the mesh stays".format(
+              mm(max(errors))))
 
 
 def test_unnamed_mirrored():
@@ -383,6 +596,218 @@ def test_unnamed_mirrored():
     truth = lineup.bone_parts(real, {name: None for name in real})
     wrong = {rename[name]: (parts[rename[name]], truth[name]) for name in real if parts[rename[name]] != truth[name]}
     check(not wrong, "unnamed: a model facing +X with its arms down sorted too ({})".format(wrong or "all right"))
+
+
+def test_fingers_line_up():
+    # A VRChat-style model whose fingers curl 35 degrees at every joint, and a body with straight fingers:
+    # lined up, each of the model's fingers lies straight along the body's, and its finger bones with it.
+    fixture.clear()
+    body, _skeleton, body_joints = fixture.build_body(fingers=True)
+    model, armature, _joints, markers = fixture.build_vrc(fingers=35.0)
+    bpy.context.scene.magic_fit.target = body
+    bpy.context.scene.body_fit_brush.lineup_stretch = True
+    fixture.select([model])
+    result = bpy.ops.magic_fit.line_up()
+    co = fixture.world_positions(model)
+    at = {name: co[vertex] for vertex, name in markers.items()}
+    matrix = np.array(armature.matrix_world)
+    worst, worst_bone = 0.0, 0.0
+    for side in lineup.SIDES:
+        for finger in fixture.FINGERS:
+            straight = fixture.finger_chains(body_joints, side)[finger]
+            wanted = (straight[1] - straight[0]) / np.linalg.norm(straight[1] - straight[0])
+            points = [at["{:s}{:s}_{:s}".format(finger, k, side)] for k in ("1", "2", "3", "tip")]
+            for a, b in zip(points, points[1:]):
+                worst = max(worst, math.degrees(math.acos(min(1.0, np.dot(b - a, wanted) / np.linalg.norm(b - a)))))
+            bone = armature.data.bones[fixture.finger_bone(finger, 2, side)]
+            direction = matrix[:3, :3] @ (np.array(bone.tail_local) - np.array(bone.head_local))
+            worst_bone = max(worst_bone, math.degrees(math.acos(min(1.0, np.dot(direction, wanted) /
+                                                                     np.linalg.norm(direction)))))
+    check(result == {'FINISHED'} and worst < 0.5 and worst_bone < 0.5,
+          "fingers: curled 35 degrees, lined up straight along the body's ({:.2f} deg off), bones too ({:.2f} "
+          "deg)".format(worst, worst_bone))
+
+
+def test_unnamed_fingers():
+    # Fingers on groups that say nothing: each branch off the hand is a finger, the thumb the one starting
+    # nearest the wrist, the others named across the knuckles from it.
+    fixture.clear()
+    body, _skeleton, _body_joints = fixture.build_body()
+    model, _armature, _joints, _markers, truth = fixture.build_anon(fingers=20.0)
+    names = [group.name for group in model.vertex_groups]
+    target, _armature = lineup.body_rig(body, bpy.context.evaluated_depsgraph_get())
+    parts = lineup.label_anonymous(lineup.mesh_positions(model), lineup.mesh_weights(model, names), target)
+    wrong = {name: (parts[name], want) for name, want in truth.items() if parts[name] != want}
+    fingers = sum(part in lineup.DIGIT_PARTS for part in truth.values())
+    check(not wrong and fingers == 30, "unnamed fingers: {:d} groups sorted, {:d} of them fingers' ({})".format(
+        len(names), fingers, wrong or "all right"))
+
+
+def test_unnamed_skirt():
+    # A long skirt over the legs, weighted to both thighs and more to the left one: the legs stay two, the
+    # pelvis stays in the middle, and the model still lines up.
+    fixture.clear()
+    body, _skeleton, body_joints = fixture.build_body()
+    model, _armature, _joints, markers, truth = fixture.build_anon(skirt_bias=0.3)
+    names = [group.name for group in model.vertex_groups]
+    target, _armature = lineup.body_rig(body, bpy.context.evaluated_depsgraph_get())
+    parts = lineup.label_anonymous(lineup.mesh_positions(model), lineup.mesh_weights(model, names), target)
+    wrong = {name: (parts[name], want) for name, want in truth.items() if parts[name] != want}
+    check(not wrong, "skirt: {:d} groups sorted into their parts ({})".format(len(names), wrong or "all right"))
+    bpy.context.scene.magic_fit.target = body
+    bpy.context.scene.body_fit_brush.lineup_stretch = True
+    fixture.select([model])
+    result = bpy.ops.magic_fit.line_up()
+    errors = fixture.marker_errors(model, markers, body_joints)
+    # The skirt's weights, blending from the hips' bone to the thighs', pull the hips' joints a little.
+    check(result == {'FINISHED'} and max(errors.values()) < 0.03,
+          "skirt: joints land within {:s}".format(mm(max(errors.values()))))
+
+
+SIMS_NAMES = {"Hips": "b__Pelvis__", "Spine": "b__Spine0__", "Chest": "b__Spine2__", "Neck": "b__Neck__",
+              "Head": "b__Head__", "Leg": "b__{S}_Thigh__", "Knee": "b__{S}_Calf__", "Shoulder": "b__{S}_Clavicle__",
+              "Arm": "b__{S}_UpperArm__", "Elbow": "b__{S}_ForeArm__", "Wrist": "b__{S}_Hand__",
+              "Thumb": "b__{S}_Thumb{K}__", "Index": "b__{S}_Index{K}__", "Middle": "b__{S}_Mid{K}__",
+              "Ring": "b__{S}_Ring{K}__", "Little": "b__{S}_Pinky{K}__"}
+
+
+def sims_hash_name(name):
+    """The group name a Sims export gives the bone of the fixture's VRChat-style bone ``name``: "bone_" and
+    the FNV-1 hash of the Sims bone's name."""
+    base, side = (name[:-2], name[-1]) if name[-2:] in ("_L", "_R") else (name, "")
+    digit = base[-1] if base[-1].isdigit() else ""
+    sims = SIMS_NAMES[base.rstrip("0123456789")].replace("{S}", side)
+    sims = sims.replace("{K}", str(int(digit) - 1)) if digit else sims
+    return "bone_{:08X}".format(lineup._fnv1(sims.lower()))
+
+
+def test_sims_hashed_names():
+    # Groups named after the hashes of The Sims' bone names, on bones all at the origin that don't hang from each
+    # other: sorted by the names the hashes stand for, the fingers' segments numbered by where they lie.
+    check(lineup.classify(sims_hash_name("Arm_L")) == ("upperarm", "l") and
+          lineup.classify(sims_hash_name("Knee_R")) == ("shin", "r") and
+          lineup.finger_of(sims_hash_name("Index2_L")) == "index" and
+          lineup.classify("bone_0DE2936B")[0] == lineup.TORSO and lineup.classify("bone_12345678") == (None, None),
+          "Sims hashes: known bone names read, breasts and unknown hashes aside")
+    fixture.clear()
+    body, _skeleton, body_joints = fixture.build_body()
+    joints = fixture.model_joints(**fixture.ANON_JOINTS)
+    vertices, faces, weights, markers = fixture.build_humanoid(joints, fixture.VRC_BONES, fingers=20.0)
+    hashed = [{sims_hash_name(group): value for group, value in weight.items()} for weight in weights]
+    model = fixture.mesh_object("Sims Body", vertices, faces, hashed)
+    names = sorted({group for weight in hashed for group in weight})
+    armature = fixture.armature_object("Sims_Armature", joints, {}, [(n, None, (0, 0, 0), (0, 0, 1)) for n in names],
+                                       at_origin=True)
+    model.modifiers.new("Armature", 'ARMATURE').object = armature
+    model.parent = armature
+    bpy.context.scene.magic_fit.target = body
+    bpy.context.scene.body_fit_brush.lineup_stretch = True
+    result = lineup.plan([model], armature, body, bpy.context.evaluated_depsgraph_get())
+    segments = sum(part in result.source_joints for part in lineup.DIGIT_PARTS)
+    check(result.how == "weights" and segments == 30,
+          "Sims hashes: joints from the weights of named groups ({:s}), all {:d} finger segments".format(
+              result.how, segments))
+    fixture.select([model])
+    outcome = bpy.ops.magic_fit.line_up()
+    errors = fixture.marker_errors(model, markers, body_joints)
+    check(outcome == {'FINISHED'} and max(errors.values()) < 0.006,
+          "Sims hashes: joints land within {:s}".format(mm(max(errors.values()))))
+
+
+def test_half_shapes():
+    # Half a body must be shaped like one: a bottom reaches up past its hips, a top doesn't hang far below its
+    # shoulders. A skirt piece starting below the hips, or a bodice whose hanging bits looked like legs, isn't.
+    body = skeleton(fixture.mirror(fixture.BODY_JOINTS))
+    model = skeleton(fixture.model_joints(scale=1.2, feet=False))
+    legs = {part: joint for part, joint in model.items() if part.startswith(("thigh", "shin"))}
+    solution = lineup.solve(legs, body)
+    hips = (legs["thigh_l"] + legs["thigh_r"]) / 2.0
+    reach = solution.torso_length / solution.scale  # the body's torso length, in the model's size
+    bottom = np.array(((0.0, 0.0, hips[2] + 0.3 * reach), (0.0, 0.0, 0.1)))
+    piece = np.array(((0.0, 0.0, hips[2] - 0.2 * reach), (0.0, 0.0, 0.1)))
+    gown = np.array(((0.0, 0.0, hips[2] + 1.2 * reach), (0.0, 0.0, 0.1)))
+    headed = np.array(((0.0, 0.0, hips[2] + 1.7 * reach), (0.0, 0.0, 0.1)))
+    check(solution.half == "lower" and lineup._half_fits(solution, legs, body, bottom) and
+          lineup._half_fits(solution, legs, body, gown) and not lineup._half_fits(solution, legs, body, piece) and
+          not lineup._half_fits(solution, legs, body, headed),
+          "half shapes: a bottom up to its waist or collar fits, a piece below its hips or up to a head doesn't")
+    arms = {part: joint for part, joint in model.items() if not part.startswith(("thigh", "shin"))}
+    solution = lineup.solve(arms, body)
+    top = (arms["upperarm_l"] + arms["upperarm_r"]) / 2.0
+    shirt = np.array(((0.0, 0.0, top[2] - 0.9 * reach), (0.0, 0.0, top[2] + 0.2)))
+    gown = np.array(((0.0, 0.0, top[2] - 2.0 * reach), (0.0, 0.0, top[2] + 0.2)))
+    check(solution.half == "upper" and lineup._half_fits(solution, arms, body, shirt) and
+          not lineup._half_fits(solution, arms, body, gown),
+          "half shapes: a top down to its hips fits, one hanging two torsos below its shoulders doesn't")
+
+
+def test_arm_cuts():
+    # An arm's groups hand over at these distances along it (the last at the wrist): a sleeve weighted to the
+    # shoulder's first group pulls the second handover in, so the clavicle's share of the arm no longer tells
+    # which ends it. The elbow and the upper arm's length for the forearm still do.
+    body = np.array((0.0, 0.107, 0.366, 0.594))  # the body's: upper arm, forearm and hand joints
+    for along, name in (((0.0, 0.113, 0.324, 0.595, 0.815, 1.0), "painted like the body"),
+                        ((0.0, 0.101, 0.26, 0.583, 0.81, 1.0), "with a sleeve on the shoulder")):
+        cuts = lineup._arm_cuts(np.array(along), body)
+        check(cuts == [1, 3], "arm cuts {:s}: shoulder and elbow where they belong ({})".format(name, cuts))
+
+
+def test_mirror_axis():
+    # Two legs close together and a seat: the points spread more front to back than across, but the model is
+    # mirrored across.
+    rng = np.random.default_rng(1)
+    points = []
+    for x in (-0.04, 0.04):
+        angle = rng.uniform(0.0, 2.0 * math.pi, 3000)
+        points.append(np.column_stack((x + 0.06 * np.cos(angle), 0.06 * np.sin(angle), rng.uniform(0.1, 0.9, 3000))))
+    seat = rng.uniform(-1.0, 1.0, (3000, 2))
+    points.append(np.column_stack((0.1 * seat[:, 0], 0.06 + 0.2 * (1.0 - seat[:, 0] ** 2) * (seat[:, 1] + 1.0) / 2.0,
+                                   rng.uniform(0.8, 1.0, 3000))))
+    points = np.concatenate(points)
+    flat = points[:, :2] - points[:, :2].mean(axis=0)
+    widest = np.linalg.eigh(np.cov(flat.T))[1][:, -1]
+    axis, midline = lineup._mirror_axis(points)
+    check(abs(widest[1]) > abs(widest[0]) and abs(axis[0]) > 0.99 and abs(midline) < 0.01,
+          "mirror axis: across the legs ({}), though they spread most front to back".format(np.round(axis, 3)))
+
+
+def test_half_bodies():
+    # A top (no legs) and a bottom (no arms) with groups that say nothing, and a top on bones named like
+    # VRChat's: each lines up by the end it has, sized by its arms or legs.
+    fixture.clear()
+    body, _skeleton, body_joints = fixture.build_body()
+    bpy.context.scene.magic_fit.target = body
+    bpy.context.scene.body_fit_brush.lineup_stretch = True
+    target, _armature = lineup.body_rig(body, bpy.context.evaluated_depsgraph_get())
+    for half in ("upper", "lower"):
+        model, armature, _joints, markers, truth = fixture.build_anon(half=half)
+        names = [group.name for group in model.vertex_groups]
+        parts = lineup.label_anonymous(lineup.mesh_positions(model), lineup.mesh_weights(model, names), target)
+        wrong = {name: (parts[name], want) for name, want in truth.items() if parts[name] != want}
+        fixture.select([model])
+        result = bpy.ops.magic_fit.line_up()
+        errors = fixture.marker_errors(model, markers, body_joints)
+        check(not wrong and result == {'FINISHED'} and max(errors.values()) < 0.008,
+              "half body, {:s}, unnamed: sorted ({}), joints land within {:s}".format(
+                  half, wrong or "all right", mm(max(errors.values()))))
+        for obj in (model, armature):
+            bpy.data.objects.remove(obj)
+    joints = fixture.model_joints(**fixture.VRC_JOINTS)
+    vertices, faces, weights, markers = fixture.build_humanoid(joints, fixture.VRC_BONES)
+    vertices, faces, weights, markers = fixture.half_body(vertices, faces, weights, markers, True)
+    model = fixture.mesh_object("Top", vertices, faces, weights)
+    bones = [bone for bone in fixture.bone_list(joints, fixture.VRC_BONES)
+             if not bone[0].startswith(("Leg", "Knee", "Foot", "Toe"))]
+    armature = fixture.armature_object("Top Armature", joints, fixture.VRC_BONES, bones)
+    model.modifiers.new("Armature", 'ARMATURE').object = armature
+    model.parent = armature
+    fixture.select([model])
+    result = bpy.ops.magic_fit.line_up()
+    errors = fixture.marker_errors(model, markers, body_joints)
+    check(result == {'FINISHED'} and max(errors.values()) < 1e-4,
+          "half body, a top on named bones: its joints on the body's ({:s} at most)".format(mm(max(errors.values()))))
+    _parts, _deforming, rig = lineup.armature_rig(armature)
+    check(lineup.solve(rig, target, stretch=False).half == "upper", "half body: the solution says it's an upper body")
 
 
 def test_refine_joints():

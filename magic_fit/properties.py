@@ -521,8 +521,8 @@ class MagicFitSettings(bpy.types.PropertyGroup):
     face_close_eyes: BoolProperty(
         name="Close Eyes",
         description=(
-            "Make the lids close fully in the game's blink, even when the eyes are bigger or smaller than the "
-            "game's"
+            "Make the lids just meet in the game's Shut Eyes expression, neither stopping short nor sliding past "
+            "each other, even when the eyes are bigger or smaller than the game's"
         ),
         default=True,
     )
