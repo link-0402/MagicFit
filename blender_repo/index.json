@@ -7,7 +7,7 @@
       "id": "magic_fit",
       "name": "Magic Fit",
       "tagline": "Transfer weights, line up, fit and resize to a body, relax UVs",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "type": "add-on",
       "maintainer": "Luci_xiv",
       "license": [
@@ -27,8 +27,8 @@
         "3.13"
       ],
       "archive_url": "./MagicFit.zip",
-      "archive_size": 32975692,
-      "archive_hash": "sha256:32f352bb604b4fdf1b11fa18c97e8116d995308ddf484fbd6b247305d815c880"
+      "archive_size": 32988215,
+      "archive_hash": "sha256:d31ab91fef74dd520bc98abfbae1e892a564376b0491e36743058ca9a7f16598"
     }
   ]
 }
