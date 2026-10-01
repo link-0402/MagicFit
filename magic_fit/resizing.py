@@ -528,28 +528,13 @@ def keep_rigid(before, after, groups):
     after[members] = center_after[owner] + np.einsum("nij,nj->ni", turn[owner], p)
 
 
-def _components(count, a, b):
-    """Group ``count`` items joined in pairs (``a[i]``, ``b[i]``): the lowest item of each one's group."""
-    labels = np.arange(count)
-    while len(a):
-        low = np.minimum(labels[a], labels[b])
-        if np.array_equal(labels[a], low) and np.array_equal(labels[b], low):
-            break
-        np.minimum.at(labels, a, low)
-        np.minimum.at(labels, b, low)
-        labels = labels[labels]
-    return labels
-
-
 def loose_parts(co, edges):
     """Label each vertex with its loose part (connected by ``edges``, or at the same spot as a vertex
     of the part: split seams). Returns (labels, part count)."""
-    from .fitting import WELD_DISTANCE, weld_groups
+    from .fitting import WELD_DISTANCE, _connected, weld_groups
     weld, count = weld_groups(co, WELD_DISTANCE)
-    labels = _components(count, weld[edges[:, 0]], weld[edges[:, 1]])
-    _unique, labels = np.unique(labels[weld], return_inverse=True)
-    labels = labels.reshape(-1)
-    return labels, int(labels.max()) + 1 if len(labels) else 0
+    labels, parts = _connected(count, np.stack((weld[edges[:, 0]], weld[edges[:, 1]]), axis=1))
+    return labels[weld], parts
 
 
 def part_sizes(co, labels, count):
@@ -592,6 +577,7 @@ MAX_MEDIAN_GAP = 0.03
 
 def _uv_islands(tri_verts, tri_uv):
     """UV island of each triangle: triangles sharing an edge with the same UVs at both ends are in one."""
+    from .fitting import _connected
     count = len(tri_verts)
     uv = np.round(tri_uv * (1 << 20)).astype(np.int64)
     rows = []
@@ -607,7 +593,7 @@ def _uv_islands(tri_verts, tri_uv):
     owner = np.tile(np.arange(count), 3)
     order = np.argsort(edge, kind='stable')
     shared = edge[order][1:] == edge[order][:-1]
-    return _components(count, owner[order][:-1][shared], owner[order][1:][shared])
+    return _connected(count, np.stack((owner[order][:-1][shared], owner[order][1:][shared]), axis=1))[0]
 
 
 def _barycentric(points, corners):

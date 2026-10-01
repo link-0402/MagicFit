@@ -373,23 +373,7 @@ def vertex_areas(co, tris):
 
 def components(count, edges):
     """Connected component of each of ``count`` nodes joined by ``edges`` ((m, 2)), numbered from 0."""
-    label = np.arange(count)
-    edges = np.asarray(edges, dtype=np.int64).reshape(-1, 2)
-    if not len(edges):
-        return label
-    while True:
-        a = label[edges[:, 0]]
-        b = label[edges[:, 1]]
-        changed = a != b
-        if not changed.any():
-            break
-        np.minimum.at(label, np.maximum(a, b)[changed], np.minimum(a, b)[changed])
-        while True:
-            jumped = label[label]
-            if np.array_equal(jumped, label):
-                break
-            label = jumped
-    return np.unique(label, return_inverse=True)[1]
+    return fitting._connected(count, np.asarray(edges, dtype=np.int64).reshape(-1, 2))[0]
 
 
 def hanging_share(distance, start, length):
