@@ -16,6 +16,7 @@ from .operators import (
     MAGIC_FIT_OT_face_pose,
     MAGIC_FIT_OT_face_repair,
     MAGIC_FIT_OT_face_weights,
+    MAGIC_FIT_OT_fit_move,
     MAGIC_FIT_OT_hair_weights,
     MAGIC_FIT_OT_heel_weights,
     MAGIC_FIT_OT_line_up,
@@ -47,6 +48,7 @@ from .properties import COMING_MODES, WEIGHTS_TABS
 WEIGHT_TOOL_IDNAME = "magic_fit.tool"
 FIT_TOOL_IDNAME = "magic_fit.body_fit_tool"
 RELAX_TOOL_IDNAME = "magic_fit.texture_relax_tool"
+MOVE_TOOL_IDNAME = "magic_fit.fit_move_tool"
 # Toolbar icons are geometry files; an absolute path without the ".dat" extension is accepted.
 ICONS_DIR = os.path.join(os.path.dirname(__file__), "icons")
 
@@ -388,6 +390,11 @@ def _fit_sections(settings):
         sub.active = settings.use_max_distance
         sub.prop(settings, "max_distance", text="")
         layout.prop(settings, "use_selected_only")
+        row = layout.row(align=True, heading="Fade at Hidden")
+        row.prop(settings, "use_fade", text="")
+        sub = row.row(align=True)
+        sub.active = settings.use_fade
+        sub.prop(settings, "fade_distance", text="")
 
     return (
         ("body_fit_brush_falloff", "Falloff", falloff),
@@ -437,6 +444,33 @@ class VIEW3D_PT_body_fit_options(bpy.types.Panel):
 
     def draw(self, context):
         _draw_popover(self.layout, _fit_sections(context.scene.body_fit_brush))
+
+
+# -----------------------------------------------------------------------------
+# Fit Move settings
+
+def _draw_move_settings(context, layout):
+    settings = context.scene.fit_move
+    header = context.region.type in {'TOOL_HEADER', 'HEADER'}
+    col = layout if header else layout.column()
+    row = col.row(align=True, heading="" if header else "Fade at Hidden")
+    row.prop(settings, "use_fade", text="Fade at Hidden" if header else "")
+    sub = row.row(align=True)
+    sub.active = settings.use_fade
+    sub.prop(settings, "fade_distance", text="")
+    col.prop(settings, "seam_distance")
+    if header:
+        return
+    tool = context.tool_settings
+    col.separator()
+    row = col.row(heading="Proportional")
+    row.prop(tool, "use_proportional_edit", text="")
+    sub = row.row(align=True)
+    sub.active = tool.use_proportional_edit
+    sub.prop(tool, "proportional_edit_falloff", text="")
+    sub = col.row()
+    sub.active = tool.use_proportional_edit
+    sub.prop(tool, "proportional_size", text="Size")
 
 
 # -----------------------------------------------------------------------------
@@ -930,6 +964,22 @@ class VIEW3D_PT_body_fit_sidebar(tabs.TabPanel, bpy.types.Panel):
         _draw_use_button(col, 'FIT', "Fit to Body", "body_fit")
 
 
+class VIEW3D_PT_fit_move_sidebar(tabs.TabPanel, bpy.types.Panel):
+    """Move vertices with proportional editing that keeps to the mesh"""
+    bl_label = "Fit Move"
+    bl_order = 1
+    tab = 'FIT'
+
+    def draw(self, context):
+        layout = _panel_layout(self.layout)
+        if _tool_is_active(context, 'EDIT_MESH', MOVE_TOOL_IDNAME):
+            _draw_move_settings(context, layout)
+            return
+        col = layout.column()
+        col.label(text="Moves the selection without reaching across gaps")
+        _draw_use_button(col, 'MOVE', "Fit Move", "fit_move")
+
+
 def _draw_key_search(layout, settings, prop, obj, text):
     """A shape key of ``obj`` to pick, by name."""
     keys = obj.data.shape_keys if obj is not None and obj.type == 'MESH' else None
@@ -1036,6 +1086,7 @@ class VIEW3D_PT_line_up_sidebar(tabs.TabPanel, bpy.types.Panel):
         settings = context.scene.body_fit_brush
         col = layout.column()
         col.prop(settings, "lineup_stretch")
+        col.prop(settings, "lineup_fit_shape")
         problem = check_lineup_ready(context)
         if problem is not None:
             col.box().label(text=problem, icon='ERROR')
@@ -1226,6 +1277,34 @@ class TextureRelaxTool(bpy.types.WorkSpaceTool):
             )
 
 
+class FitMoveTool(bpy.types.WorkSpaceTool):
+    bl_space_type = 'VIEW_3D'
+    bl_context_mode = 'EDIT_MESH'
+    bl_idname = MOVE_TOOL_IDNAME
+    bl_label = "Fit Move"
+    bl_description = (
+        "Drag or press G to move the selection. Proportional editing reaches along the mesh,\n"
+        "not across gaps, keeps split seams closed and fades out toward hidden vertices"
+    )
+    bl_icon = os.path.join(ICONS_DIR, "fit_move")
+    bl_widget = None
+    # Like Blender's Move tool: drag to move (starting on an unselected vertex selects it first), click to
+    # select, Shift click to add or remove.
+    bl_keymap = (
+        (MAGIC_FIT_OT_fit_move.bl_idname, {"type": 'LEFTMOUSE', "value": 'CLICK_DRAG'},
+         {"properties": [("release_confirm", True)]}),
+        (MAGIC_FIT_OT_fit_move.bl_idname, {"type": 'G', "value": 'PRESS'}, None),
+        ("view3d.select", {"type": 'LEFTMOUSE', "value": 'PRESS'},
+         {"properties": [("deselect_all", True), ("select_passthrough", True)]}),
+        ("view3d.select", {"type": 'LEFTMOUSE', "value": 'CLICK'}, {"properties": [("deselect_all", True)]}),
+        ("view3d.select", {"type": 'LEFTMOUSE', "value": 'PRESS', "shift": True}, {"properties": [("toggle", True)]}),
+    )
+
+    @staticmethod
+    def draw_settings(context, layout, _tool):
+        _draw_move_settings(context, layout)
+
+
 # The tabs first. The other sidebar panels are sorted by their bl_order, then by registration; the
 # Weight Transfer and Customize+ panels are registered with their modules.
 classes = (
@@ -1246,6 +1325,7 @@ classes = (
     VIEW3D_PT_face_pose_sidebar,
     VIEW3D_PT_face_brush_sidebar,
     VIEW3D_PT_body_fit_sidebar,
+    VIEW3D_PT_fit_move_sidebar,
     VIEW3D_PT_resize_sidebar,
     VIEW3D_PT_clipping_sidebar,
     VIEW3D_PT_line_up_sidebar,
@@ -1259,9 +1339,11 @@ def register():
     bpy.utils.register_tool(MagicFitTool, after={"builtin.gradient"})
     bpy.utils.register_tool(BodyFitTool, separator=True)
     bpy.utils.register_tool(TextureRelaxTool, after={FIT_TOOL_IDNAME})
+    bpy.utils.register_tool(FitMoveTool, after={RELAX_TOOL_IDNAME})
 
 
 def unregister():
+    bpy.utils.unregister_tool(FitMoveTool)
     bpy.utils.unregister_tool(TextureRelaxTool)
     bpy.utils.unregister_tool(BodyFitTool)
     bpy.utils.unregister_tool(MagicFitTool)

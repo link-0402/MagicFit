@@ -5,14 +5,17 @@ import time
 
 import bmesh
 import bpy
+import gpu
 import numpy as np
-from bpy.props import BoolProperty, EnumProperty, IntProperty
+from bpy.props import BoolProperty, EnumProperty, FloatVectorProperty, IntProperty
 from bpy_extras import view3d_utils
+from gpu_extras.batch import batch_for_shader
 from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
+from mathutils.geometry import intersect_line_line, intersect_line_plane
 
-from . import (facedata, facing, fitting, goals, hairing, heeling, lineup, painting, relaxing, resizing, skirting,
-               smoothing, straighten)
+from . import (facedata, facing, fitting, goals, hairing, heeling, lineup, moving, painting, relaxing, resizing,
+               skirting, smoothing, straighten)
 from .cplus import rig as cplus_rig
 from .properties import COMING_MODES
 
@@ -1376,21 +1379,28 @@ class _EditMeshStroke(_BrushStroke):
     def _write(self, indices, local_co=None):
         """Store the positions of vertices ``indices`` (of the combined arrays) in their meshes: the
         stroke's current ones, or ``local_co`` (object space)."""
-        for part in self.parts:
-            inside = (indices >= part.first) & (indices < part.first + part.count)
-            if not inside.any():
-                continue
-            part_indices = indices[inside]
-            if local_co is None:
-                co = part.to_edit(part_indices - part.first, self.stroke.co[part_indices])
-            else:
-                co = local_co[inside]
-            bm = bmesh.from_edit_mesh(part.mesh)
-            bm.verts.ensure_lookup_table()
-            verts = bm.verts
-            for index, position in zip((part_indices - part.first).tolist(), co.tolist()):
-                verts[index].co = position
-            bmesh.update_edit_mesh(part.mesh, loop_triangles=True, destructive=False)
+        write_edited(self.parts, indices, self.stroke.co[indices] if local_co is None else None, local_co)
+
+
+def write_edited(parts, indices, co=None, local_co=None):
+    """Store vertices ``indices`` (of the combined arrays of `read_edited_meshes`) in their edit meshes,
+    displayed at ``co`` (world space), or at the edit positions ``local_co`` (object space); one row
+    per index."""
+    for part in parts:
+        inside = (indices >= part.first) & (indices < part.first + part.count)
+        if not inside.any():
+            continue
+        part_indices = indices[inside]
+        if local_co is None:
+            positions = part.to_edit(part_indices - part.first, co[inside])
+        else:
+            positions = local_co[inside]
+        bm = bmesh.from_edit_mesh(part.mesh)
+        bm.verts.ensure_lookup_table()
+        verts = bm.verts
+        for index, position in zip((part_indices - part.first).tolist(), positions.tolist()):
+            verts[index].co = position
+        bmesh.update_edit_mesh(part.mesh, loop_triangles=True, destructive=False)
 
 
 class MAGIC_FIT_OT_body_fit(_EditMeshStroke, bpy.types.Operator):
@@ -1428,8 +1438,11 @@ class MAGIC_FIT_OT_body_fit(_EditMeshStroke, bpy.types.Operator):
             layer_radius=settings.layer_radius,
             max_distance=settings.max_distance if settings.use_max_distance else None,
             edges=edited.edges,
+            # The triangles tell which way the clothing faces and where its layers lie (see FitStroke).
+            tris=edited.tris,
             smooth=settings.auto_smooth if settings.use_auto_smooth else 0.0,
             weld_distance=settings.seam_distance,
+            fade_distance=settings.fade_distance if settings.use_fade else 0.0,
         )
         return self._begin(context, event, edited, settings)
 
@@ -1456,6 +1469,246 @@ class MAGIC_FIT_OT_texture_relax(_EditMeshStroke, bpy.types.Operator):
             weld_distance=settings.seam_distance,
         )
         return self._begin(context, event, edited, settings)
+
+
+# Fit Move: the proportional size changes by this factor per wheel step or Page Up/Down, like Blender's,
+# and mouse moves count this much while Shift is held.
+PROPORTIONAL_STEP = 1.1
+PRECISION = 0.1
+AXES = (Vector((1.0, 0.0, 0.0)), Vector((0.0, 1.0, 0.0)), Vector((0.0, 0.0, 1.0)))
+AXIS_COLORS = ((1.0, 0.21, 0.33, 1.0), (0.55, 0.86, 0.0, 1.0), (0.16, 0.56, 1.0, 1.0))
+FIT_MOVE_HINTS = (
+    "Confirm: Click, Enter   Cancel: Right-click, Esc   X, Y, Z: along an axis (Shift: not along it)   "
+    "C: free   Wheel, Page Up/Down: proportional size   Shift: precise"
+)
+
+
+def _length_text(context, value):
+    unit = context.scene.unit_settings
+    if unit.system == 'NONE':
+        return "{:.4f}".format(value)
+    return bpy.utils.units.to_string(unit.system, 'LENGTH', value * unit.scale_length, precision=4)
+
+
+def _draw_polyline(coords, color, width):
+    shader = gpu.shader.from_builtin('POLYLINE_UNIFORM_COLOR')
+    shader.uniform_float("viewportSize", gpu.state.viewport_get()[2:])
+    shader.uniform_float("lineWidth", width)
+    shader.uniform_float("color", color)
+    batch_for_shader(shader, 'LINE_STRIP', {"pos": coords}).draw(shader)
+
+
+class MAGIC_FIT_OT_fit_move(bpy.types.Operator):
+    """Move the selected vertices. Proportional editing reaches along the mesh, not across gaps, keeps split seams closed and fades out toward hidden vertices"""
+    bl_idname = "magic_fit.fit_move"
+    bl_label = "Fit Move"
+    bl_options = {'REGISTER', 'UNDO', 'BLOCKING'}
+
+    value: FloatVectorProperty(
+        name="Move",
+        description="How far the selection moves",
+        subtype='TRANSLATION',
+        size=3,
+    )
+    release_confirm: BoolProperty(
+        name="Confirm on Release",
+        description="Finish when the mouse button that started the move is released",
+        options={'HIDDEN', 'SKIP_SAVE'},
+    )
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.object
+        return context.mode == 'EDIT_MESH' and obj is not None and obj.type == 'MESH'
+
+    def _setup(self, context):
+        """Read the edited meshes and work out how far each vertex goes. Returns why nothing can move, or
+        None."""
+        edited = read_edited_meshes(context, None)
+        if not edited.parts:
+            return "Edit a mesh to move its vertices"
+        selected = []
+        for part in edited.parts:
+            mask = np.empty(part.count, dtype=bool)
+            part.mesh.vertices.foreach_get("select", mask)
+            selected.append(mask)
+        selected = np.concatenate(selected)
+        if not (selected & edited.movable).any():
+            return "Select the vertices to move"
+        for part in edited.unmatched:
+            self.report({'WARNING'}, "'{:s}': modifiers shown in Edit Mode change its geometry, so its "
+                                     "shape without them is used".format(part.obj.name))
+        tool = context.tool_settings
+        settings = context.scene.fit_move
+        self.move = moving.FitMove(
+            edited.co, edited.edges, selected, edited.movable,
+            tris=edited.tris,
+            proportional_size=tool.proportional_size if tool.use_proportional_edit else None,
+            falloff=tool.proportional_edit_falloff,
+            weld_distance=settings.seam_distance,
+            fade_distance=settings.fade_distance if settings.use_fade else 0.0,
+        )
+        if not len(self.move.indices):
+            return "Hidden vertices next to the selection keep it in place (Fade at Hidden)"
+        self.parts = edited.parts
+        self.local_start = edited.start
+        self.center = Vector(edited.co[selected].mean(axis=0))
+        # Every vertex moved so far, to put back when the proportional size shrinks or the move is cancelled.
+        self.touched = self.move.indices
+        return None
+
+    def _apply(self, translation):
+        self.touched = np.union1d(self.touched, self.move.indices)
+        write_edited(self.parts, self.touched, self.move.positions(translation, self.touched))
+
+    def execute(self, context):
+        problem = self._setup(context)
+        if problem is not None:
+            self.report({'WARNING'}, problem)
+            return {'CANCELLED'}
+        self._apply(np.array(self.value))
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        region = context.region
+        if context.area is None or context.area.type != 'VIEW_3D' or region is None or region.type != 'WINDOW':
+            self.report({'WARNING'}, "Move the mouse over the 3D Viewport")
+            return {'CANCELLED'}
+        problem = self._setup(context)
+        if problem is not None:
+            self.report({'WARNING'}, problem)
+            return {'CANCELLED'}
+        self.region = context.region
+        self.rv3d = context.region_data
+        # Where the mouse started, where it is, and where it counts as being (Shift slows it down).
+        self.start_xy = Vector((event.mouse_region_x, event.mouse_region_y))
+        self.last_xy = self.start_xy.copy()
+        self.xy = self.start_xy.copy()
+        self.axis = None
+        self.plane = False
+        self.translation = Vector((0.0, 0.0, 0.0))
+        self._handle = bpy.types.SpaceView3D.draw_handler_add(self._draw, (self,), 'WINDOW', 'POST_PIXEL')
+        context.window_manager.modal_handler_add(self)
+        self._show(context)
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        kind, value = event.type, event.value
+        if kind in {'MOUSEMOVE', 'INBETWEEN_MOUSEMOVE'}:
+            xy = Vector((event.mouse_region_x, event.mouse_region_y))
+            self.xy += (xy - self.last_xy) * (PRECISION if event.shift else 1.0)
+            self.last_xy = xy
+            self._update(context)
+        elif kind in {'X', 'Y', 'Z'} and value == 'PRESS':
+            axis, plane = 'XYZ'.index(kind), event.shift
+            if (self.axis, self.plane) == (axis, plane):
+                self.axis = None
+            else:
+                self.axis, self.plane = axis, plane
+            self._update(context)
+        elif kind == 'C' and value == 'PRESS':
+            self.axis = None
+            self._update(context)
+        elif kind in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE', 'PAGE_UP', 'PAGE_DOWN'} and value == 'PRESS':
+            if self.move.size is not None:
+                tool = context.tool_settings
+                step = PROPORTIONAL_STEP if kind in {'WHEELDOWNMOUSE', 'PAGE_UP'} else 1.0 / PROPORTIONAL_STEP
+                tool.proportional_size = self.move.size * step
+                self.move.set_proportional(tool.proportional_size, tool.proportional_edit_falloff)
+                self._update(context)
+        elif ((kind in {'RET', 'NUMPAD_ENTER', 'SPACE'} and value == 'PRESS') or
+              (kind == 'LEFTMOUSE' and value == ('RELEASE' if self.release_confirm else 'PRESS'))):
+            self.value = self.translation
+            self._finish(context)
+            return {'FINISHED'}
+        elif kind in {'RIGHTMOUSE', 'ESC'} and value == 'PRESS':
+            write_edited(self.parts, self.touched, local_co=self.local_start[self.touched])
+            self._finish(context)
+            return {'CANCELLED'}
+        return {'RUNNING_MODAL'}
+
+    def _translation(self):
+        """The move for the mouse: in the view's plane, or along (or across) the chosen axis."""
+        region, rv3d, center = self.region, self.rv3d, self.center
+        if self.axis is None:
+            a = view3d_utils.region_2d_to_location_3d(region, rv3d, self.start_xy, center)
+            b = view3d_utils.region_2d_to_location_3d(region, rv3d, self.xy, center)
+            return b - a
+        axis = AXES[self.axis]
+        hits = []
+        for xy in (self.start_xy, self.xy):
+            origin = view3d_utils.region_2d_to_origin_3d(region, rv3d, xy)
+            ray = origin + view3d_utils.region_2d_to_vector_3d(region, rv3d, xy)
+            if self.plane:
+                hit = intersect_line_plane(origin, ray, center, axis)
+            else:
+                closest = intersect_line_line(origin, ray, center, center + axis)
+                hit = None if closest is None else closest[1]
+            if hit is None:
+                return Vector((0.0, 0.0, 0.0))
+            hits.append(hit)
+        move = hits[1] - hits[0]
+        return move - axis * move.dot(axis) if self.plane else axis * move.dot(axis)
+
+    def _update(self, context):
+        self.translation = self._translation()
+        self._apply(np.array(self.translation))
+        self._show(context)
+
+    def _show(self, context):
+        move = self.translation
+        text = "D: {:s}  ({:s})".format(
+            "  ".join(_length_text(context, v) for v in move), _length_text(context, move.length),
+        )
+        if self.axis is not None:
+            text += "   {:s} {:s}".format("locking" if self.plane else "along", "XYZ"[self.axis])
+        if self.move.size is not None:
+            text += "   Proportional size: " + _length_text(context, self.move.size)
+        context.area.header_text_set(text)
+        context.workspace.status_text_set(FIT_MOVE_HINTS)
+        context.area.tag_redraw()
+
+    def _finish(self, context):
+        bpy.types.SpaceView3D.draw_handler_remove(self._handle, 'WINDOW')
+        context.area.header_text_set(None)
+        context.workspace.status_text_set(None)
+        context.area.tag_redraw()
+
+    @staticmethod
+    def _draw(self):
+        """The proportional size around the selection, and the axis the move keeps to."""
+        if bpy.context.region != self.region:
+            return
+        region, rv3d = self.region, self.rv3d
+        center = view3d_utils.location_3d_to_region_2d(region, rv3d, self.center + self.translation)
+        if center is None:
+            return
+        ui_scale = bpy.context.preferences.system.ui_scale
+        gpu.state.blend_set('ALPHA')
+        if self.axis is not None:
+            start = view3d_utils.location_3d_to_region_2d(region, rv3d, self.center)
+            reach = float(region.width + region.height)
+            for axis in ([self.axis] if not self.plane else [k for k in range(3) if k != self.axis]):
+                tip = view3d_utils.location_3d_to_region_2d(
+                    region, rv3d, self.center + AXES[axis] * rv3d.view_distance * 0.1,
+                )
+                if start is None or tip is None or (tip - start).length < 1e-3:
+                    continue
+                along = (tip - start).normalized() * reach
+                _draw_polyline([start - along, start + along], AXIS_COLORS[axis], 1.5 * ui_scale)
+        if self.move.size is not None:
+            side = rv3d.view_rotation @ Vector((1.0, 0.0, 0.0))
+            edge = view3d_utils.location_3d_to_region_2d(
+                region, rv3d, self.center + self.translation + side * self.move.size,
+            )
+            if edge is not None:
+                radius = (edge - center).length
+                segments = max(32, min(128, int(radius / 2)))
+                circle = [(center.x + radius * math.cos(2.0 * math.pi * i / segments),
+                           center.y + radius * math.sin(2.0 * math.pi * i / segments)) for i in range(segments + 1)]
+                _draw_polyline(circle, (0.0, 0.0, 0.0, 0.45), 3.0 * ui_scale)
+                _draw_polyline(circle, (1.0, 1.0, 1.0, 0.85), 1.5 * ui_scale)
+        gpu.state.blend_set('NONE')
 
 
 def _unweighted_message(stroke, mesh):
@@ -2000,8 +2253,8 @@ FACE_REPAIRS = (
      "the eyes follow them",
      'HIDE_ON', dict(skin='EYES', parts='EYES', close=True)),
     ('LASHES', "Snap Lashes",
-     "Move the roots of the selected lashes onto the lid edges (raised by Lash Lift) and make each lash follow "
-     "its lid. Select the face too",
+     "Sit the selected lashes on the lids where they float off or sink in (out by Lash Lift), keeping their "
+     "shape and where they are along the lid, and make each lash follow its lid. Select the face and eyeballs too",
      'SNAP_ON', dict(skin='NONE', parts='LASHES', snap_lashes=True)),
     ('MOUTH', "Fix Mouth",
      "Weight the lips and mouth like the game's face. Teeth, tongue and piercings in or around the mouth "
@@ -2358,6 +2611,15 @@ class MAGIC_FIT_OT_line_up(bpy.types.Operator):
         default=False,
         options={'SKIP_SAVE'},
     )
+    fit_shape: BoolProperty(
+        name="Fit Shape",
+        description=(
+            "Then scale, turn and move each bone of the model a little, so its surface lies on the body's "
+            "where the two are close. Off: keep the model's own shape"
+        ),
+        default=True,
+        options={'SKIP_SAVE'},
+    )
 
     @classmethod
     def poll(cls, context):
@@ -2369,16 +2631,20 @@ class MAGIC_FIT_OT_line_up(bpy.types.Operator):
 
     def execute(self, context):
         settings = context.scene.body_fit_brush
-        # From the panel the setting decides; from Adjust Last Operation this operator's own.
+        # From the panel the settings decide; from Adjust Last Operation this operator's own.
         if not self.properties.is_property_set("stretch"):
             self.stretch = settings.lineup_stretch
+        if not self.properties.is_property_set("fit_shape"):
+            self.fit_shape = settings.lineup_fit_shape
         settings.lineup_stretch = self.stretch
+        settings.lineup_fit_shape = self.fit_shape
         body = context.scene.magic_fit.target
         meshes, armatures = lineup_model(context)
         armature = armatures[0] if armatures else None
         started = time.perf_counter()
         try:
-            result = lineup.plan(meshes, armature, body, context.evaluated_depsgraph_get(), stretch=self.stretch)
+            result = lineup.plan(meshes, armature, body, context.evaluated_depsgraph_get(), stretch=self.stretch,
+                                 fit=self.fit_shape)
         except lineup.LineUpError as error:
             self.report({'ERROR'}, str(error))
             return {'CANCELLED'}
@@ -2404,6 +2670,9 @@ class MAGIC_FIT_OT_line_up(bpy.types.Operator):
         if solution.fingers:
             details.append("{:d} finger{:s} turned like the body's".format(
                 solution.fingers, "s" if solution.fingers != 1 else ""))
+        if result.shape is not None:
+            details.append("shape fitted: typically {:.1f} mm off the body, from {:.1f} mm".format(
+                1000.0 * result.shape.after, 1000.0 * result.shape.before))
         self.report({'INFO'}, "Lined up {:s} with '{:s}' in {:.1f} s: {:s}; joints {:s}".format(
             what, body.name, time.perf_counter() - started, ", ".join(details), _joints_note(result)))
         # A top has no legs to warn about, a bottom no arms or head.
@@ -2470,6 +2739,7 @@ class MAGIC_FIT_OT_use_tool(bpy.types.Operator):
             ('WEIGHT', "Weight Brushes", "Weight Paint mode brushes that copy, straighten or make weights"),
             ('FIT', "Body Fit", "Edit Mode brush that fits the mesh around the body"),
             ('RELAX', "Texture Relax", "Edit Mode brush that slides vertices until the texture is even again"),
+            ('MOVE', "Fit Move", "Edit Mode tool that moves the selection without reaching across gaps"),
         ),
     )
 
@@ -2478,6 +2748,7 @@ class MAGIC_FIT_OT_use_tool(bpy.types.Operator):
         'WEIGHT': ('WEIGHT_PAINT', "magic_fit.tool", 'WEIGHTS'),
         'FIT': ('EDIT', "magic_fit.body_fit_tool", 'FIT'),
         'RELAX': ('EDIT', "magic_fit.texture_relax_tool", 'RELAX'),
+        'MOVE': ('EDIT', "magic_fit.fit_move_tool", 'FIT'),
     }
 
     @classmethod
@@ -2486,6 +2757,8 @@ class MAGIC_FIT_OT_use_tool(bpy.types.Operator):
             return "Switch to Edit Mode and pick the Body Fit brush"
         if properties.tool == 'RELAX':
             return "Switch to Edit Mode and pick the Texture Relax brush"
+        if properties.tool == 'MOVE':
+            return "Switch to Edit Mode and pick the Fit Move tool"
         return "Switch to Weight Paint mode and pick the Weight Brushes"
 
     @classmethod
@@ -2515,6 +2788,7 @@ classes = (
     MAGIC_FIT_OT_paint,
     MAGIC_FIT_OT_body_fit,
     MAGIC_FIT_OT_texture_relax,
+    MAGIC_FIT_OT_fit_move,
     MAGIC_FIT_OT_skirt_weights,
     MAGIC_FIT_OT_heel_weights,
     MAGIC_FIT_OT_hair_weights,

@@ -82,6 +82,22 @@ def texture_relax():
     return tris
 
 
+def fit_move():
+    # Four arrows moving something on a body (dome), like Blender's Move tool over Body Fit's body.
+    tris = arc_band(128.0, 20.0, 0.0, 52.0, 0.0, 180.0, MID)
+    cx, cy, half, head, reach = 128.0, 148.0, 8.0, 22.0, 96.0
+    for dx, dy in ((1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)):
+        px, py = -dy, dx  # across the arrow
+
+        def at(along, across):
+            return (cx + dx * along + px * across, cy + dy * along + py * across)
+        base = reach - 30.0
+        tris += [((at(0.0, -half), at(base, -half), at(base, half)), LIGHT),
+                 ((at(0.0, -half), at(base, half), at(0.0, half)), LIGHT),
+                 ((at(base, -head), at(reach, 0.0), at(base, head)), LIGHT)]
+    return tris
+
+
 def write(path, tris):
     coords = bytearray()
     colors = bytearray()
@@ -95,7 +111,8 @@ def write(path, tris):
 
 
 if __name__ == "__main__":
-    for name, shapes in (("weight_brushes", weight_brushes), ("body_fit", body_fit), ("texture_relax", texture_relax)):
+    for name, shapes in (("weight_brushes", weight_brushes), ("body_fit", body_fit), ("texture_relax", texture_relax),
+                         ("fit_move", fit_move)):
         path = os.path.join(ICONS, name + ".dat")
         write(path, shapes())
         print("wrote", path)

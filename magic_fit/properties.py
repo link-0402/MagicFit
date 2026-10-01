@@ -534,8 +534,8 @@ class MagicFitSettings(bpy.types.PropertyGroup):
     face_lash_lift: FloatProperty(
         name="Lash Lift",
         description=(
-            "How far out from the eyeball Snap Lashes puts the lash roots. Raise it if the lid pokes through "
-            "the lashes"
+            "How far out from the lid Snap Lashes puts the lash roots. Raise it if the lid pokes through the "
+            "lashes"
         ),
         subtype='DISTANCE',
         default=0.0,
@@ -708,7 +708,8 @@ class BodyFitBrushSettings(bpy.types.PropertyGroup):
         name="Keep Together",
         description=(
             "Layers, folds and details closer together than this move as one piece and keep their shape. "
-            "Larger keeps bigger folds intact, but makes the brush less precise"
+            "Larger keeps bigger folds intact, but makes the brush less precise. In tight spots like between "
+            "the thighs, a few millimetres fits every vertex on its own"
         ),
         subtype='DISTANCE',
         default=0.02,
@@ -744,6 +745,22 @@ class BodyFitBrushSettings(bpy.types.PropertyGroup):
         name="Selected Only",
         description="Only move selected vertices (hidden vertices are never moved)",
         default=False,
+    )
+    use_fade: BoolProperty(
+        name="Fade at Hidden",
+        description=(
+            "Fade the brush out toward hidden vertices (and unselected ones with Selected Only), so the part "
+            "you fit stays joined to them instead of pulling away at their edge"
+        ),
+        default=True,
+    )
+    fade_distance: FloatProperty(
+        name="Fade Distance",
+        description="How far from hidden vertices, along the mesh, the brush reaches full strength again",
+        subtype='DISTANCE',
+        default=0.02,
+        min=0.0001,
+        soft_max=0.1,
     )
 
     # Resize: the From shape is the From body, the To shape the To body (or the From body again); with
@@ -841,6 +858,14 @@ class BodyFitBrushSettings(bpy.types.PropertyGroup):
         ),
         default=False,
     )
+    lineup_fit_shape: BoolProperty(
+        name="Fit Shape",
+        description=(
+            "Then scale, turn and move each bone of the model a little, so its surface lies on the body's where "
+            "the two are close. Off: keep the model's own shape"
+        ),
+        default=True,
+    )
 
 
 class TextureRelaxBrushSettings(bpy.types.PropertyGroup):
@@ -920,6 +945,38 @@ def _clipping_style_changed(self, context):
     clipping.style_changed(self, context)
 
 
+class FitMoveSettings(bpy.types.PropertyGroup):
+    # Proportional editing is Blender's own (`ToolSettings`): its toggle, size and falloff.
+    use_fade: BoolProperty(
+        name="Fade at Hidden",
+        description=(
+            "Keep vertices next to hidden ones in place and ease the move in from there, so what you move stays "
+            "joined to the hidden parts"
+        ),
+        default=True,
+    )
+    fade_distance: FloatProperty(
+        name="Fade Distance",
+        description="How far from hidden vertices, along the mesh, the move reaches its full amount again",
+        subtype='DISTANCE',
+        default=0.02,
+        min=0.0001,
+        soft_max=0.1,
+    )
+    seam_distance: FloatProperty(
+        name="Seam Distance",
+        description=(
+            "Vertices closer together than this always move together, even across parts and objects, so split "
+            "seams stay closed, and proportional editing reaches across them. The mesh isn't merged"
+        ),
+        subtype='DISTANCE',
+        default=0.0001,
+        min=0.0,
+        soft_max=0.001,
+        precision=5,
+    )
+
+
 class ClippingSettings(bpy.types.PropertyGroup):
     # Checked against the shared body (`Scene.magic_fit.target`).
     show: BoolProperty(
@@ -967,6 +1024,7 @@ classes = (
     HairWeightsState,
     BodyFitBrushSettings,
     TextureRelaxBrushSettings,
+    FitMoveSettings,
     ClippingSettings,
 )
 
@@ -977,6 +1035,7 @@ def register():
     bpy.types.Scene.magic_fit = PointerProperty(type=MagicFitSettings)
     bpy.types.Scene.body_fit_brush = PointerProperty(type=BodyFitBrushSettings)
     bpy.types.Scene.texture_relax_brush = PointerProperty(type=TextureRelaxBrushSettings)
+    bpy.types.Scene.fit_move = PointerProperty(type=FitMoveSettings)
     bpy.types.Scene.magic_fit_clipping = PointerProperty(type=ClippingSettings)
     bpy.types.Object.magic_fit_hair = PointerProperty(type=HairWeightsState)
 
@@ -984,6 +1043,7 @@ def register():
 def unregister():
     del bpy.types.Object.magic_fit_hair
     del bpy.types.Scene.magic_fit_clipping
+    del bpy.types.Scene.fit_move
     del bpy.types.Scene.texture_relax_brush
     del bpy.types.Scene.body_fit_brush
     del bpy.types.Scene.magic_fit

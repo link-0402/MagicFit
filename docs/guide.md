@@ -9,7 +9,7 @@ In the 3D Viewport, press **N** and open the **Magic Fit** tab. It's there in ev
 | Tab | What's on it |
 | --- | --- |
 | **Weights** | [Weight Transfer](#weight-transfer) and the [Weight Brushes](#weight-brushes), sorted into sub-tabs: **General** (Copy, Straighten, Smooth), **Skirt**, **Heels**, **Hair** and **Face**. Each sub-tab has a button for whole meshes first, then its brush. |
-| **Body Fit** | The [Body Fit](#body-fit) brush, [Resize](#resize) and the [Clipping](#clipping-marks) marks. |
+| **Body Fit** | The [Body Fit](#body-fit) brush, the [Fit Move](#fit-move) tool, [Resize](#resize) and the [Clipping](#clipping-marks) marks. |
 | **Line Up** | [Line Up](#line-up), for models from other games. |
 | **Texture Relax** | The [Texture Relax](#texture-relax) brush. |
 | **Customize+** | Shows a [Customize+](#customize) template and the game's [Bust Size](#bust-size) on your armatures. |
@@ -17,12 +17,12 @@ In the 3D Viewport, press **N** and open the **Magic Fit** tab. It's there in ev
 ![The Magic Fit tab of the sidebar: Weights, Body Fit and Customize+](images/sidebar.png)
 
 - **The Body** sits right below the tabs. It's one setting shared by every tool that works against a body. Resize has its own From and To bodies.
-- **Each brush panel has a button** that switches the mesh to the right mode and picks the brush: **Paint Weights**, **Paint Skirt Weights**, **Paint Heel Weights**, **Paint Hair Weights**, **Paint Face Weights**, **Fit to Body** or **Relax Texture**.
+- **Each brush panel has a button** that switches the mesh to the right mode and picks the brush: **Paint Weights**, **Paint Skirt Weights**, **Paint Heel Weights**, **Paint Hair Weights**, **Paint Face Weights**, **Fit to Body**, **Fit Move** or **Relax Texture**.
 - **The Weights sub-tabs are the brush's modes.** Picking a sub-tab sets the mode, and changing the mode in the tool header switches the sub-tab.
 - **The tabs take two rows** in a narrow sidebar. Drag the sidebar wider and they fit in one. Folding the first panel hides the tabs.
 - **The globe icon** in the first panel's header has links to Luci_xiv's mods, GitHub, Bluesky and Ko-fi.
 
-The brushes are also regular toolbar tools. **Weight Brushes** is in the Weight Paint toolbar, right after Gradient. **Body Fit** and **Texture Relax** are the last two buttons in the Edit Mode toolbar (scroll the toolbar on short screens). While a brush is active, its settings also show in the tool header and under **Properties → Tool**.
+The brushes are also regular toolbar tools. **Weight Brushes** is in the Weight Paint toolbar, right after Gradient. **Body Fit**, **Texture Relax** and **Fit Move** are the last three buttons in the Edit Mode toolbar (scroll the toolbar on short screens). While a brush is active, its settings also show in the tool header and under **Properties → Tool**.
 
 Keys for all brushes:
 
@@ -352,11 +352,11 @@ FFXIV moves faces with a **face skeleton**: bones for the eyelids, eyeballs, bro
 How the face is weighted:
 
 - **Fitting.** Your face is warped onto the game's so the lid edges, lip line and neck opening line up. Each vertex then takes the game face's weights at that spot. An upper lid never gets lower lid weights, and a lower lip never gets upper lip weights.
-- **Closing the eyes.** The game's **Shut Eyes** expression holds the lids about as far closed as its blink goes, for as long as it lasts. With **Close Eyes** on, your lids are made to just meet there. Where the eye still shows, the lid weights are raised. Where the lids would meet much earlier (smaller eyes than the game's), they'd slide past each other and fold while the eyes stay shut, so they're lowered, but not so far that the blink leaves more than a hairline gap. The report says how well the lids meet.
+- **Closing the eyes.** The game's **Shut Eyes** expression holds the lids about as far closed as its blink goes, for as long as it lasts. With **Close Eyes** on, your lids are made to just meet there, all along the eye. Where the eye still shows, the lid weights are raised. Where the lids would meet much earlier (smaller eyes than the game's) or press into each other, they'd slide past each other and fold while the eyes stay shut, so they're lowered, bit by bit across the eye, but not so far that the blink leaves more than a hairline gap. On faces with more detail than the game's, the lid weights are smoothed too, so the closed lid doesn't crumple. The report says how well the lids meet.
 - **The neck.** With **Match Neck** on, the neck opening gets the game's positions, normals and weights, so no seam shows against the body.
 - **Parts** are weighted by what they are:
   - **Eyeballs** follow the eyeball bones.
-  - **Lashes** follow the lid they grow from. Their tips lag slightly, like the game's.
+  - **Lashes** follow the lid they grow from, taking the weights of the skin under their roots, so they stay on it as it closes. Their tips lag slightly, like the game's.
   - **Films and tear lines** over the eye stretch between the lids.
   - **Brows, makeup and liner** on the skin take the skin's weights.
   - **Teeth and tongue** take the game's mouth weights.
@@ -370,7 +370,7 @@ The **Face Repairs** fix one thing on a face whose weights are otherwise fine. S
 | Repair | What it does |
 | --- | --- |
 | Fix Eyelids | Weights the lids like the game's face, meeting in the Shut Eyes expression, with the lashes and films following them. |
-| Snap Lashes | Moves the lash roots onto the lids where the game's lashes grow (plus **Lash Lift** farther out), keeping their shape, then weights them. For lashes that float off or sink into the lids. Select only the face and the lashes. |
+| Snap Lashes | For lashes that float off or sink into the lids: moves them out or in until their roots sit on the lids (plus **Lash Lift** farther out), keeping their shape and where they are along the lid, then weights them. Only lashes far past the lid's edge move along it. Lashes aren't pushed into the skin, at rest or with the eyes shut. Select the face, the lashes and the eyeballs. |
 | Fix Mouth | Weights the lips and mouth like the game's face, with teeth, tongue and lip piercings following. |
 | Attach Parts | Weights the selected parts to follow the face's current weights. The face keeps its weights. |
 | Match Neck | Gives the neck the game's weights, and its opening the game's positions, normals and weights. |
@@ -378,7 +378,7 @@ The **Face Repairs** fix one thing on a face whose weights are otherwise fine. S
 Good to know:
 
 - **Use the face the mod replaces,** the one in its file name. Au Ra and Viera faces 101 to 104 use faces 1 to 4.
-- **Select the eyeballs too.** The eye openings are measured against them. Eyeballs too big for the lids poke through when the eyes are shut, and the report says so.
+- **Select the eyeballs too,** for the repairs as well. The eye openings and lid edges are measured against them; without them, the report warns. Eyeballs too big for the lids poke through when the eyes are shut, and the report says so.
 - **Face Weights replaces all bone weights.** Lock the groups you want to keep, or use a repair.
 - **NPC faces:** faces 91 and 92 have no eyeball bones, so eyeballs follow the eye bones. Other NPC faces aren't supported.
 
@@ -388,7 +388,7 @@ Good to know:
 | Close Eyes | Makes the lids just meet in the game's Shut Eyes expression, without stopping short or sliding past each other. |
 | Match Neck | Gives the neck opening the game's positions, normals and weights. |
 | Max Groups | At most this many bone weights per vertex. |
-| Lash Lift | Snap Lashes: how much farther out from the eyeball the roots go. |
+| Lash Lift | Snap Lashes: how much farther out from the lid the roots go. Raise it if the lid pokes through the lashes. |
 | Game Folder | In the preferences: where FFXIV is installed, if it isn't found by itself. **Read the Game's Faces Again** re-reads them. |
 
 ## Body Fit
@@ -400,7 +400,7 @@ Good to know:
 1. Select the clothing (one or more meshes) and enter **Edit Mode**.
 2. Pick **Body Fit** at the bottom of the toolbar, or click **Fit to Body** on the **Body Fit** tab.
 3. Set the **Body**, a **Mode** and an **Offset** (1 mm), the gap to keep between the body and the innermost layer.
-4. Sculpt over the areas to fix. Going over a spot again settles it. It never overshoots.
+4. Sculpt over the areas to fix. Going over a spot again settles it instead of pushing further.
 
 | Mode | What it does |
 | --- | --- |
@@ -414,21 +414,38 @@ In Push Out or Tighten, hold **Ctrl** to swap them for one stroke.
 | --- | --- |
 | Offset | Gap between the body and the innermost layer. |
 | Radius, Strength | Brush size in pixels, and how much of the remaining way each dab covers. |
-| Auto Smooth | Keeps the result smooth while sculpting (see [below](#body-fits-auto-smooth)). |
+| Auto Smooth | Evens out bumps under the brush while sculpting, without wearing down wrinkles (see [below](#body-fits-auto-smooth)). |
 | Falloff: Curve | Same curves as the Weight Brushes. |
 | Spacing | Distance between dabs, as a percentage of the radius. |
-| Keep Together | Layers, folds and details closer than this move as one piece. Larger values keep bigger folds but make the brush less precise. |
+| Keep Together | Folds, wrinkles and other details up to about one and a half times this wide keep their shape: they move as one piece instead of being pressed onto the body. Wider loose bulges are fitted. Layers always keep their distance. Creases narrower than this are bridged rather than filled, and loose clothing spans valleys up to about twice this wide (see [below](#why-it-doesnt-flatten-the-mesh)). |
 | Seam Distance | Vertices closer than this always move together, across parts and objects (see [below](#several-objects-and-split-seams)). |
 | Max Distance | Tighten and Fit leave parts farther from the body than this alone, like skirts and capes. |
 | Selected Only | Only moves selected vertices. Hidden vertices never move. |
+| Fade at Hidden | Fades the brush out toward hidden vertices, over **Fade Distance** (2 cm) along the mesh, so what you fit stays joined to them (see [below](#hidden-parts)). |
 
 Good to know:
 
 - **Why Edit Mode?** Add-on brushes can't record undo steps in Sculpt Mode. In Edit Mode, every stroke is a normal undo step.
 - **Modifiers that add geometry** (Mirror, Solidify…) are ignored, and the brush warns you.
 - **X/Y/Z mirror** in the Edit Mode header sculpts the mirrored side too.
-- **Body normals** don't have to be perfect. Inside-out bodies and split UV seams are handled.
+- **Body normals** don't have to be perfect. Inside-out bodies, bodies joined from closed parts of which only some are inside out (a mirrored leg, say) and split UV seams are handled.
 - **Split bodies:** the brush fits against one object, so join a split body first. With only part of a body, like a torso, clothing past its open edges is left alone.
+
+### Tight spots
+
+Between the thighs, under the arms and in other narrow gaps, Body Fit keeps each part of the clothing on the side of the body it wraps. A trouser leg settles on its own thigh, even where it hangs past the middle of the gap or has sunk into the other thigh, and isn't dragged toward the middle. With Push Out, which never pulls clothing in, a leg sunk into the other thigh is pushed out of it the shortest way. Clothing that clips deep in one place and floats a little farther on is fitted in both places, at any **Keep Together**.
+
+Clothing lying along the body, like a suit that follows the side of a crease, heads more directly onto the skin under it, so it slides less toward the crease, but only as far as it stays together: where clothing rounds off a crease or dips into one, it isn't pulled apart or bunched up at the crease line. A tight suit lying in a crease narrower than **Keep Together** is still held up a little over its bottom, like clothing spanning it (about 1 mm at 2 cm); lower Keep Together to let it settle all the way in. With Push Out or Fit, clothing stuck inside the body comes out without bunching up in a crease, and a seam allowance folded inside comes out the shortest way. Clothing hanging loose in a hollow, like a shirt under the arm or a suit at the crotch, is pulled into the hollow along it, so it still moves sideways as it settles there, up to about a centimetre.
+
+Where clothing is folded or pinched along a seam in a crease, the brush won't turn its triangles over, unless that's what it takes to get the clothing out of the body. The two sides of a split seam are held back together, so the seam doesn't fold either.
+
+### Hidden parts
+
+Hide what the brush should leave alone (**H** in Edit Mode). With **Fade at Hidden** on, as it is by default, the brush fades out toward hidden vertices instead of fitting right up to them, so the visible part doesn't pull away and leave a step at their edge. Next to the hidden part, the mesh keeps that part's distance from the body. **Fade Distance** (2 cm) away along the mesh it's fitted fully, with a smooth blend in between. Going over the edge again doesn't wear the fade down.
+
+- **Where the hidden part clips,** the visible part next to it clips a little too. Unhide it and fit it as well.
+- **With Selected Only,** unselected vertices count as hidden.
+- **Separate parts** that only touch the hidden part, like another object or a loose layer, don't fade, unless they're within **Seam Distance** of it. Layers lying over the faded part move with it.
 
 ### Several objects and split seams
 
@@ -448,13 +465,49 @@ The panel warns you when a shape key or pose you see in Object Mode isn't shown 
 
 ### Why it doesn't flatten the mesh
 
-A Shrinkwrap moves every vertex onto the same surface, so a thick garment loses its thickness. Body Fit treats clothing as layers on the body instead. For each spot of the body, it works out how far the innermost layer must move, then moves every layer over that spot by the same amount. Layers within **Keep Together** of each other move as one piece.
+A Shrinkwrap moves every vertex onto the same surface, so a thick garment loses its thickness. Body Fit only fits the innermost layer of the clothing. Every layer lying on another one, like the outside of a thick coat, a lining, a hem folded inside or a strap on a top, rides on the layer under it and keeps its distance, however their vertices line up. A layer is never pulled in through a layer under it, even a hidden one. Where a layer lies much farther from the one under it than it usually does (an overlapping panel sunk deep into the body), pushing the panel out doesn't lift the clothing over it off the skin: it only keeps it clear of the panel.
 
-Clothing spanning a crease (the cleavage, under the bust, the butt cleft) moves straight out of it or into it, the way the body turns within Keep Together. Its vertices stay evenly spaced instead of sliding apart on either side of the crease.
+The innermost layer keeps its folds and wrinkles too: a part that needs to move less than what surrounds it, over a stretch up to about one and a half times **Keep Together**, moves with its surroundings, so a fold stays a fold. A loose bulge wider than that is pulled in.
+
+Clothing spanning a crease (the cleavage, under the bust, the butt cleft) bridges it: it's pulled in no deeper than the body would be if smoothed over Keep Together, and moves straight out of the crease or into it, the way the body turns there. Its vertices don't pull apart or bunch up on either side of the crease.
+
+Loose clothing, farther from the body than Keep Together and at least 2 cm, also spans wider valleys, up to about twice Keep Together, instead of sagging into them. A skirt's front settles on both thighs and stays nearly level across the gap between them. It still dips into a wide gap a little, and its front stretches over the middle of the gap (up to about 2.4 times on a skirt 4 mm off thighs 12 mm apart): raise Keep Together to keep it flatter, or use **Max Distance** to leave the skirt alone. Clothing that dips into a crease itself, or lies closer to the body, like a tight suit, still settles into it.
 
 ### Body Fit's Auto Smooth
 
-**Auto Smooth** (on, 0.5) keeps the result smooth as you sculpt. It softens the edges of moved areas so they don't leave a rim, and evens out bumps under the brush. It never moves clothing closer than the offset, and it keeps layer thickness. At high values it also softens small wrinkles, so turn it down where those matter.
+**Auto Smooth** (on, 0.5) evens out bumps the size of a few triangles, like vertices sticking out of the surface, as you sculpt. It smooths the shape the clothing is heading for rather than the mesh itself, so going over a spot again doesn't flatten it further: wrinkles 2 cm apart keep 94 % of their depth (88 % at full Auto Smooth). Every step of the slider smooths a bit more. It works the same in every mode, never moves clothing closer than the offset and keeps layer thickness. Folds only a few triangles wide are smoothed like bumps, so turn it down where those matter.
+
+## Fit Move
+
+**Fit Move** moves the selection in Edit Mode like Blender's Move, but its proportional editing keeps to the mesh. Moving a trouser leg on one inner thigh doesn't drag the other leg along, split seams don't open, and the edge of a hidden part stays joined to it.
+
+1. In Edit Mode, pick **Fit Move** at the bottom of the toolbar, or click **Fit Move** on the **Body Fit** tab.
+2. Select the vertices to move. Turn on **Proportional Editing** (**O**) for the area around them to follow.
+3. Drag, or press **G**.
+
+| Key | Action |
+| --- | --- |
+| Drag | Moves the selection. Starting on an unselected vertex selects it first. Click to select, Shift click to add or remove. |
+| G | Moves the selection until you click or press Enter. |
+| X / Y / Z | Only along that axis. With Shift, only across it. The same key again, or C, frees it. |
+| Wheel, Page Up / Page Down | Proportional size |
+| Shift | Finer movement |
+| Esc or RMB | Cancel |
+| F9 | Change the move afterwards, to the exact distance |
+
+How it differs from Blender's Move:
+
+- **Proportional editing reaches along the mesh**, like Blender's Connected Only. The other side of a narrow gap is far away along the mesh, so it stays put. Blender's Move goes by the straight distance and drags it along.
+- **Split seams stay closed.** Vertices closer than **Seam Distance** (0.1 mm) move alike, even across objects, and proportional editing reaches across them. Blender's Connected Only stops at a split UV seam and tears it open.
+- **Fade at Hidden** (on by default): the vertices next to hidden ones stay in place, and the move eases in over **Fade Distance** (2 cm) along the mesh. However often you move near them, the visible part stays joined to the hidden one. A selection right next to hidden vertices moves only a little; turn Fade at Hidden off to move it anyway.
+- **Separate parts**, like another layer that doesn't touch it, only move when they're selected too.
+- Proportional editing's on/off, size and falloff curve are Blender's own, in the header, shared with Blender's Move. Connected Only and Projected don't change anything here.
+- X, Y and Z are the global axes. Fit Move doesn't snap, take typed numbers or mirror (X/Y/Z mirror); use F9 for exact distances.
+
+| Option | What it does |
+| --- | --- |
+| Fade at Hidden | Keeps the vertices next to hidden ones in place and eases the move in over **Fade Distance** along the mesh. |
+| Seam Distance | Vertices closer than this move alike, across parts and objects, and proportional editing reaches across them. |
 
 ## Resize
 
@@ -535,13 +588,13 @@ The panel lists each checked mesh with how many vertices clip. Big changes can t
 
 ## Line Up
 
-A model from another game, VRChat or The Sims stands in its own pose and size. **Line Up** scales, turns and poses it so its hips, shoulders and every limb joint land on the body's. The model keeps its own shape, so refitting it with [Resize](#resize), [Body Fit](#body-fit) and [Weight Transfer](#weight-transfer) starts from the right place.
+A model from another game, VRChat or The Sims stands in its own pose and size. **Line Up** scales, turns and poses it so its hips, shoulders and every limb joint land on the body's. With **Fit Shape**, it then reshapes the model bone by bone, so it sits around the body without losing its details. Refitting it with [Resize](#resize), [Body Fit](#body-fit) and [Weight Transfer](#weight-transfer) starts from the right place.
 
 1. On the **Line Up** tab, pick the **Body**, such as the devkit Mannequin.
 2. Select the model in Object Mode. One of its meshes or its armature is enough: everything on that armature comes along.
 3. Click **Line Up**.
 
-The meshes, their shape keys and the armature all change together, and one Ctrl Z undoes it all. You can switch **Stretch Limbs** afterwards in **Adjust Last Operation** (F9).
+The meshes, their shape keys and the armature all change together, and one Ctrl Z undoes it all. You can switch **Stretch Limbs** and **Fit Shape** afterwards in **Adjust Last Operation** (F9).
 
 How it lines up:
 
@@ -552,6 +605,16 @@ How it lines up:
 - **Stretch Limbs** (off) also stretches the clavicles and each limb segment lengthwise, so the shoulders and every limb joint land exactly on the body's. The stretch eases in from each joint, so a squashed thigh doesn't crease against a stretched shin. A leg without a foot stretches as much as its thigh. Off, limbs keep their own lengths.
 - **Feet** keep their angle, so heels stay heels.
 - **Tops and bottoms.** A model with arms but no legs (a top) lines up by its shoulders, sized by its arms. One with legs but no arms (a bottom) lines up by its hips, sized by its legs. Either is taken to stand upright like the body.
+
+How Fit Shape reshapes it:
+
+- **Bone by bone.** Each bone of the model gets a little thicker or thinner, turns and moves, the way you'd pose and scale bones by hand. The mesh follows its weights as it follows the armature, so straps, seams and ornaments keep their shape. Where one bone's weights hand over to the next, the mesh neither creases nor tears. Bones change within limits (about 30 % in girth, 6° in turn), so a finger's loop can't balloon.
+- **Around the body.** Wherever the body pokes out of the model, by up to about 3 cm, the model moves out over it. Where the model sits outside the body, it's only drawn in when it's within about a centimetre, so skirts, puffy sleeves and other loose parts keep their shape and distance.
+- **The innermost layer.** A jacket isn't drawn in onto the shirt under it: only what lies nearest the body counts.
+- **As far as the body reaches.** A bone thickens only as far out as the body reaches around it. A skirt hanging from the hips moves out with them instead of growing with them.
+- **Small loose parts** (gems, studs, buttons, rings under 4 cm) keep their shape and move as one piece, as with Resize.
+- **Not the face or feet.** The head and feet follow the neck and legs but aren't fitted themselves: the model's face isn't the body's neck, and heeled feet aren't flat ones.
+- The report says how far the model's surface typically sat from the body's before and after.
 
 How it finds the joints:
 
@@ -568,11 +631,14 @@ Good to know:
 - **One model at a time.** Meshes on two armatures are refused.
 - **It needs both arms or both legs.** A piece with neither (a corset on spine bones only), or one not shaped like a top or a bottom (a gown's separate skirt starting below the hips), can't be lined up on its own.
 - **Objects parented to a bone** follow it, but aren't scaled.
+- **Fit Shape changes the model's build** toward the body's: a slim model's hips and thighs fill out, a thick one's slim down where they're close. Up close, it keeps its own look. Turn Fit Shape off to keep the model's own shape.
+- **What's left to fit,** like a few millimetres at the collarbones or between the thighs, is for [Body Fit](#body-fit).
 - **For FFXIV,** give the meshes the body's weights afterwards with Weight Transfer.
 
 | Option | What it does |
 | --- | --- |
 | Stretch Limbs | Stretches the clavicles and each limb segment so the joints land on the body's. Off: keeps the model's limb lengths. |
+| Fit Shape | Then scales, turns and moves each bone of the model a little, so its surface lies on the body's where the two are close. Off: keeps the model's own shape. |
 
 ## Texture Relax
 

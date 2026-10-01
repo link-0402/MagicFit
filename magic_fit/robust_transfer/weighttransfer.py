@@ -381,13 +381,21 @@ def limit_groups_smoothly(weights, limit, drop=0.5 / 255):
     return W
 
 
+# The layers of a fold lie back to back: each face reaches at most FOLD_BEHIND (the sine of 30°) behind
+# the other along its normal, and no more than FOLD_FRONT in front of it. Faces meeting at a wider angle,
+# or facing each other like two thighs pressed together below a crotch seam, go on past the edge.
+FOLD_BEHIND = 0.5
+FOLD_FRONT = 0.1
+
+
 def fold_aware_free_borders(vertices, triangles, merge_map, seam_cos=0.5):
     """Vertices on free borders, counting the rim of a double-layer garment as one.
 
     FFXIV garments often have a back-face layer or lining meeting the outer one along the hem at
-    coincident vertices. An open edge whose coincident partner edges lie on the same side (their faces
-    fold back over it) still ends the surface; only a partner continuing the surface on the other side,
-    a split seam, makes it no border.
+    coincident vertices. An open edge whose coincident partner edges lie on the same side, back to back
+    (their faces fold back over it, see FOLD_BEHIND), still ends the surface. A partner continuing the
+    surface on the other side (a split seam), opening a wider wedge, or facing it (two surfaces pinched
+    together, like thighs that touch below the crotch) makes it no border.
     """
     V = np.asarray(vertices, dtype=np.float64)
     F = np.asarray(triangles, dtype=np.int64).reshape(-1, 3)
@@ -406,6 +414,9 @@ def fold_aware_free_borders(vertices, triangles, merge_map, seam_cos=0.5):
     inward = V[c] - V[a]
     inward -= np.einsum('ij,ij->i', inward, along)[:, np.newaxis] * along
     inward /= np.maximum(np.linalg.norm(inward, axis=1, keepdims=True), np.finfo(np.float64).tiny)
+    # Each face's normal, by its winding.
+    normal = np.cross(V[b] - V[a], V[c] - V[a])
+    normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), np.finfo(np.float64).tiny)
     welded = np.sort(np.column_stack((merge_map[a], merge_map[b])), axis=1)
     order = np.lexsort((welded[:, 1], welded[:, 0]))
     starts = np.flatnonzero(np.r_[True, np.any(welded[order][1:] != welded[order][:-1], axis=1)])
@@ -414,7 +425,10 @@ def fold_aware_free_borders(vertices, triangles, merge_map, seam_cos=0.5):
     for start, size in zip(starts[sizes > 1], sizes[sizes > 1]):
         ids = order[start:start + size]
         dots = inward[ids] @ inward[ids].T
-        seam[ids[(dots < seam_cos).any(axis=1)]] = True
+        # [i, j]: how far face i reaches in front of face j.
+        front = inward[ids] @ normal[ids].T
+        fold = (dots >= seam_cos) & (front >= -FOLD_BEHIND) & (front <= FOLD_FRONT)
+        seam[ids[~(fold & fold.T).all(axis=1)]] = True
     return np.unique(np.concatenate((a[~seam], b[~seam])))
 
 

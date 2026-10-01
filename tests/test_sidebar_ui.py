@@ -37,7 +37,7 @@ EXPECTED = (
     ('WEIGHTS', 'HEELS', ["Heel Weights", "Heels Brush"]),
     ('WEIGHTS', 'HAIR', ["Hair Weights", "Hair Brush"]),
     ('WEIGHTS', 'FACE', ["Face Weights", "Face Repairs", "Test Poses", "Face Brush"]),
-    ('FIT', None, ["Body Fit", "Resize", "Clipping"]),
+    ('FIT', None, ["Body Fit", "Fit Move", "Resize", "Clipping"]),
     ('LINE_UP', None, ["Line Up"]),
     ('RELAX', None, ["Texture Relax"]),
     ('CPLUS', None, ["Customize+"]),
@@ -224,6 +224,12 @@ def steps():
     check(active_tool('EDIT_MESH') == "magic_fit.body_fit_tool", "Fit to Body picked the Body Fit brush")
     check(workspace.magic_fit_tab == 'FIT' and "Body Fit" in DRAWN, "Fit to Body shows the Body Fit tab")
     screenshot("sidebar_20_body_fit_brush.png")
+
+    use_tool('MOVE')
+    yield redraw()
+    check(active_tool('EDIT_MESH') == "magic_fit.fit_move_tool" and workspace.magic_fit_tab == 'FIT',
+          "Fit Move picked the tool and shows the Body Fit tab")
+    screenshot("sidebar_22_fit_move.png")
 
     use_tool('RELAX')
     yield redraw()

@@ -47,6 +47,12 @@ lining up, wherever the model's surface around a joint sits off the body's as a 
 that much, if that makes the offset go away. That can't find a knee that is off along the leg, but it
 puts hips and shoulders where the model's own shape says they are.
 
+With Fit Shape, the lined-up model's surface is then brought onto the body's (`fit_shape`): each vertex
+group, a bone, scales along and across its part, turns and moves a little, as far as its points' match with
+the body's surface says and within what keeps the mesh from stretching where one bone's weights hand over to
+the next. It pushes the model out where the body pokes through and draws it in only where it's close, so
+loose clothing keeps its shape; small loose parts keep theirs too.
+
 Like the other engines, this works on world space arrays and doesn't need the 3D view.
 """
 
@@ -1376,6 +1382,576 @@ def refine_joints(source, target, points, tris, part_weights, body_points, round
 
 
 # -----------------------------------------------------------------------------
+# Fitting the shape
+
+# Fit Shape matches the model's surface with the body's where they're this close (in torso lengths: 5 cm on
+# the Mannequin)...
+FIT_REACH = 0.12
+# ...pulling the less the farther apart they are. Where the model lies outside the body, a gap this wide
+# (1 cm) pulls a quarter as hard as a small one, so what hangs loose (a skirt, a puffy sleeve) hardly pulls
+# in...
+FIT_SOFT = 0.025
+# ...while where it's inside the body, or the body pokes out of it, a gap this wide (3 cm) does, and
+# FIT_INSIDE times harder: the model ends up around the body, not in it.
+FIT_SOFT_INSIDE = 0.07
+FIT_INSIDE = 3.0
+# Matched surfaces face the same way within 60°, and lie off each other mostly along their normals (a point
+# past an open edge, like a sleeve's end, lies off sideways).
+FIT_FACING = 0.5
+FIT_ALONG = 0.6
+# Points of the model, and of the body, matched per round at most; rounds of matching and moving, unless no
+# point moves more than FIT_SETTLED (in torso lengths) in one.
+FIT_SAMPLES = 8000
+FIT_ROUNDS = 4
+FIT_SETTLED = 0.001
+# Parts left out of the matching: the model's face isn't the body's neck, and heels aren't flat feet. Each
+# moves as one piece, keeping its size, as the parts it joins pull it.
+FIT_SKIPPED = (HEAD, "foot_l", "foot_r")
+# What a bone's change costs, against how far it moves the bone's points (see `fit_shape`): lengthening is
+# dear, since the joints already set the lengths; turning, moving and a thicker or thinner girth are
+# cheap...
+FIT_LENGTH = 3.0
+FIT_TURN = 0.05
+FIT_SHIFT = 0.05
+FIT_GIRTH = 0.05
+# ...and where weights change along an edge, its ends move by different blends of the bones' changes, so the
+# edge stretches by the difference: stretching by a share of its length costs as much as a gap of that share
+# of FIT_BLEND torso lengths (4 cm). Bones meeting at a sharp seam then move alike, so the mesh doesn't
+# crease or tear there, while bones blending over a wide band can move apart a little.
+FIT_BLEND = 0.1
+# A bone matched at fewer points than this costs as much to change as if it were matched at this many, and
+# one shorter or thinner than this (in torso lengths: 2 cm) as if it were this big, so small bones (jiggle
+# bones, fingers) don't swing about.
+FIT_LEAST = 5.0
+FIT_LEVER = 0.05
+# Past these, changes cost more and more (as the square of how far past they are), and past half again as
+# much they stop: lengthening (a share), girth (a share), turns (radians: 6°) and moves (torso lengths:
+# 3.4 cm). A finger's bone in a loop around the body's finger doesn't grow to twice its girth.
+FIT_LIMITS = (0.1, 0.3, 0.1, 0.08)
+# Loose parts no bigger than this across (in torso lengths: 4 cm) keep their shape, as with Resize: gems,
+# studs, buttons and rings move the rigid way closest to how their bones changed.
+FIT_RIGID = 0.1
+
+# Parts whose points a part's points may match on the other mesh: itself, the part it hangs from, and those
+# hanging from it.
+_NEAR = {PART_INDEX[part]: {PART_INDEX[part]} for part in PARTS}
+for _child, _parent in PARENT.items():
+    _NEAR[PART_INDEX[_child]].add(PART_INDEX[_parent])
+    _NEAR[PART_INDEX[_parent]].add(PART_INDEX[_child])
+
+
+class ShapeFit:
+    """How Fit Shape changes a model: each fitted vertex group (``names``), a bone, turns about the middle of
+    its points on the body (``centers``), scales from there along and across its part's axes (``axes``:
+    columns along, across, and the third way), and moves: ``changes`` holds per group the three scales
+    (less one), three turns (radians, about the axes) and the move. Scaling across reaches only as far as the
+    body does around the middle (``reach``, both ways across): points farther out, like a skirt around the
+    hips, move out as far as the body's surface does instead of further. The model's points move by the
+    blend of their groups' changes, weighted as an armature bends them. ``before`` and ``after`` are how far
+    apart the matched surfaces were and are (median, in metres)."""
+
+    def __init__(self, names, centers, axes, reach):
+        self.names = list(names)
+        self.index = {name: k for k, name in enumerate(self.names)}
+        self.centers, self.axes, self.reach = centers, axes, reach
+        self.changes = np.zeros((len(self.names), 9))
+        self.before = self.after = 0.0
+
+    def offsets(self, groups, points):
+        """How far each of ``points`` moves with its group (``groups``: index of each point's)."""
+        axes, changes = self.axes[groups], self.changes[groups]
+        local = np.einsum("nji,nj->ni", axes, points - self.centers[groups])
+        # Past the body's reach around the middle, scaling across moves points as far as it moves those there.
+        past = np.sqrt(((local[:, 1:] / self.reach[groups]) ** 2).sum(axis=1))
+        reached = local.copy()
+        reached[:, 1:] /= np.maximum(past, 1.0)[:, None]
+        local = changes[:, :3] * reached + np.cross(changes[:, 3:6], local)
+        return np.einsum("nij,nj->ni", axes, local) + changes[:, 6:]
+
+    def move(self, points, weights):
+        """``points`` moved by their groups' changes (``weights``: a Weights of them, over any groups)."""
+        column = np.array([self.index.get(name, -1) for name in weights.names], dtype=np.int64)
+        group = column[weights.group] if len(column) else np.zeros(0, dtype=np.int64)
+        used = group >= 0
+        vertex, group, weight = weights.vertex[used], group[used], weights.weight[used]
+        offsets = self.offsets(group, np.asarray(points, dtype=np.float64)[vertex])
+        result = np.array(points, dtype=np.float64)
+        for axis in range(3):
+            result[:, axis] += np.bincount(vertex, weight * offsets[:, axis], minlength=len(result))
+        return result
+
+    def move_point(self, name, point):
+        """``point`` (a bone's head or tail) moved by group ``name``'s change, if it has one."""
+        k = self.index.get(name)
+        if k is None:
+            return point
+        return point + self.offsets(np.array([k]), np.asarray(point, dtype=np.float64)[None])[0]
+
+    def rotation(self, name):
+        """The turn in group ``name``'s change (3x3), for its bone's roll."""
+        k = self.index.get(name)
+        if k is None:
+            return np.eye(3)
+        axes, changes = self.axes[k], self.changes[k]
+        linear = axes @ (np.diag(changes[:3]) + _skew(changes[3:6])) @ axes.T
+        u, _values, vt = np.linalg.svd(np.eye(3) + linear)
+        if np.linalg.det(u @ vt) < 0.0:
+            u[:, -1] = -u[:, -1]
+        return u @ vt
+
+
+def _skew(vector):
+    return np.array(((0.0, -vector[2], vector[1]), (vector[2], 0.0, -vector[0]), (-vector[1], vector[0], 0.0)))
+
+
+def _fit_frames(target):
+    """Axes of each part (part index -> 3x3; columns along the part, across it, and the third way), as the
+    body's joints point it. The torso's axes (up, left, forward) serve the torso, neck, head and feet."""
+    hips, top = torso_ends(target)
+    lateral = np.zeros(3)
+    for a, b in (("thigh_l", "thigh_r"), ("upperarm_l", "upperarm_r")):
+        if a in target and b in target:
+            lateral = lateral + _unit(target[a] - target[b])
+    torso = _frame(top - hips, lateral)
+    axes, frames = {}, {}
+    for part in PARTS:
+        aim = None
+        if part not in UPRIGHT:
+            aim = _aim(target, part) if part in target else None
+            if aim is None or np.linalg.norm(aim) < 1e-9:
+                aim = axes.get(PARENT.get(part))  # a segment the body lacks: along the one before
+        axes[part] = None if aim is None or np.linalg.norm(aim) < 1e-9 else _unit(aim)
+        a = axes[part]
+        if a is None:
+            frames[PART_INDEX[part]] = torso
+            continue
+        b = lateral - a * np.dot(lateral, a)
+        if np.linalg.norm(b) < 1e-6:
+            b = torso[:, 2] - a * np.dot(torso[:, 2], a)
+        b = _unit(b)
+        frames[PART_INDEX[part]] = np.column_stack((a, b, np.cross(a, b)))
+    return frames
+
+
+def _vertex_normals(points, tris):
+    """Normals of a mesh's points, averaged over their triangles by area."""
+    corners = points[tris]
+    faces = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    normals = np.zeros_like(points)
+    for axis in range(3):
+        for k in range(3):
+            normals[:, axis] += np.bincount(tris[:, k], faces[:, axis], minlength=len(points))
+    return normals / np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-20)
+
+
+def _barycentric(corners, points):
+    """Barycentric coordinates of ``points`` in the triangles ``corners`` (n x 3 x 3), kept inside them."""
+    a = corners[:, 0]
+    v0, v1, v2 = corners[:, 1] - a, corners[:, 2] - a, points - a
+    d00, d01, d11 = (v0 * v0).sum(axis=1), (v0 * v1).sum(axis=1), (v1 * v1).sum(axis=1)
+    d20, d21 = (v2 * v0).sum(axis=1), (v2 * v1).sum(axis=1)
+    determinant = np.maximum(d00 * d11 - d01 * d01, 1e-30)
+    v = (d11 * d20 - d01 * d21) / determinant
+    w = (d00 * d21 - d01 * d20) / determinant
+    result = np.clip(np.column_stack((1.0 - v - w, v, w)), 0.0, 1.0)
+    return result / np.maximum(result.sum(axis=1, keepdims=True), 1e-12)
+
+
+def _triangle_parts(tris, labels):
+    """Part of each triangle: its first corner's, unless the other two share another."""
+    a, b, c = labels[tris[:, 0]], labels[tris[:, 1]], labels[tris[:, 2]]
+    return np.where((b == c) & (a != b), b, a)
+
+
+def _evenly(indices, count):
+    """At most ``count`` of ``indices``, evenly spread."""
+    if len(indices) <= count:
+        return indices
+    return indices[np.linspace(0, len(indices) - 1, count).astype(np.int64)]
+
+
+class _PartTrees:
+    """Nearest points on a mesh (``points``, ``tris``; ``usable``: which triangles count) for points of given
+    parts: per part a BVH tree of the triangles of the parts it may match (``labels``: part of each
+    triangle), or one tree for all when the parts aren't known (``labels`` None, parts -1)."""
+
+    def __init__(self, points, tris, labels, parts, usable):
+        self.trees, self.faces = {}, {}
+        for part in ([-1] if labels is None else parts):
+            chosen = usable if labels is None else usable & np.isin(labels, list(_NEAR[part]))
+            chosen = np.flatnonzero(chosen)
+            if len(chosen):
+                # Only the points these triangles use, numbered anew.
+                used = np.zeros(len(points), dtype=bool)
+                used[tris[chosen].ravel()] = True
+                number = np.cumsum(used) - 1
+                self.trees[part] = BVHTree.FromPolygons(points[used].tolist(), number[tris[chosen]].tolist(),
+                                                        all_triangles=True)
+                self.faces[part] = chosen
+
+    def nearest(self, queries, parts, reach):
+        """The nearest point within ``reach`` to each of ``queries`` (whose parts are ``parts``): (location,
+        triangle; -1 where there's none)."""
+        location = np.zeros((len(queries), 3))
+        face = np.full(len(queries), -1, dtype=np.int64)
+        for part in np.unique(parts):
+            tree = self.trees.get(int(part))
+            if tree is None:
+                continue
+            faces = self.faces[int(part)]
+            for index in np.flatnonzero(parts == part):
+                hit, _normal, triangle, _distance = tree.find_nearest(queries[index], reach)
+                if hit is not None:
+                    location[index] = hit
+                    face[index] = faces[triangle]
+        return location, face
+
+
+def _match(trees, points, tris, normals, queries, parts, query_normals, reach, size):
+    """Match ``queries`` (of ``parts``, facing ``query_normals``) with the nearest points of a mesh
+    (``points``, ``tris``, ``normals``; searched by ``trees``) that face the same way and lie off them along
+    the mesh's normal. Returns the matched queries' indices, their triangles' corners, the barycentric
+    coordinates in them, the mesh's normal there, and how far the mesh lies out from each query along it."""
+    location, face = trees.nearest(queries, parts, reach)
+    found = np.flatnonzero(face >= 0)
+    corners = tris[face[found]]
+    bary = _barycentric(points[corners], location[found])
+    normal = (bary[:, :, None] * normals[corners]).sum(axis=1)
+    normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-20)
+    offset = location[found] - queries[found]
+    gap = (offset * normal).sum(axis=1)
+    good = ((query_normals[found] * normal).sum(axis=1) > FIT_FACING) & (
+        np.abs(gap) >= FIT_ALONG * np.linalg.norm(offset, axis=1) - 1e-4 * size)
+    return found[good], corners[good], bary[good], normal[good], gap[good]
+
+
+def _conjugate_gradient(rows, columns, blocks, rhs, start, iterations=400, tolerance=1e-7):
+    """Solve a symmetric block sparse system (``blocks``: n x 9 x 9 at ``rows``, ``columns``, sorted by row;
+    every row with its diagonal block) for ``rhs`` (groups x 9), from ``start``, preconditioned by the
+    diagonal blocks."""
+    firsts = np.flatnonzero(np.r_[True, rows[1:] != rows[:-1]])
+    owners = rows[firsts]
+    diagonal = np.linalg.inv(blocks[rows == columns][np.argsort(rows[rows == columns])])
+
+    def times(vector):
+        result = np.zeros_like(vector)
+        result[owners] = np.add.reduceat(np.einsum("nij,nj->ni", blocks, vector[columns]), firsts, axis=0)
+        return result
+
+    solution = start.copy()
+    residual = rhs - times(solution)
+    step = np.einsum("gij,gj->gi", diagonal, residual)
+    direction = step.copy()
+    product = (residual * step).sum()
+    scale = max(np.sqrt((rhs * rhs).sum()), 1e-30)
+    for _iteration in range(iterations):
+        if np.sqrt((residual * residual).sum()) < tolerance * scale:
+            break
+        change = times(direction)
+        alpha = product / max((direction * change).sum(), 1e-300)
+        solution += alpha * direction
+        residual -= alpha * change
+        step = np.einsum("gij,gj->gi", diagonal, residual)
+        product, before = (residual * step).sum(), product
+        direction = step + (product / max(before, 1e-300)) * direction
+    return solution
+
+
+def fit_shape(points, tris, weights, group_parts, body_points, body_tris, body_labels, target, size):
+    """Fit Shape: change each vertex group of a lined-up model (``points``, triangles ``tris``, ``weights``;
+    ``group_parts``: group name -> part) a little, so its surface lies closer on the body's (``body_points``,
+    ``body_tris``; ``body_labels``: part index of each body point, or None) without bending its details. Each
+    group, a bone, scales along and across its part (the way the body's joints ``target`` point it), turns and
+    moves, and its points follow, blended by their weights like an armature bends them. ``size`` is the body's
+    torso length. Returns a ShapeFit, or None without groups to fit.
+
+    Surfaces are matched both ways, each point of the model with the nearest point of the body and each point
+    of the body with the nearest of the model, within reach and only between the same or neighbouring parts
+    (a thigh's inside never matches the other thigh). A point of the model outside the body is matched only
+    where no other layer of the model lies between them, so a jacket isn't pulled into the shirt under it. The
+    changes are then those that best close the gaps along the surfaces' normals (least squares, the gaps
+    weighted as FIT_SOFT and FIT_INSIDE say), against what each change costs (FIT_LENGTH to FIT_GIRTH,
+    FIT_LEAST to FIT_LIMITS) and how much the changes of neighbouring bones stretch the edges between them
+    (FIT_BLEND). Rounds of matching and solving repeat as the surfaces close in.
+
+    Each group's change is 9 numbers: how much it lengthens, and widens across its part both ways; how much it
+    twists about its part and bends to either side; and how far it moves. They're solved together for all
+    groups, in the few rounds, by conjugate gradients over the groups' 9 x 9 blocks."""
+    names = weights.names
+    mass = weights.mass()
+    fitted = np.array([k for k, name in enumerate(names) if name in group_parts and mass[k] > 0.0], dtype=np.int64)
+    count = len(fitted)
+    if count == 0 or len(tris) == 0 or len(body_tris) == 0 or len(points) == 0:
+        return None
+    column = np.full(len(names), -1, dtype=np.int64)
+    column[fitted] = np.arange(count)
+    # Each point's fitted groups and weights, side by side.
+    group = column[weights.group]
+    kept = group >= 0
+    vertex, group, weight = weights.vertex[kept], group[kept], weights.weight[kept]
+    order = np.argsort(vertex, kind="stable")
+    vertex, group, weight = vertex[order], group[order], weight[order]
+    slot = np.arange(len(vertex)) - np.searchsorted(vertex, vertex)
+    slots = int(slot.max()) + 1 if len(slot) else 1
+    slot_group = np.full((len(points), slots), -1, dtype=np.int64)
+    slot_weight = np.zeros((len(points), slots))
+    slot_group[vertex, slot] = group
+    slot_weight[vertex, slot] = weight
+    part_weights = weights.by_part(group_parts)
+    labels = np.where(part_weights.sum(axis=1) > 0.0, np.argmax(part_weights, axis=1), -1)
+
+    # Each group turns about the middle of its own points that lie within the body's reach around its part
+    # (95 % of the body's points of the part, across the part's axis), scales from there along and across
+    # the part's axes, across only as far as the body reaches around that middle, and moves. A skirt weighted
+    # to a thigh then neither pulls the thigh's middle out to it nor grows with the thigh. Groups of parts the
+    # body has no points of go by all their points, reaching twice as far as those spread.
+    frames = _fit_frames(target)
+    part_of = np.array([PART_INDEX[group_parts[names[k]]] for k in fitted])
+    axes = np.array([frames[part] for part in part_of])
+    total = np.maximum(np.bincount(group, weight, minlength=count), 1e-12)
+    centers = np.column_stack([np.bincount(group, weight * points[vertex, k], minlength=count)
+                               for k in range(3)]) / total[:, None]
+    local = np.einsum("nji,nj->ni", axes[group], points[vertex] - centers[group])
+    extent = np.column_stack([2.0 * np.sqrt(np.bincount(group, weight * local[:, k] ** 2, minlength=count) / total)
+                              for k in (1, 2)])
+    by_group = np.argsort(group, kind="stable")
+    bounds = np.searchsorted(group[by_group], np.arange(count + 1))
+    for part in np.unique(part_of):
+        own = body_points[body_labels == part] if body_labels is not None else ()
+        if len(own) < 20:
+            continue
+        members = np.flatnonzero(part_of == part)
+        frame = axes[members[0]][:, 1:]
+        body_across = own @ frame
+        middle = body_across.mean(axis=0)
+        reach = np.maximum(np.percentile(np.abs(body_across - middle), 95, axis=0), 1e-6)
+        for g in members:
+            entries = by_group[bounds[g]:bounds[g + 1]]
+            held, share = points[vertex[entries]], weight[entries]
+            inside = (((held @ frame - middle) / reach) ** 2).sum(axis=1) <= 1.0
+            if share[inside].sum() >= 0.1 * share.sum():
+                centers[g] = (share[inside, None] * held[inside]).sum(axis=0) / share[inside].sum()
+            extent[g] = np.percentile(np.abs(body_across - centers[g] @ frame), 95, axis=0)
+    # The groups of a part that isn't matched (the head, a foot) change together, as one piece about the
+    # middle of all their points (``shared``: the variable each group's change is): the parts they join pull
+    # them along, and nothing within them stretches, say where a shoe's toes meet its heel.
+    shared = np.arange(count)
+    for part in (PART_INDEX[name] for name in FIT_SKIPPED):
+        members = np.flatnonzero(part_of == part)
+        if len(members) > 1:
+            held = np.isin(group, members)
+            centers[members] = (weight[held, None] * points[vertex[held]]).sum(axis=0) / weight[held].sum()
+            extent[members] = extent[members].max(axis=0)
+            shared[members] = members[0]
+    kinds, shared = np.unique(shared, return_inverse=True)
+    least = FIT_LEVER * size
+    extent = np.maximum(extent, least)
+    # What each change costs per matched point: how far it moves the group's own points on average, a
+    # lengthening by how far along they lie, a girth change by how far across (as far as it reaches), a twist
+    # by that unreached, a bend by how far off the middle. So a long chain hanging from a small bone (a silk
+    # drape off a wrist) doesn't swing about it for a millimetre at its top.
+    local = np.einsum("nji,nj->ni", axes[group], points[vertex] - centers[group])
+    reached = local[:, 1:] / np.maximum(np.sqrt(((local[:, 1:] / extent[group]) ** 2).sum(axis=1)), 1.0)[:, None]
+
+    def spread(values):
+        return np.maximum(np.sqrt(np.bincount(group, weight * values, minlength=count) / total), least) ** 2
+
+    costs = np.column_stack((FIT_LENGTH * spread(local[:, 0] ** 2), FIT_GIRTH * spread(reached[:, 0] ** 2),
+                             FIT_GIRTH * spread(reached[:, 1] ** 2),
+                             FIT_TURN * spread(local[:, 1] ** 2 + local[:, 2] ** 2),
+                             FIT_TURN * spread(local[:, 0] ** 2 + local[:, 2] ** 2),
+                             FIT_TURN * spread(local[:, 0] ** 2 + local[:, 1] ** 2), np.full((count, 3), FIT_SHIFT)))
+    # Parts that aren't matched keep their size: a shoe follows the ankle without swelling with the calf.
+    costs[np.isin(part_of, [PART_INDEX[name] for name in FIT_SKIPPED]), :3] *= 1000.0
+    limits = np.array((FIT_LIMITS[0], FIT_LIMITS[1], FIT_LIMITS[1], FIT_LIMITS[2], FIT_LIMITS[2], FIT_LIMITS[2],
+                       FIT_LIMITS[3] * size, FIT_LIMITS[3] * size, FIT_LIMITS[3] * size))
+    # From a group's 9 numbers to its change as a matrix about the origin, x -> x + M x + u (12 numbers: M row
+    # by row, then u): M = axes (scales + twist and bends) axes^T, u = move - M middle.
+    to_affine = np.zeros((count, 12, 9))
+    for k in range(3):
+        to_affine[:, :9, k] = np.einsum("gi,gj->gij", axes[:, :, k], axes[:, :, k]).reshape(count, 9)
+        to_affine[:, :9, 3 + k] = np.einsum("gik,kl,gjl->gij", axes, _skew(np.eye(3)[k]), axes).reshape(count, 9)
+    to_affine[:, 9:, 6:] = np.eye(3)
+    for r in range(3):
+        to_affine[:, 9 + r, :6] -= np.einsum("gs,gsk->gk", centers, to_affine[:, 3 * r:3 * r + 3, :6])
+
+    # Blending: where weights change along an edge, its ends move by different blends of the groups' changes,
+    # and it stretches by the groups' changes at its middle times how much each group's weight changes along
+    # it (their sum). Per pair of groups changing along the same edges, the sum over those edges of the
+    # products (12 x 12, about the origin): the edges' stretch, squared and summed, is then a sum over pairs.
+    ends = np.sort(np.concatenate((tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]])), axis=1)
+    edges = np.unique(ends[:, 0] * len(points) + ends[:, 1])
+    edges = np.column_stack((edges // len(points), edges % len(points)))
+    entry_edge = np.tile(np.arange(len(edges)), 2 * slots)
+    entry_group = np.concatenate([slot_group[edges[:, end], s] for end in (0, 1) for s in range(slots)])
+    entry_change = np.concatenate([(1.0 - 2.0 * end) * slot_weight[edges[:, end], s]
+                                   for end in (0, 1) for s in range(slots)])
+    valid = entry_group >= 0
+    keys, key_of = np.unique(entry_edge[valid] * count + entry_group[valid], return_inverse=True)
+    change = np.bincount(key_of, entry_change[valid], minlength=len(keys))
+    changing = np.abs(change) > 1e-4
+    edge_of, group_of, change = keys[changing] // count, keys[changing] % count, change[changing]
+    starts = np.flatnonzero(np.r_[True, edge_of[1:] != edge_of[:-1]]) if len(edge_of) else np.zeros(0, np.int64)
+    sizes = np.diff(np.r_[starts, len(edge_of)])
+    repeat = np.repeat(sizes, sizes)
+    one = np.repeat(np.arange(len(edge_of)), repeat)
+    other = (np.repeat(np.repeat(starts, sizes), repeat) + np.arange(len(one)) -
+             np.repeat(np.cumsum(repeat) - repeat, repeat))
+    product = change[one] * change[other]
+    middle = (points[edges[edge_of[one], 0]] + points[edges[edge_of[one], 1]]) / 2.0
+    blend_pairs, pair_of = np.unique(group_of[one] * count + group_of[other], return_inverse=True)
+    s0 = np.bincount(pair_of, product, minlength=len(blend_pairs))
+    s1 = np.column_stack([np.bincount(pair_of, product * middle[:, k], minlength=len(blend_pairs)) for k in range(3)])
+    s2 = np.stack([np.column_stack([np.bincount(pair_of, product * middle[:, k] * middle[:, m],
+                                                minlength=len(blend_pairs)) for m in range(3)]) for k in range(3)],
+                  axis=1)
+    blend = np.zeros((len(blend_pairs), 12, 12))
+    for r in range(3):
+        blend[:, 3 * r:3 * r + 3, 3 * r:3 * r + 3] = s2
+        blend[:, 3 * r:3 * r + 3, 9 + r] = s1
+        blend[:, 9 + r, 3 * r:3 * r + 3] = s1
+        blend[:, 9 + r, 9 + r] = s0
+    blend_a, blend_b = blend_pairs // count, blend_pairs % count
+    blend = np.transpose(to_affine[blend_a], (0, 2, 1)) @ blend @ to_affine[blend_b]
+    # The stretch weighs per unit of the model's area, like the gaps (see below).
+    triangles = points[tris]
+    area = 0.5 * np.linalg.norm(np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]),
+                                axis=1).sum()
+
+    # What's matched: the model's parts that aren't skipped, and the body's parts the model has.
+    skipped = [PART_INDEX[part] for part in FIT_SKIPPED]
+    model_parts = [int(part) for part in np.unique(labels[labels >= 0])]
+    model_rows = _evenly(np.flatnonzero((labels >= 0) & ~np.isin(labels, skipped)), FIT_SAMPLES)
+    triangle_labels = _triangle_parts(tris, np.maximum(labels, 0))
+    model_usable = ~np.isin(triangle_labels, skipped)
+    body_normals = _vertex_normals(body_points, body_tris)
+    if body_labels is None:
+        body_rows = _evenly(np.arange(len(body_points)), FIT_SAMPLES)
+        body_triangle_labels, body_usable = None, np.ones(len(body_tris), dtype=bool)
+        model_query, body_query = np.full(len(model_rows), -1), np.full(len(body_rows), -1)
+    else:
+        body_rows = _evenly(np.flatnonzero(np.isin(body_labels, model_parts) & ~np.isin(body_labels, skipped)),
+                            FIT_SAMPLES)
+        body_triangle_labels = _triangle_parts(body_tris, np.maximum(body_labels, 0))
+        body_usable = ~np.isin(body_triangle_labels, skipped)
+        model_query, body_query = labels[model_rows], body_labels[body_rows]
+    body_trees = _PartTrees(body_points, body_tris, body_triangle_labels, model_parts, body_usable)
+    body_parts = [int(part) for part in np.unique(body_query)]
+    reach = FIT_REACH * size
+
+    changes = np.zeros((count, 9))
+    solution = np.zeros((len(kinds), 9))
+    current = np.array(points, dtype=np.float64)
+    result = ShapeFit([names[k] for k in fitted], centers, axes, extent)
+    for round_ in range(FIT_ROUNDS):
+        normals = _vertex_normals(current, tris)
+        # The model's points onto the body: its normal, and the gap as how far the model lies out from it.
+        found, corners, bary, normal, gap = _match(body_trees, body_points, body_tris, body_normals,
+                                                   current[model_rows], model_query, normals[model_rows], reach,
+                                                   size)
+        rows_m, normal_m, gap_m = model_rows[found], normal, -gap
+        target_m = (bary[:, :, None] * body_points[corners]).sum(axis=1)
+        outside = np.flatnonzero(gap_m > 0.0)
+        if len(outside):
+            # Only the innermost layer: nothing of the model between the body and the point.
+            whole = BVHTree.FromPolygons(current.tolist(), tris.tolist(), all_triangles=True)
+            ways = current[rows_m[outside]] - target_m[outside]
+            distances = np.linalg.norm(ways, axis=1)
+            ways /= np.maximum(distances, 1e-12)[:, None]
+            origins = (target_m[outside] + ways * 1e-6 * size).tolist()
+            nearer = distances - np.maximum(0.0025 * size, 0.2 * distances)
+            keep = np.ones(len(rows_m), dtype=bool)
+            for index, origin, way, distance, layer in zip(outside, origins, ways.tolist(), distances, nearer):
+                hit = whole.ray_cast(origin, way, distance)
+                if hit[0] is not None and hit[3] < layer:
+                    keep[index] = False
+            rows_m, normal_m, gap_m, target_m = rows_m[keep], normal_m[keep], gap_m[keep], target_m[keep]
+        # The body's points onto the model: the model's normal, and how far it lies out from the body.
+        model_trees = _PartTrees(current, tris, None if body_labels is None else triangle_labels, body_parts,
+                                 model_usable)
+        found, corners_b, bary_b, normal_b, gap_b = _match(model_trees, current, tris, normals,
+                                                           body_points[body_rows], body_query,
+                                                           body_normals[body_rows], reach, size)
+        rows_b = body_rows[found]
+        # Rows: the normal, the model's point at rest, how far it must move along the normal, the row's weight
+        # (each side half), and its groups' weights.
+        rest_b = (bary_b[:, :, None] * points[corners_b]).sum(axis=1)
+        normal_rows = np.concatenate((normal_m, normal_b))
+        at_rows = np.concatenate((points[rows_m], rest_b))
+        wanted = np.concatenate(((normal_m * (target_m - points[rows_m])).sum(axis=1),
+                                 (normal_b * (body_points[rows_b] - rest_b)).sum(axis=1)))
+        gaps = np.concatenate((gap_m, gap_b))
+        # Each side weighs half (``share``), and each row as hard as its gap pulls.
+        share = np.concatenate((np.full(len(gap_m), 0.5 / max(len(gap_m), 1)),
+                                np.full(len(gap_b), 0.5 / max(len(gap_b), 1)))) * len(gaps)
+        inside = gaps < 0.0
+        soft = np.where(inside, FIT_SOFT_INSIDE, FIT_SOFT) * size
+        pull = share / (1.0 + (gaps / soft) ** 2) ** 2 * np.where(inside, FIT_INSIDE, 1.0)
+        if round_ == 0:
+            before = float(np.median(np.abs(gaps))) if len(gaps) else 0.0
+            result.before = result.after = before
+        if not len(gaps):
+            break
+        row_weights = np.zeros((len(gaps), count))
+        for s in range(slots):
+            chosen = slot_group[rows_m, s] >= 0
+            row_weights[np.flatnonzero(chosen), slot_group[rows_m[chosen], s]] += slot_weight[rows_m[chosen], s]
+            for c in range(3):
+                corner = corners_b[:, c]
+                chosen = slot_group[corner, s] >= 0
+                np.add.at(row_weights, (len(rows_m) + np.flatnonzero(chosen), slot_group[corner[chosen], s]),
+                          bary_b[chosen, c] * slot_weight[corner[chosen], s])
+        row_weights[row_weights < 1e-3] = 0.0
+        # Least squares about the origin (12 numbers per group), per pair of groups a row weighs, then in the
+        # groups' 9 numbers.
+        lifted = np.concatenate((np.einsum("ri,rj->rij", normal_rows, at_rows).reshape(-1, 9), normal_rows), axis=1)
+        squares = (pull[:, None, None] * lifted[:, :, None] * lifted[:, None, :]).reshape(len(gaps), 144)
+        firsts, seconds, sums = [], [], []
+        for g in range(count):
+            rows = np.flatnonzero(row_weights[:, g] > 0.0)
+            if len(rows):
+                others = np.flatnonzero(row_weights[rows].max(axis=0) > 0.0)
+                firsts.append(others)
+                seconds.append(np.full(len(others), g))
+                sums.append(row_weights[np.ix_(rows, others)].T @ (row_weights[rows, g, None] * squares[rows]))
+        if not sums:
+            break
+        firsts, seconds = np.concatenate(firsts), np.concatenate(seconds)
+        data = (np.transpose(to_affine[firsts], (0, 2, 1)) @ np.concatenate(sums).reshape(-1, 12, 12) @
+                to_affine[seconds])
+        rhs = np.einsum("gji,gj->gi", to_affine, row_weights.T @ ((pull * wanted)[:, None] * lifted))
+        # What the changes cost, per point each group is matched at (at least FIT_LEAST), however hard those pull:
+        # a group whose points all hang loose (a puffy sleeve) hardly changes...
+        matched = np.maximum(row_weights.T @ share, FIT_LEAST * share.mean())
+        stiffness = np.zeros((count, 9, 9))
+        stiffness[:, np.arange(9), np.arange(9)] = matched[:, None] * costs * np.maximum(
+            (np.abs(changes) / limits) ** 2, 1.0)
+        # ...and the stretch, which weighs per unit of area as the rows do: they sample the surfaces.
+        strength = (FIT_BLEND * size) ** 2 * share.sum() / max(area, 1e-12)
+        # Solved per variable: groups changing together (see ``shared``) add up.
+        variables = len(kinds)
+        keys, key_of = np.unique(shared[np.concatenate((firsts, np.arange(count), blend_a))] * variables +
+                                 shared[np.concatenate((seconds, np.arange(count), blend_b))], return_inverse=True)
+        blocks = np.zeros((len(keys), 9, 9))
+        np.add.at(blocks, key_of, np.concatenate((data, stiffness, strength * blend)))
+        totals = np.zeros((variables, 9))
+        np.add.at(totals, shared, rhs)
+        solution = _conjugate_gradient(keys // variables, keys % variables, blocks, totals, solution)
+        changes = solution[shared]
+        result.changes = np.clip(changes, -1.5 * limits, 1.5 * limits)
+        # How far apart the matched surfaces are now, as far as this round's matches tell.
+        affine = np.einsum("gkl,gl->gk", to_affine, result.changes)
+        moved = (row_weights * (lifted @ affine.T)).sum(axis=1)
+        result.after = float(np.median(np.abs(wanted - moved)))
+        updated = result.move(points, weights)
+        settled = np.abs(updated - current).max() < FIT_SETTLED * size
+        current = updated
+        if settled:
+            break
+    return result
+
+
+# -----------------------------------------------------------------------------
 # Blender objects
 
 def _matrix(obj):
@@ -1495,15 +2071,36 @@ def body_rig(body, depsgraph):
 
 
 def body_surface(body, depsgraph):
-    """World positions of the body's vertices as displayed."""
+    """World positions of the body's vertices, and its triangles, as displayed."""
     evaluated = body.evaluated_get(depsgraph)
     mesh = evaluated.to_mesh()
     try:
         co = np.empty(len(mesh.vertices) * 3, dtype=np.float64)
         mesh.vertices.foreach_get("co", co)
+        mesh.calc_loop_triangles()
+        tris = np.empty(len(mesh.loop_triangles) * 3, dtype=np.int64)
+        mesh.loop_triangles.foreach_get("vertices", tris)
     finally:
         evaluated.to_mesh_clear()
-    return apply_matrix(_matrix(body), co.reshape(-1, 3))
+    return apply_matrix(_matrix(body), co.reshape(-1, 3)), tris.reshape(-1, 3)
+
+
+def body_labels(body, armature, count):
+    """Part (index into PARTS) of each of the ``count`` points of the body as displayed, by its weights (-1
+    for none), or None when modifiers changed its points, so its weights don't say."""
+    if len(body.data.vertices) != count:
+        return None
+    if armature is not None:
+        _parts, deform, _joints = armature_rig(armature)
+        names = [group.name for group in body.vertex_groups if group.name in deform]
+        parts = {name: deform[name] for name in names}
+        weights = mesh_weights(body, names)
+    else:
+        names = [group.name for group in body.vertex_groups]
+        weights = mesh_weights(body, names)
+        parts, _named = group_parts_by_name(names, weights)
+    part_weights = weights.by_part(parts)
+    return np.where(part_weights.sum(axis=1) > 0.0, np.argmax(part_weights, axis=1), -1)
 
 
 class Plan:
@@ -1511,29 +2108,35 @@ class Plan:
     ``solution``, each mesh's part weights (``mesh_parts``), each bone's part (``bone_parts``, for an
     armature whose rest pose moves along), where to put the bones of an armature whose bones all sit at
     one spot (``bone_places``: bone name -> world head and tail), and how the joints were found (``how``:
-    "bones", "weights", "unnamed")."""
+    "bones", "weights", "unnamed"). With Fit Shape, how its groups then change (``shape``, a ShapeFit),
+    with each mesh's group weights (``mesh_weights``) and small loose parts that keep their shape
+    (``mesh_rigid``: a label per point, -1 for none)."""
 
     def __init__(self):
         self.meshes = []
         self.armature = None
         self.move_armature = False
         self.mesh_parts = []
+        self.mesh_weights = []
+        self.mesh_rigid = []
         self.bone_parts = {}
         self.bone_places = {}
         self.solution = None
+        self.shape = None
         self.how = ""
         self.refined = 0
         self.source_joints = {}
         self.target_joints = {}
 
 
-def plan(meshes, armature, body, depsgraph, stretch=True):
+def plan(meshes, armature, body, depsgraph, stretch=True, fit=False):
     """Work out how to line up a model (``meshes`` bent by ``armature``, which can be None) with
-    ``body``. Raises LineUpError when it can't."""
+    ``body``, and with ``fit`` how to fit its shape (`fit_shape`). Raises LineUpError when it can't."""
     result = Plan()
     result.meshes, result.armature = list(meshes), armature
-    target, _body_armature = body_rig(body, depsgraph)
+    target, body_armature = body_rig(body, depsgraph)
     result.target_joints = target
+    surface = None
 
     all_parts, deforming = {}, None
     bone_joints = {}
@@ -1587,8 +2190,8 @@ def plan(meshes, armature, body, depsgraph, stretch=True):
         # Refining finds where the model's own joints are: it puts them on the body's, so with stretching
         # whatever the setting.
         try:
-            source, result.refined = refine_joints(source, target, points, tris, part_weights,
-                                                   body_surface(body, depsgraph))
+            surface = body_surface(body, depsgraph)
+            source, result.refined = refine_joints(source, target, points, tris, part_weights, surface[0])
         except LineUpError:
             pass
     result.source_joints = source
@@ -1598,13 +2201,34 @@ def plan(meshes, armature, body, depsgraph, stretch=True):
                           "it needs both arms or both legs, and the body around them")
     offsets = np.cumsum([0] + [len(p) for p in positions])
     result.mesh_parts = [part_weights[a:b] for a, b in zip(offsets[:-1], offsets[1:])]
+    result.mesh_weights = sets
+    lined_up = None
+    if fit and len(points):
+        lined_up = deform(points, part_weights, result.solution)
+        if surface is None:
+            surface = body_surface(body, depsgraph)
+        body_points, body_tris = surface
+        result.shape = fit_shape(lined_up, tris, weights, group_parts, body_points, body_tris,
+                                 body_labels(body, body_armature, len(body_points)), target,
+                                 result.solution.torso_length)
+        if result.shape is not None:
+            fitted = result.shape.move(lined_up, weights)
+            # Small loose parts keep their shape (see FIT_RIGID).
+            edges = np.concatenate((tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]]))
+            loose, count = resizing.loose_parts(lined_up, edges)
+            small = resizing.part_sizes(lined_up, loose, count) <= FIT_RIGID * result.solution.torso_length
+            rigid = np.where(small[loose], loose, -1)
+            resizing.keep_rigid(lined_up, fitted, rigid)
+            result.mesh_rigid = [rigid[a:b] for a, b in zip(offsets[:-1], offsets[1:])]
+            lined_up = fitted
     if armature is not None and not result.move_armature and len(points):
         bones = armature.data.bones
         heads = apply_matrix(_matrix(armature), np.array([bone.head_local for bone in bones]).reshape(-1, 3))
         if not len(heads) or np.ptp(heads, axis=0).max() <= BONE_SPOT * np.ptp(points, axis=0).max():
             # Its bones sit at one spot: they go where their groups end up.
-            places = group_bones(deform(points, part_weights, result.solution), weights, group_parts,
-                                 BONE_LEAST * result.solution.torso_length)
+            if lined_up is None:
+                lined_up = deform(points, part_weights, result.solution)
+            places = group_bones(lined_up, weights, group_parts, BONE_LEAST * result.solution.torso_length)
             result.bone_places = {name: place for name, place in places.items() if name in bones}
         else:
             # Bones in places of their own, but named so they say nothing: each moves with its group's part,
@@ -1700,14 +2324,22 @@ def segment_tips(points, part_weights, joints):
     return tips
 
 
-def _write_mesh(obj, part_weights, solution):
-    """Move mesh ``obj`` (every shape key) by the parts' moves, blended by its ``part_weights``."""
+def _write_mesh(obj, part_weights, solution, shape=None, weights=None, rigid=None):
+    """Move mesh ``obj`` (every shape key) by the parts' moves, blended by its ``part_weights``, then by the
+    changes of its groups (``shape``, a ShapeFit, blended by ``weights``) if given, parts labelled in
+    ``rigid`` keeping their shape."""
     mesh = obj.data
     matrix = _matrix(obj)
     inverse = np.linalg.inv(matrix)
 
     def moved(local):
-        return apply_matrix(inverse, deform(apply_matrix(matrix, local), part_weights, solution))
+        world = deform(apply_matrix(matrix, local), part_weights, solution)
+        if shape is not None:
+            fitted = shape.move(world, weights)
+            if rigid is not None:
+                resizing.keep_rigid(world, fitted, rigid)
+            world = fitted
+        return apply_matrix(inverse, world)
 
     keys = mesh.shape_keys
     if keys is None:
@@ -1725,21 +2357,32 @@ def _write_mesh(obj, part_weights, solution):
 
 def move_rest_pose(result):
     """Move the rest pose of the Plan's armature along with its parts: every bone's head and tail by its
-    part's move, its roll turned with it. The armature must be in Edit Mode."""
-    armature, solution = result.armature, result.solution
+    part's move, its roll turned with it; with Fit Shape, then by its group's change (or that of the nearest
+    bone above it with one). The armature must be in Edit Mode."""
+    armature, solution, shape = result.armature, result.solution, result.shape
     matrix = _matrix(armature)
     inverse = np.linalg.inv(matrix)
     axes = matrix[:3, :3]
     edit_bones = armature.data.edit_bones
     connected = {bone.name for bone in edit_bones if bone.use_connect}
+    changed = {}
+    for bone in edit_bones:
+        above = bone
+        while shape is not None and above is not None and above.name not in shape.index:
+            above = above.parent
+        changed[bone.name] = above.name if shape is not None and above is not None else None
     for bone in edit_bones:
         bone.use_connect = False
     for bone in edit_bones:
         part = result.bone_parts.get(bone.name, TORSO)
-        head, tail = (apply_matrix(inverse, solution.move(part, apply_matrix(matrix, np.array(point))))
-                      for point in (bone.head, bone.tail))
-        z_axis = np.linalg.solve(axes, solution.rotations[part] @ (axes @ np.array(bone.z_axis)))
-        bone.head, bone.tail = head.tolist(), tail.tolist()
+        head, tail = (solution.move(part, apply_matrix(matrix, np.array(point))) for point in (bone.head, bone.tail))
+        turn = solution.rotations[part]
+        group = changed[bone.name]
+        if group is not None:
+            head, tail = shape.move_point(group, head), shape.move_point(group, tail)
+            turn = shape.rotation(group) @ turn
+        z_axis = np.linalg.solve(axes, turn @ (axes @ np.array(bone.z_axis)))
+        bone.head, bone.tail = apply_matrix(inverse, head).tolist(), apply_matrix(inverse, tail).tolist()
         bone.align_roll(z_axis.tolist())
     for bone in edit_bones:
         if bone.name in connected:
@@ -1748,5 +2391,8 @@ def move_rest_pose(result):
 
 def write_meshes(result):
     """Move the Plan's meshes (every shape key) onto the body."""
-    for obj, part_weights in zip(result.meshes, result.mesh_parts):
-        _write_mesh(obj, part_weights, result.solution)
+    for k, (obj, part_weights) in enumerate(zip(result.meshes, result.mesh_parts)):
+        weights = result.mesh_weights[k] if k < len(result.mesh_weights) else None
+        rigid = result.mesh_rigid[k] if k < len(result.mesh_rigid) else None
+        _write_mesh(obj, part_weights, result.solution, result.shape if weights is not None else None, weights,
+                    rigid)

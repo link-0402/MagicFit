@@ -23,20 +23,24 @@ see facedata):
   from its weights, the custom face's from where it lies around the margins and the lip line, spread a
   few millimetres inward along the surface), and preferably from a surface facing the same way: lips
   touch and the gums sit right behind them, so this keeps them apart.
+- Around the eyes, where the custom face's mesh is finer than the game's, the lids' weights are smoothed: taken from
+  the game's coarse triangles they bend at its edges, which would crease a finer lid as it closes.
 - The eyes must be shut in the game's Shut Eyes expression (a face animation it holds for as long as the
   expression lasts, its lids turned about as far as at the blink's peak), with the lids just meeting there.
   The lids of a bigger eye may stop short: where the eyeball still shows, the lid weights are raised (fading
   out away from the margin) until it's covered, or until they can't go higher, which is reported. Lids that
   meet well before it (a smaller eye with the game's lid weights, and many of the game's own faces) slide on
-  past each other and fold: they're lowered, as far as the blink's peak still closes the eyes.
+  past each other and fold: they're lowered, a stretch of the lid at a time, so that the whole length of the
+  eye meets as the expression is held without the lids pressing into each other (measured on both lids, as
+  thick as they are), as far as the blink's peak still closes the eyes.
 - The neck ring (where the face meets the body) must be exactly the game's, or a seam shows: its
   positions, normals and weights are copied from the game's face.
 
 Other parts are weighted by what they are: eyeballs follow their eye bone; lashes (parts along a lid
-margin, standing off the skin) take the weights of the margin point they grow from, so they stay on the
-lid as it closes; parts lying on the skin (brows, makeup) follow the skin under them; parts inside the
-mouth (teeth, tongue) take the game's mouth weights; other parts (piercings, studs, horns) move as one
-piece with the skin they're attached to.
+margin, standing off the skin) take the weights of the skin where their roots sit on the lid, spread
+smoothly along each strand, so they stay on the lid as it closes; parts lying on the skin (brows, makeup)
+follow the skin under them; parts inside the mouth (teeth, tongue) take the game's mouth weights; other
+parts (piercings, studs, horns) move as one piece with the skin they're attached to.
 
 Like `painting`, nothing here depends on the 3D view.
 """
@@ -106,17 +110,22 @@ LIP_DEPTH = 0.0004
 LIP_GAP = 0.0015
 # A skin surface this far behind the eyeball's front doesn't cover it.
 EYEBALL_TOLERANCE = 0.0002
-# Lash lines are the lids' silhouettes against the eyeball seen this far (radians) from the front, from above
-# for the upper lid and from below for the lower one: their front edges. The game's lashes grow within about
-# half a millimetre of them.
-LASH_TILT = math.radians(35.0)
-# Rays that far apart are enough there (the lines are smoothed): a quarter of the rays of the front scans.
-LASH_SCAN_STEP = 0.0005
-# Seen at that tilt, only skin within this of the eyeball's sphere hides it: the lids, which lie on the
-# eyeball, and not the brows or cheeks in front of them, which would hide the lids' edges. A lash line farther
-# than LASH_LINE_LIMIT from its margin (median) is taken to be wrong, and the margin is used.
-LID_SHELL = 0.005
-LASH_LINE_LIMIT = 0.004
+# Lash lines are the lids' front edges, where the game's lashes grow: where a lid's rim, which faces the opening
+# (down on the upper lid, up on the lower one), turns to face the front. Every LASH_EDGE_STEP along the margin,
+# on the lid's section across it, the edge is the skin point lying farthest out in a direction LASH_EDGE_TILT
+# (radians; upper lid, lower lid) from the front toward the opening: the rims of the game's faces face 45-65
+# degrees from the front, the lids' fronts 15 degrees or less, so the edge is found between them, on thin lids
+# and thick ones alike (these tilts put the game's lash roots closest to the edges: 0.2 mm median, all its faces).
+# The section is followed from the margin over the rim until it turns back by LASH_EDGE_DROP (up the lid's front:
+# not on to a brow or fold beyond), within LASH_EDGE_REACH of the margin (the game's edges lie up to 4 mm from
+# their margins), and the edge is never past the margin into the opening (LASH_EDGE_BELOW). The edges found are
+# smoothed along the lid over LASH_EDGE_MEDIAN samples.
+LASH_EDGE_TILT = (math.radians(30.0), math.radians(20.0))
+LASH_EDGE_STEP = 0.0005
+LASH_EDGE_DROP = 0.0003
+LASH_EDGE_REACH = 0.0045
+LASH_EDGE_BELOW = 0.00025
+LASH_EDGE_MEDIAN = 5
 # Samples of each lid margin and of the lip line for the warp.
 MARGIN_SAMPLES = 24
 LIP_SAMPLES = 32
@@ -140,11 +149,12 @@ NORMAL_PENALTY = 0.002
 NORMAL_SEARCH = 0.003
 NORMAL_GOOD = 0.95
 # Eyelid closing. Lids should meet in the Shut Eyes expression (SHUT_POSE), which the game holds with the lids
-# turned about as far as at its blink's peak (91 to 102 % of it, 100 % on the median face skeleton), overlapping
-# this much there; a raise fades out over LID_FALLOFF from the margin and is spread over LID_SMOOTH scan columns.
-# Lids meeting more than CLOSE_SLACK of the pose's turn earlier slide on past each other and fold while it's held
-# (smaller eyes given the game's big-eyed lid weights, and the game's own faces, which close their eyes a bit before
-# it): all of the eye's lid weights are lowered alike. The blink's peak (BLINK_POSE) must close the eyes too, and
+# turned about as far as at its blink's peak (91 to 102 % of it, 100 % on the median face skeleton); where the eye
+# still shows there, lids are raised to overlap this much, a raise fading out over LID_FALLOFF from the margin,
+# spread over LID_SMOOTH scan columns. Lids meeting more than CLOSE_SLACK of the pose's turn earlier slide on past
+# each other and fold while it's held (smaller eyes given the game's big-eyed lid weights, and the game's own faces,
+# which close their eyes a bit before it): they're lowered, a column at a time (see LidFit), then all of the eye's
+# lid weights alike if the eye still closes that early. The blink's peak (BLINK_POSE) must close the eyes too, and
 # closes them up to 7 % less than Shut Eyes on the game's faces: lids are raised for it, and lowered only as far as
 # it allows. Since the game shows it for an instant, it may leave a slit up to BLINK_SLIT tall (a row of the scan),
 # which the lashes hide: holding lids up for that made some lids meet a quarter of the turn early in Shut Eyes. At
@@ -156,6 +166,45 @@ LID_SMOOTH = 9
 LID_ROUNDS = 5
 CLOSE_SLACK = 0.05
 CLOSE_PRECISION = 0.01
+# Lids are fitted a column at a time across the eye (see LidFit), LID_COLUMN_STEP apart: each column's lid weights
+# scaled so that its lids meet LID_MEET into Shut Eyes, or later, by its end, where that would press them into each
+# other there (the rays see lids LID_CLEARANCE apart as touching: they're that far apart at most between rays, and
+# the lids' triangles slant), and at the blink's peak leave a slit of at most LID_SLIT (a row of the closure scans);
+# smoothed along the lid (a Gaussian LID_ALONG wide), in LID_FIT_ROUNDS rounds. Where the lids meet is measured with
+# vertical rays at LID_DEPTHS depths from LID_FRONT in front of the margins to LID_BACK behind the eyeball's sphere
+# (eyeballs aren't quite spheres: the lids on them can lie behind it).
+LID_COLUMN_STEP = 0.0005
+LID_MEET = 1.0 - CLOSE_SLACK / 2.0
+LID_CLEARANCE = 0.0001
+LID_SLIT = SCAN_STEP
+LID_ALONG = 0.0015
+LID_FIT_ROUNDS = 4
+LID_DEPTHS = 48
+LID_FRONT = 0.003
+LID_BACK = 0.002
+# A column's gap is taken to change as measured between rounds once its factor moved more than LID_STEP; columns
+# open less than LID_CORNER of the eye's most at rest (by the corners) count for less where they must close.
+LID_STEP = 0.005
+LID_CORNER = 0.4
+# Lids that meet within CLOSE_SLACK of the end of Shut Eyes and press into each other no more than this there (as
+# the rays see them, away from the corners) are left as they are, like some of the game's own faces.
+LID_TOLERANCE = 0.0004
+# Lid weight smoothing (see smooth_lid_weights): around each eye (within LID_SMOOTH_REACH of its center, as far as
+# the lid weights reach), a lid's weight is smoothed as far as LID_SMOOTH_SCALE of how much wider the game's triangles
+# are than the face's there: about half a triangle smooths out the bends at the game's edges without moving where the
+# weight falls off (more lets it creep up the socket). Less than LID_SMOOTH_MIN is none. Lid weight below
+# LID_SMOOTH_FLOOR (a tenth of a whole lid's) is kept: smoothing that faint tail raised it, and the socket moved about
+# a fifth more. Within LID_SMOOTH_KEEP of a lid's margin (its rim) that lid's weight is kept. The smoothing is solved
+# to SMOOTH_TOLERANCE (of the first residual) in at most SMOOTH_ITERATIONS steps; cotangent weights below
+# LAPLACIAN_FLOOR (obtuse triangles) are raised to it, so it never overshoots.
+LID_SMOOTH_REACH = 0.03
+LID_SMOOTH_SCALE = 0.5
+LID_SMOOTH_MIN = 0.0001
+LID_SMOOTH_FLOOR = 0.1
+LID_SMOOTH_KEEP = 0.001
+SMOOTH_TOLERANCE = 1e-5
+SMOOTH_ITERATIONS = 500
+LAPLACIAN_FLOOR = 0.05
 # Neck ring: custom ring vertices at most this far from the game's ring are snapped onto it.
 RING_TOLERANCE = 0.002
 # A mesh without the game's neck opening is the face when it covers this share of the game's face.
@@ -176,25 +225,91 @@ RIGID_SIZE = 0.012
 FILM_SHARE = 0.4
 # The roots of a lash part: every LASH_ROOT_SPACING along a lid, its points there scoring within
 # LASH_ROOT_BAND of the best, by their distance to the lid's lash line plus how much farther from the eyeball's
-# center they are than the innermost there. Every other point hangs from the root closest along the part's
-# surface, and moves with it. A part has lashes on a lid when LASH_BEYOND of it reaches past that lid's
-# margin, along LASH_COVER of the lid at least.
+# center they are than the innermost there; none where the closest point there is LASH_ROOT_FAR farther from the
+# line than the part's closest points elsewhere (the tips of lashes fanning out past the ends of the strip's root
+# edge). Every other point hangs from the root closest along the part's surface. A part has lashes on a lid when
+# LASH_BEYOND of it reaches past that lid's margin, along LASH_COVER of the lid at least.
 LASH_ROOT_BAND = 0.00075
 LASH_ROOT_SPACING = 0.001
+LASH_ROOT_FAR = 0.001
 LASH_BEYOND = 0.05
 LASH_COVER = 0.05
-# As in the game's lashes, the lid weight of a lash fades along it: from LASH_TIP_START from its root to
-# LASH_TIP_START + LASH_TIP_LENGTH, up to LASH_TIP_SHARE of it goes to the head, so the tips lag a little
-# as the lid closes.
-LASH_TIP_START = 0.002
-LASH_TIP_LENGTH = 0.01
-LASH_TIP_SHARE = 0.3
-# Where the game's lashes grow, per lid (upper, lower): this far out from the eyeball and this far along the
-# lid (up the upper one, down the lower one) from its lash line, in the middle (median) of all its faces.
-LASH_ROOT_OUT = (0.0004, 0.001)
-LASH_ROOT_ALONG = (0.0003, 0.0008)
-# Snapping moves lashes by a smooth average along the lid of what each millimetre of it needs, this wide.
+# As in the game's lashes, the lid weight of a lash fades along it: from LASH_TIP_START from its roots to
+# LASH_TIP_START + LASH_TIP_LENGTH, up to LASH_TIP_SHARE of it goes to the head, so long lashes' tips lag a little
+# as the lid closes. Fitted to the lashes of all the game's faces (107 with lashes; their strands keep 97 % of their
+# root's lid weight up to 8 mm out, 88 % at 10-12 mm, 85 % beyond), upper and lower alike.
+LASH_TIP_START = 0.005
+LASH_TIP_LENGTH = 0.008
+LASH_TIP_SHARE = 0.15
+# A lash root sits on its lid, and takes the weights of the skin there, when it's at most LASH_ATTACH farther from
+# the skin than the lid's closer roots (the nearest quarter). Roots farther off hold on to the skin's weights less
+# and less, not at all LASH_FLOAT farther still: those are mostly points of strands passing by the lash line in front
+# of the lid (a thick lid's lash line lies up on its fold), which would take the weights of skin they don't grow
+# from, and follow the rest of the lash instead; the end of a strip floating a little over a lid's corner goes
+# partly with the skin under it rather than all with the strip's middle.
+LASH_ATTACH = 0.0005
+LASH_FLOAT = 0.0015
+# Lashes around the whole eye turn from one lid's weights into the other's where a blend of the two (1 at the upper
+# roots, 0 at the lower ones) is within half this of the middle: about the corners, not along the strands.
+LASH_LID_BLEND = 0.5
+# ...and whatever the blend, points of them farther above the upper margin (below the lower one) than this go with that
+# lid alone.
+LASH_SIDE_BAND = 0.002
+# Roots' weights spread along the strands growing from them: an edge running across a strand (along the lid)
+# couples its ends this much as one running along it (see `harmonic_fill`), so each strand follows its own root,
+# as the game's do (a strand at a corner keeps the corner's weights instead of taking some of the middle's), and
+# neighbouring strands still blend without steps.
+LASH_ACROSS = 0.05
+# Weights spread from a lash's roots over the rest of it (see `harmonic_fill`) are solved to this relative
+# precision, in at most SPREAD_ITERATIONS steps; edges shorter than SPREAD_EDGE count as that long, so a
+# degenerate edge doesn't tie its ends.
+SPREAD_TOLERANCE = 1e-7
+SPREAD_ITERATIONS = 4000
+SPREAD_EDGE = 1e-5
+# Where the game's lashes grow, per lid (upper, lower): on the skin (their roots share its surface), this far
+# along the lid (up the upper one, down the lower one) from its lash line, in the middle (median) of all its faces.
+# Snap Lashes sits roots LASH_ROOT_OUT out from the skin (on it, with a little room so the skin's facets and the
+# lids bending don't hide them), plus the Lash Lift.
+LASH_ROOT_OUT = 0.00005
+LASH_ROOT_ALONG = (0.00007, 0.00007)
+# Snap Lashes corrects how deep a lash sits: a root floating off the lid or sunk into it moves along the lid's
+# normal at its front edge until it sits on the skin; roots less than LASH_SNAP_TOLERANCE off (twice that: fully)
+# stay where they are. Along the lid, roots stay where the lashes' author put them (between the margin and the
+# front edge, as custom lashes often are, or on the edge as the game's are), unless they're more than
+# LASH_OFF_LID past the front edge (the game's lie up to 1.1 mm past it, all but the Hrothgar's fur): those go to
+# where the game's grow, fully when LASH_OFF_LID_BLEND farther.
+LASH_SNAP_TOLERANCE = 0.0001
+LASH_OFF_LID = 0.0015
+LASH_OFF_LID_BLEND = 0.0005
+# The skin is looked for this far along the lid's normal from a root, and no more than LASH_SNAP_DETOUR times as
+# far as its closest point.
+LASH_SNAP_REACH = 0.004
+LASH_SNAP_DETOUR = 1.5
+# Snapping moves lashes by a smooth average along the lid of what each root needs, this wide, so each strip
+# moves nearly as one piece and never creases, in up to LASH_SNAP_ROUNDS rounds; lashes spanning less than
+# LASH_RIGID_SPAN along the lid move as one piece.
 LASH_SNAP_SMOOTH = 0.0025
+LASH_SNAP_ROUNDS = 4
+# A root counts as (1 - (d / spread)^2)^2, d being how far what it needs is from what the other roots within
+# LASH_SNAP_AROUND of it along the lid need (their median), and the spread LASH_SNAP_SPREAD plus LASH_SNAP_SHARE of
+# that: not at all from there on, since by a strip's end only one root may be near, and even a little of it would
+# move the end; a strip sunk into the lid all along needs a lot everywhere, more in some places than others.
+LASH_SNAP_SPREAD = 0.001
+LASH_SNAP_SHARE = 0.5
+LASH_SNAP_AROUND = 0.005
+LASH_RIGID_SPAN = 0.003
+# A snapped lash point may end up at most LASH_INSIDE deep in the skin, at rest and in the poses that close the
+# eyes, unless it was inside already: then no deeper at rest, and in a pose up to LASH_COVERED deep (lower lashes
+# the closed upper lid covers anyway), or no deeper if it was deeper. A snap that, at rest and in each pose, brings
+# at least as many points out of the skin as it pushes in (a sunk strip pulled out may graze the lid with a tip),
+# none deeper than LASH_COVERED (or than it was), is kept as it is. Otherwise the move fades smoothly around each
+# point pushed in, down to as much of it as that point can take, in up to LASH_INSIDE_ROUNDS rounds, and then
+# there's none: stopping whole stretches instead left sunk strips in the skin. The limits don't depend on where the
+# lashes are now, so snapping again doesn't push them deeper.
+LASH_INSIDE = 0.00005
+LASH_COVERED = 0.001
+LASH_INSIDE_ROUNDS = 4
+LASH_INSIDE_SAFETY = 0.8
 # A part along both margins (RIM_SPAN of it along each) with more than RIM_SHARE over the opening is the rim
 # of the opening (the game's tear lines) rather than lashes: a film, not snapped.
 RIM_SHARE = 0.15
@@ -838,19 +953,15 @@ def eyeball_front(eye, origin, direction):
     return None if disc <= 0.0 else -b - math.sqrt(disc)
 
 
-def eye_opening(skin_bvh, eye, step=SCAN_STEP, tilt=0.0, shell=None, box=None):
-    """Where the eyeball shows through the skin, seen from the front (tilted ``tilt`` radians upward; down
-    for negative ones): (xs, zs, hits (nz, nx, 3) on the skin or nan, open mask), xs and zs across and up
-    the view about the eye's center, the mask the connected region around it. With ``shell``, only skin
-    that close to the eyeball's sphere hides it (the lids, not the brows or cheeks in front of them). With
-    ``box`` (x0, x1, z0, z1, as xs and zs), rays are cast only within it and the rest of the window counts as
+def eye_opening(skin_bvh, eye, step=SCAN_STEP, box=None):
+    """Where the eyeball shows through the skin, seen from the front: (xs, zs, hits (nz, nx, 3) on the skin or
+    nan, open mask), xs and zs across and up about the eye's center, the mask the connected region around it.
+    With ``box`` (x0, x1, z0, z1, as xs and zs), rays are cast only within it and the rest of the window counts as
     covered (hits nan), unless the opening found reaches the box's edge: then the whole window is scanned."""
     c = eye.center
     half_w = max(EYE_WINDOW[0], 1.3 * eye.radius)
     half_h = max(EYE_WINDOW[1], 1.0 * eye.radius)
-    view = np.array((0.0, math.cos(tilt), math.sin(tilt)))
-    across = np.array((1.0, 0.0, 0.0))
-    up = np.array((0.0, -math.sin(tilt), math.cos(tilt)))
+    view = np.array((0.0, 1.0, 0.0))
     xs = np.arange(c[0] - half_w, c[0] + half_w, step)
     zs = np.arange(c[2] - half_h, c[2] + half_h, step)
     hits = np.full((len(zs), len(xs), 3), np.nan)
@@ -863,25 +974,13 @@ def eye_opening(skin_bvh, eye, step=SCAN_STEP, tilt=0.0, shell=None, box=None):
     direction = Vector(view)
     for i, z in enumerate(zs[i0:i1], i0):
         for j, x in enumerate(xs[j0:j1], j0):
-            origin = c + across * (x - c[0]) + up * (z - c[2]) - view * 0.3
+            origin = np.array((x, c[1] - 0.3, z))
             front = eyeball_front(eye, origin, view)
             hit = skin_bvh.ray_cast(Vector(origin), direction, 0.6)
-            # With a shell, skin farther from the eyeball is passed through, as long as the ray comes out
-            # of it again before the eyeball: it's in front of the lids (a brow), not around the eye.
-            travelled = 0.0
-            inside = None
-            while shell is not None and hit[0] is not None and (
-                    front is None or travelled + hit[3] < front) and (
-                    abs((hit[0] - Vector(c)).length - eye.radius) > shell):
-                inside = None if inside is not None else hit[0]
-                travelled += hit[3] + 1e-5
-                hit = skin_bvh.ray_cast(Vector(origin + view * travelled), direction, 0.6 - travelled)
-            if inside is not None:
-                hits[i, j] = inside
-            elif hit[0] is not None:
+            if hit[0] is not None:
                 hits[i, j] = hit[0]
             if front is not None:
-                shows[i, j] = inside is None and (hit[0] is None or travelled + hit[3] > front + EYEBALL_TOLERANCE)
+                shows[i, j] = hit[0] is None or hit[3] > front + EYEBALL_TOLERANCE
     mask = np.zeros_like(shows)
     rows, cols = np.nonzero(shows)
     if len(rows):
@@ -901,7 +1000,7 @@ def eye_opening(skin_bvh, eye, step=SCAN_STEP, tilt=0.0, shell=None, box=None):
         rows, cols = np.nonzero(mask)
         if len(rows) and ((i0 > 0 and rows.min() == i0) or (i1 < len(zs) and rows.max() == i1 - 1) or
                           (j0 > 0 and cols.min() == j0) or (j1 < len(xs) and cols.max() == j1 - 1)):
-            return eye_opening(skin_bvh, eye, step, tilt, shell)
+            return eye_opening(skin_bvh, eye, step)
     return xs, zs, hits, mask
 
 
@@ -923,6 +1022,129 @@ def lid_margins(xs, zs, hits, mask, side):
     if side == "r":  # columns run along +X; the right eye's inner corner is its largest X
         upper, lower = upper[::-1], lower[::-1]
     return smooth_polyline(upper), smooth_polyline(lower)
+
+
+def running_median(values, window):
+    """``values`` (n, ...) with each replaced by the median of the ``window`` around it (fewer at the ends)."""
+    values = np.asarray(values, dtype=np.float64)
+    half = window // 2
+    return np.array([np.median(values[max(0, i - half):i + half + 1], axis=0) for i in range(len(values))])
+
+
+class SectionMesh:
+    """A skin welded at split seams, for cutting it with planes: ``points``, ``tris``, the unique ``edges``, each
+    triangle's edges (``tri_edges``) and each edge's (up to two) triangles (``edge_tris``, -1 for none)."""
+
+    def __init__(self, points, tris):
+        welded = Welded(points, tris)
+        self.points = welded.points
+        self.tris = welded.tris
+        pairs = np.sort(np.stack([self.tris[:, [0, 1]], self.tris[:, [1, 2]], self.tris[:, [2, 0]]], axis=1), axis=2)
+        self.edges, inverse = np.unique(pairs.reshape(-1, 2), axis=0, return_inverse=True)
+        self.tri_edges = inverse.reshape(-1, 3)
+        self.edge_tris = np.full((len(self.edges), 2), -1, dtype=np.int64)
+        order = np.argsort(self.tri_edges.ravel(), kind="stable")
+        edge_of = self.tri_edges.ravel()[order]
+        tri_of = order // 3
+        first = np.r_[True, edge_of[1:] != edge_of[:-1]]
+        self.edge_tris[edge_of[first], 0] = tri_of[first]
+        second = ~first
+        self.edge_tris[edge_of[second], 1] = tri_of[second]
+
+    def region(self, tris):
+        """(the edges of triangles ``tris``, which triangles are among them) for `path`."""
+        allowed = np.zeros(len(self.tris), dtype=bool)
+        allowed[tris] = True
+        return np.unique(self.tri_edges[tris]), allowed
+
+    def path(self, origin, normal, region, max_distance):
+        """The section of the skin by the plane through ``origin`` with unit ``normal``, as seen from the point of
+        it closest to ``origin``: the two ways along it from there, each an array of section points, within
+        ``max_distance`` of ``origin``, only over the triangles of ``region`` (see `region`); None when the plane
+        misses them."""
+        edges, allowed = region
+        a, b = self.points[self.edges[edges, 0]], self.points[self.edges[edges, 1]]
+        da = (a - origin) @ normal
+        db = (b - origin) @ normal
+        cut = (da > 0.0) != (db > 0.0)
+        if not cut.any():
+            return None
+        edges = edges[cut]
+        cross = a[cut] + (da[cut] / (da[cut] - db[cut]))[:, None] * (b[cut] - a[cut])
+        at = {int(e): i for i, e in enumerate(edges)}
+
+        def neighbours(i):
+            found = []
+            for t in self.edge_tris[edges[i]]:
+                if t >= 0 and allowed[t]:
+                    found += [at[int(e)] for e in self.tri_edges[t] if int(e) in at and int(e) != int(edges[i])]
+            return found
+
+        start = int(np.argmin(np.linalg.norm(cross - origin, axis=1)))
+        ways = []
+        for first in neighbours(start)[:2]:
+            way, previous, current, seen = [start], start, first, {start}
+            while current not in seen and np.linalg.norm(cross[current] - origin) < max_distance:
+                way.append(current)
+                seen.add(current)
+                following = [n for n in neighbours(current) if n != previous]
+                if not following:
+                    break
+                previous, current = current, following[0]
+            ways.append(cross[way])
+        return ways
+
+
+def lid_front_edge(sections, margin, eye, opening_center, tilt):
+    """The front edge of the lid along ``margin`` (a lid margin of eye ``eye``, whose opening is around
+    ``opening_center``) on the skin (a SectionMesh): along the margin, every LASH_EDGE_STEP, following the skin's
+    section across the margin from the margin over the lid's rim, the point lying farthest out in a direction
+    tilted ``tilt`` (radians) from the front toward the opening, before the section turns back by more than
+    LASH_EDGE_DROP (up the lid's front, not on to a brow or a fold beyond), within LASH_EDGE_REACH of the margin
+    and not past it into the opening (see LASH_EDGE_TILT). A polyline ordered like the margin, smoothed; the
+    margin where there's no skin to follow."""
+    margin = np.asarray(margin, dtype=np.float64)
+    length = float(np.linalg.norm(np.diff(margin, axis=0), axis=1).sum())
+    samples = resample(margin, max(4, int(math.ceil(length / LASH_EDGE_STEP)) + 1))
+    tangent = np.gradient(samples, axis=0)
+    tangent /= np.maximum(np.linalg.norm(tangent, axis=1, keepdims=True), 1e-12)
+    # The skin's triangles that can reach a section within reach of the margin.
+    reach = LASH_EDGE_REACH + 0.003
+    low, high = samples.min(0) - reach, samples.max(0) + reach
+    corners = sections.points[sections.tris]
+    tris = np.flatnonzero(np.all((corners > low) & (corners < high), axis=(1, 2)))
+    region = sections.region(tris)
+    line = samples.copy()
+    cos_tilt, sin_tilt = math.cos(tilt), math.sin(tilt)
+    for k, (m, t) in enumerate(zip(samples, tangent)):
+        # The section's frame: out of the face (away from the eyeball's center, level) and across the margin
+        # away from the opening.
+        forward = m - eye.center
+        forward[2] = 0.0
+        forward -= (forward @ t) * t
+        norm = np.linalg.norm(forward)
+        if norm < 1e-9 or not len(tris):
+            continue
+        forward /= norm
+        away = np.cross(t, forward)
+        if away @ (m - opening_center) < 0.0:
+            away = -away
+        direction = cos_tilt * forward - sin_tilt * away
+        ways = sections.path(m, t, region, LASH_EDGE_REACH)
+        if not ways:
+            continue
+        # The way over the rim is the one reaching farther out (the other goes round behind the lid).
+        way = max(ways, key=lambda w: float(((w - m) @ direction).max()))
+        score = (way - m) @ direction
+        best = None
+        for i, value in enumerate(score):
+            if best is not None and value < score[best] - LASH_EDGE_DROP:
+                break
+            if (way[i] - m) @ away > -LASH_EDGE_BELOW and (best is None or value > score[best]):
+                best = i
+        if best is not None:
+            line[k] = way[best]
+    return smooth_polyline(samples + running_median(line - samples, LASH_EDGE_MEDIAN), passes=3)
 
 
 def _box_blur(a, k):
@@ -1011,22 +1233,30 @@ class Features:
         ring = neck_ring(self.points, self.tris)
         self.ring = ring[0].points[ring[1]] if ring is not None else None
         self._lash_lines = {}
+        self._sections = None
+        self._normals = None
+
+    def sections(self):
+        """The skin as a SectionMesh."""
+        if self._sections is None:
+            self._sections = SectionMesh(self.points, self.tris)
+        return self._sections
+
+    def normals(self):
+        """The skin's vertex normals (split copies agreeing)."""
+        if self._normals is None:
+            self._normals = vertex_normals(self.points, self.tris)
+        return self._normals
 
     def lash_line(self, side, which):
         """The lash line of eye ``side``'s upper (``which`` 0) or lower (1) lid: the lid's front edge, where
-        lashes grow, found as its silhouette against the eyeball seen from above (below for the lower lid),
-        LASH_TILT off the front. Ordered like the margins; the margin when there's none."""
+        lashes grow (see `lid_front_edge`). Ordered like the margins."""
         key = (side, which)
         if key not in self._lash_lines:
             upper, lower, eye = self.eyes[side]
-            xs, zs, hits, mask = eye_opening(self.bvh, eye, step=LASH_SCAN_STEP,
-                                             tilt=-LASH_TILT if which == 0 else LASH_TILT, shell=LID_SHELL)
-            found = lid_margins(xs, zs, hits, mask, side)
-            margin = (upper, lower)[which]
-            line = found[which] if found is not None else margin
-            if np.median(polyline_parameter(margin, line)[1]) > LASH_LINE_LIMIT:
-                line = margin
-            self._lash_lines[key] = line
+            center = np.vstack([upper, lower]).mean(0)
+            self._lash_lines[key] = lid_front_edge(self.sections(), (upper, lower)[which], eye, center,
+                                                   LASH_EDGE_TILT[which])
         return self._lash_lines[key]
 
     def opening_box(self, side):
@@ -1355,23 +1585,277 @@ def skin_points(points, names, weights, deformations):
 
 
 def _scale_lid(weights, verts, columns, factor, head=None):
-    """Scale the lid bones' share of ``verts`` by ``factor`` (per vertex), up to all of it; the vertex's
-    other bones make room, or take what's freed (column ``head`` when the lid bones were all it had)."""
+    """Scale the lid bones' share of ``verts`` by ``factor`` (per vertex), up to all of it. With a ``head`` column,
+    it takes what's freed and gives what's needed first, so the vertex's other bones (brows, cheeks) move it as much
+    as before: a lid moving less doesn't follow the brow or the cheek more. Otherwise (and for what the head can't
+    give) the other bones make room, or take what's freed, alike."""
     if not len(verts) or not columns:
         return
     w = weights[verts]
     total = w.sum(1)
     lid = w[:, columns].sum(1)
     new_lid = np.minimum(total, lid * factor)
-    other = total - lid
-    keep = np.where(other > 1e-9, (total - new_lid) / np.maximum(other, 1e-9), 0.0)
     grow = np.where(lid > 1e-9, new_lid / np.maximum(lid, 1e-9), 0.0)
-    out = w * keep[:, None]
+    change = new_lid - lid
+    out = w.copy()
     out[:, columns] = w[:, columns] * grow[:, None]
     if head is not None:
-        bare = other <= 1e-9
-        out[bare, head] += total[bare] - new_lid[bare]
+        given = np.minimum(change, w[:, head])
+        out[:, head] -= given
+        change = change - given
+    other = total - lid - (w[:, head] if head is not None else 0.0)
+    rest = np.ones(w.shape[1], dtype=bool)
+    rest[columns] = False
+    if head is not None:
+        rest[head] = False
+    keep = np.where(other > 1e-9, (other - change) / np.maximum(other, 1e-9), 0.0)
+    out[:, rest] *= keep[:, None]
     weights[verts] = out
+
+
+def margin_samples(points, tris, weights, features, side, step=LID_COLUMN_STEP):
+    """Eye ``side``'s lid margins sampled across the eye, ``step`` apart in X where both lids are: (xs, [(upper
+    points, their weights), (lower points, their weights)]), the points on the skin (``points``/``tris``, per-vertex
+    ``weights``)."""
+    upper, lower, _eye = features.eyes[side]
+    x0, x1 = sorted((max(upper[:, 0].min(), lower[:, 0].min()), min(upper[:, 0].max(), lower[:, 0].max())))
+    xs = np.linspace(x0, x1, max(3, int(round((x1 - x0) / step)) + 1))
+    samples = []
+    for margin in (upper, lower):
+        order = np.argsort(margin[:, 0])
+        near = np.stack([np.interp(xs, margin[order, 0], margin[order, k]) for k in range(3)], 1)
+        tri, loc, _d = nearest_on(features.bvh, near)
+        samples.append((loc, interpolate(weights, tris, tri, barycentric(points, tris, tri, loc))))
+    return xs, samples
+
+
+def margin_gaps(samples, names, columns, head, deform):
+    """How far apart (Z) the lid margins ``samples`` (see `margin_samples`) end up with bone ``deform``ations
+    ({name: 4x4}), when all of their lid bones' weight (``columns``) is scaled by a factor f (as `_scale_lid` does):
+    (gap at f = 0, change per unit of f), per sample; LBS is linear in the weights, so the gap is too."""
+    heights = []
+    for loc, w in samples:
+        bare = w.copy()
+        _scale_lid(bare, np.arange(len(bare)), columns, 0.0, head)
+        heights.append([skin_points(loc, names, ww, deform)[:, 2] for ww in (bare, w)])
+    (upper0, upper1), (lower0, lower1) = heights
+    return upper0 - lower0, (upper1 - lower1) - (upper0 - lower0)
+
+
+def _spread_most(values, xs, reach=LID_ALONG):
+    """``values`` (per column at ``xs``, evenly spaced) spread along the lid, never below what they were: the most
+    within ``reach`` either way, averaged over as far."""
+    k = min(len(xs), max(1, int(round(reach / max(abs(xs[1] - xs[0]), 1e-9))))) if len(xs) > 1 else 0
+    if not k:
+        return values
+    padded = np.pad(values, k, mode="edge")
+    most = np.array([padded[i:i + 2 * k + 1].max() for i in range(len(values))])
+    return np.convolve(np.pad(most, k, mode="edge"), np.ones(2 * k + 1) / (2 * k + 1), mode="valid")
+
+
+class LidFit:
+    """Fits eye ``side``'s lid weights (``columns`` of both lids, on the vertices ``lids``) a column at a time across
+    the eye: a factor per column (``xs``, LID_COLUMN_STEP apart in X where both lids are), each vertex's lid weights
+    scaled by the factor at its place across the eye. How the lids close is measured two ways:
+
+    - At the margins (`margin_gaps`): LBS is linear in the weights, so how far apart the margins end up is linear in
+      the factor, which gives each column's closing per unit of factor (its rate).
+    - With vertical rays (`gaps`): upward onto the upper lid's skin alone, which meet its underside, and downward onto
+      the lower lid's, which meet its top, at depths from in front of the margins to the eyeball (LID_FRONT, LID_BACK).
+      The upper lid's lowest point against the lower lid's highest tells whether they cover the eye seen from the
+      front; the least height between them at one depth, whether one passes into the other. A thick lid can cover
+      the eye with its margin still above the other lid's, and pass into the other with its margin still apart."""
+
+    def __init__(self, points, tris, names, weights, features, side, skeleton, up_verts, down_verts, lids, columns,
+                 head):
+        self.points = points
+        self.names = names
+        self.weights = weights
+        self.side = side
+        self.skeleton = skeleton
+        self.lids = lids
+        self.columns = columns
+        self.head = head
+        self.eye = features.eyes[side][2]
+        self.xs, self.samples = margin_samples(points, tris, weights, features, side)
+        upper, lower = self.samples[0][0], self.samples[1][0]
+        # How far apart the margins are at rest: columns count for as much when smoothing (by the corners, where
+        # the lids nearly touch, the margins found and what they give are unsteady).
+        self.height = np.maximum(upper[:, 2] - lower[:, 2], 1e-5)
+        # Each triangle is on the side most of its corners are (the lids join at the corners of the eye).
+        flags = np.zeros((2, len(points)), dtype=bool)
+        flags[0, up_verts] = True
+        flags[1, down_verts] = True
+        votes = [flags[k][tris].sum(1) for k in range(2)]
+        self.lid_tris = [tris[(votes[k] >= 2) & (votes[k] >= votes[1 - k])] for k in range(2)]
+        # Only their vertices are posed for the rays.
+        self.lid_verts = np.unique(np.concatenate([t.ravel() for t in self.lid_tris]))
+        self._local = [np.searchsorted(self.lid_verts, t) for t in self.lid_tris]
+        c, r = self.eye.center, self.eye.radius
+        middle = (upper[:, 2] + lower[:, 2]) / 2.0
+        front = np.minimum(upper[:, 1], lower[:, 1]) - LID_FRONT
+        across = np.maximum(r * r - (self.xs - c[0]) ** 2 - (middle - c[2]) ** 2, 0.0)
+        back = np.maximum(c[1] - np.sqrt(across) + LID_BACK, front + LID_FRONT)
+        self.depths = front[:, None] + (back - front)[:, None] * np.linspace(0.0, 1.0, LID_DEPTHS)[None, :]
+        # The rays start this far below and above the eye (farther than the lids go, the eyeball too).
+        self.reach = 2.0 * max(r, EYE_WINDOW[1])
+        self.origins = [[[Vector((x, y, c[2] + sign * self.reach)) for y in row]
+                         for x, row in zip(self.xs, self.depths)] for sign in (-1.0, 1.0)]
+        self._rates = {}
+        self._deformations = {}
+
+    def deformations(self, pose, share=1.0):
+        """`Skeleton.deformations`, kept."""
+        key = (pose, share)
+        if key not in self._deformations:
+            self._deformations[key] = self.skeleton.deformations(pose, share)
+        return self._deformations[key]
+
+    def field(self, factors):
+        """Per vertex of ``lids``, the factor at its place across the eye."""
+        return np.interp(self.points[self.lids, 0], self.xs, factors)
+
+    def weighted(self, factors):
+        """The weights with the lid weights scaled by the column ``factors``."""
+        out = self.weights.copy()
+        _scale_lid(out, self.lids, self.columns, self.field(factors), self.head)
+        return out
+
+    def rate(self, pose, share):
+        """How much closer (Z) the margins end up at ``share`` of ``pose`` per unit of factor, per column."""
+        key = (pose, share)
+        if key not in self._rates:
+            deform = self.deformations(pose, share)
+            self._rates[key] = -margin_gaps(self.samples, self.names, self.columns, self.head, deform)[1]
+        return self._rates[key]
+
+    def gaps(self, weights, pose, share):
+        """(frontal gap, contact gap) per column at ``share`` of ``pose`` with ``weights``: the upper lid's lowest
+        point above the lower lid's highest (outside the eyeball, which doesn't hide it; negative when they cover
+        the eye), and the least height of the upper lid's underside above the lower lid's top at one depth (negative
+        when one passes into the other); nan and inf where rays find no lid."""
+        deform = self.deformations(pose, share)
+        posed = skin_points(self.points[self.lid_verts], self.names, weights[self.lid_verts], deform)
+        eye = self.eye.moved(deform.get(EYEBALL_BONE.format(self.side), np.eye(4)))
+        count, depths = len(self.xs), self.depths.shape[1]
+        heights = np.full((2, count, depths), np.nan)
+        for k, direction in enumerate((Vector((0.0, 0.0, 1.0)), Vector((0.0, 0.0, -1.0)))):
+            if not len(self._local[k]):
+                continue
+            bvh = bvh_of(posed, self._local[k])
+            for i, row in enumerate(self.origins[k]):
+                for j, origin in enumerate(row):
+                    hit = bvh.ray_cast(origin, direction, 2.0 * self.reach)
+                    if hit[0] is not None:
+                        heights[k, i, j] = hit[0][2]
+        view = np.array((0.0, 1.0, 0.0))
+
+        def hides(i, j, z):
+            """Whether the lid at depth j of column i, height z, is in front of the eyeball (as `eye_opening` sees)."""
+            origin = np.array((self.xs[i], self.depths[i, j] - 0.3, z))
+            front = eyeball_front(eye, origin, view)
+            return front is None or self.depths[i, j] - 0.3 + front + EYEBALL_TOLERANCE >= self.depths[i, j]
+
+        frontal = np.full(count, np.inf)
+        for i in range(count):
+            extremes = []
+            for k, sign in ((0, 1.0), (1, -1.0)):
+                found = np.flatnonzero(~np.isnan(heights[k, i]))
+                extremes.append(next((heights[k, i, j] for j in found[np.argsort(sign * heights[k, i, found])]
+                                      if hides(i, j, heights[k, i, j])), np.nan))
+            if not np.isnan(extremes).any():
+                frontal[i] = extremes[0] - extremes[1]
+        apart = heights[0] - heights[1]
+        contact = np.min(np.where(np.isnan(apart), np.inf, apart), axis=1)
+        return frontal, contact
+
+    def meets(self, weights):
+        """About the share of Shut Eyes by which the lids, with ``weights``, cover the eye seen from the front: where
+        each column's frontal gap reaches 0 between a few shares (the last to, away from the corners), at most 1."""
+        shares = (1.0 - 2.0 * CLOSE_SLACK, 1.0 - CLOSE_SLACK, 1.0)
+        trusted = self.height >= LID_CORNER * self.height.max()
+        gaps = np.array([self.gaps(weights, SHUT_POSE, share)[0][trusted] for share in shares])
+        if not np.isfinite(gaps).all() or (gaps[-1] > 0.0).any():
+            return 1.0
+        meet = np.full(gaps.shape[1], shares[0])
+        for (s0, g0), (s1, g1) in zip(zip(shares, gaps), zip(shares[1:], gaps[1:])):
+            crossing = (g0 > 0.0) & (g1 <= 0.0)
+            meet[crossing] = (s0 + (s1 - s0) * g0 / np.maximum(g0 - g1, 1e-12))[crossing]
+        return float(meet.max())
+
+    def smooth(self, factors):
+        """``factors`` smoothed along the lid (a Gaussian LID_ALONG wide), each column counting as much as the eye
+        is open there."""
+        kernel = np.exp(-0.5 * ((self.xs[:, None] - self.xs[None, :]) / LID_ALONG) ** 2) * self.height[None, :]
+        return (kernel @ factors) / kernel.sum(1)
+
+    def start(self):
+        """Factors from the margins alone, where `fit` starts: each column's margins meet LID_MEET into Shut Eyes and
+        come within LID_SLIT of each other at the blink's peak, at most 1, smoothed."""
+        need = np.zeros(len(self.xs))
+        for pose, share, gap in ((SHUT_POSE, LID_MEET, 0.0), (BLINK_POSE, 1.0, LID_SLIT)):
+            deform = self.deformations(pose, share)
+            if UPPER_LID + "01_" + self.side not in deform:
+                continue
+            g0, g1 = margin_gaps(self.samples, self.names, self.columns, self.head, deform)
+            closing = g1 < -1e-6
+            need = np.maximum(need, np.where(closing, (g0 - gap) / np.where(closing, -g1, 1.0), 1.0))
+        return self.smooth(np.clip(need, 0.0, 1.0))
+
+    def fit(self, factors, blink=True):
+        """Column factors, from ``factors``, that make the lids meet as Shut Eyes is held, a few rounds of Newton's
+        method on the ray gaps: by its end they cover the eye, and at the blink's peak but for LID_SLIT (with
+        ``blink``); they meet LID_MEET into it, unless that presses them into each other by its end (closer than
+        LID_CLEARANCE); then as early as that allows. At most 1 (raising is left to the scans of `close_eyes`)."""
+        checks = [(SHUT_POSE, 1.0, 0.0), (SHUT_POSE, LID_MEET, 0.0)]
+        if blink and UPPER_LID + "01_" + self.side in self.deformations(BLINK_POSE):
+            checks.append((BLINK_POSE, 1.0, LID_SLIT))
+        previous = {}
+        for _round in range(LID_FIT_ROUNDS):
+            weights = self.weighted(factors)
+            need = {}
+            for pose, share, allowed in checks:
+                rate = self.rate(pose, share)
+                gaps = self.gaps(weights, pose, share)
+                moving = rate > 1e-6
+                safe = np.where(moving, rate, 1.0)
+                need[pose, share] = []
+                for k, (g, target) in enumerate(zip(gaps, (allowed, LID_CLEARANCE))):
+                    # Past the first round, how much a column's gap changed with its factor: the lid's lowest point
+                    # isn't always its margin (by the corners, and on folded lids), nor moves at the margin's rate.
+                    slope = safe
+                    if (pose, share, k) in previous:
+                        f0, g0 = previous[pose, share, k]
+                        step = factors - f0
+                        with np.errstate(invalid="ignore", divide="ignore"):
+                            measured = (g0 - g) / np.where(np.abs(step) > LID_STEP, step, np.nan)
+                        slope = np.where(np.isfinite(measured), np.clip(measured, safe / 4.0, safe * 4.0), safe)
+                        # A gap that went the wrong way (a folded lid's lowest point sinking as it's lowered) takes
+                        # no step: following it lowered the inner corner of a game face to a tenth, notching it.
+                        slope = np.where(np.isfinite(measured) & (measured <= 0.0), np.inf, slope)
+                    previous[pose, share, k] = (factors, g)
+                    need[pose, share].append(np.where(moving & np.isfinite(g), factors + (g - target) / slope, np.nan))
+            # What each column must have (covered in the whole expression, and at the blink's peak), and what it
+            # should (meeting LID_MEET into it as far as that doesn't press the lids into each other).
+            least = need[SHUT_POSE, 1.0][0]
+            if (BLINK_POSE, 1.0) in need:
+                least = np.fmax(least, need[BLINK_POSE, 1.0][0])
+            touch = np.where(np.isnan(need[SHUT_POSE, 1.0][1]), np.inf, need[SHUT_POSE, 1.0][1])
+            target = np.fmax(least, np.fmin(need[SHUT_POSE, LID_MEET][0], touch))
+            target = np.clip(np.where(np.isfinite(target), target, factors), 0.0, 1.0)
+            factors = self.smooth(target)
+            # Smoothing mustn't leave a column less than it must have: how much farther its lids must go is added,
+            # spread along the lid (the most within LID_ALONG either way, averaged as far), so that no column is left
+            # short. Spread as a distance as well as a factor, taking the less: by the corners, where the lids move
+            # little, a small gap takes a big factor, which would close the columns next to them far past each
+            # other, and the other way round. There, where the eye is open less than LID_CORNER of its most at rest,
+            # it counts for less (the rays of `close_eyes` still see to it that the eye is shut).
+            rate = np.maximum(self.rate(SHUT_POSE, 1.0), 1e-6)
+            short = np.clip(np.where(np.isfinite(least), np.minimum(least, 1.0), 0.0) - factors, 0.0, None)
+            short *= np.minimum(self.height / (LID_CORNER * self.height.max()), 1.0)
+            lift = np.minimum(_spread_most(short * rate, self.xs) / rate, _spread_most(short, self.xs))
+            factors = np.clip(factors + lift, 0.0, 1.0)
+        return factors
 
 
 def open_area(skin_bvh, eye):
@@ -1416,14 +1900,18 @@ def closing_share(points, tris, names, weights, eyes, skeleton, boxes=None, pose
 
 def close_eyes(points, tris, names, weights, features, labels, skeleton):
     """Make each eye of the skin (``points``/``tris``, weights over ``names``) shut in the game's Shut Eyes
-    expression (SHUT_POSE), the lids just meeting, and closed at the peak of its blink (BLINK_POSE) too: where
-    the eyeball still shows in either, the lid weights are raised, fading out LID_FALLOFF from the margin; then,
-    when the lids meet more than CLOSE_SLACK of the Shut Eyes turn earlier, all of the eye's lid weights are
-    lowered alike, as far as the blink's peak still closes the eye. Returns (weights, {side: report}), a report
-    having how much of the eyeball showed in Shut Eyes ``before`` and ``after`` (mm²) and at the blink's peak
-    after (``blink``, mm²), how far apart the lids stop in Shut Eyes where their weights can't go higher
-    (``stuck``, mm), and for lids that met too early about the share of Shut Eyes they met at (``early``, else
-    None), what their weights were scaled by (``lowered``) and about the share they meet at now (``meets``)."""
+    expression (SHUT_POSE), the lids just meeting all along, and closed at the peak of its blink (BLINK_POSE) too.
+    Lids that meet more than CLOSE_SLACK of the Shut Eyes turn earlier, or press into each other there, are lowered a
+    column at a time across the eye (`LidFit`), so that each column meets about when the expression is held, however
+    the eye's shape differs from the game's along it: one factor for the whole eye left all but its last column to
+    close pressing into each other. Then where the eyeball still shows in either pose, the lid weights are raised,
+    fading out LID_FALLOFF from the margin, and fitted again from there; and when the eye still closes more than
+    CLOSE_SLACK early, all of its lid weights are lowered alike, as far as the blink's peak still closes it. Returns
+    (weights, {side: report}), a report having how much of the eyeball showed in Shut Eyes ``before`` and ``after``
+    (mm²) and at the blink's peak after (``blink``, mm²), how far apart the lids stop in Shut Eyes where their weights
+    can't go higher (``stuck``, mm), and for lids that met too early about the share of Shut Eyes they met at
+    (``early``, else None), what their weights were scaled by on average across the eye (``lowered``) and about the
+    share they meet at now (``meets``)."""
     weights = weights.copy()
     report = {}
     poses = [(pose, skeleton.deformations(pose)) for pose in (SHUT_POSE, BLINK_POSE)]
@@ -1464,12 +1952,52 @@ def close_eyes(points, tris, names, weights, features, labels, skeleton):
                 return 0.0
             return float(mask.sum() * (xs[1] - xs[0]) * (zs[1] - zs[0]) * 1e6)
 
+        def shows_in(pose, lid_weights=None, at=1.0, step=SCAN_STEP):
+            """Whether the eyeball shows in ``pose`` (see `area_of`)."""
+            xs, zs, _hits, mask = opening(pose, at, lid_weights, step)
+            return area_of(pose, xs, zs, mask) > 0.0
+
+        # How much showed in Shut Eyes with the weights as they came.
+        xs, zs, _hits, mask = opening(SHUT_POSE)
+        first = {SHUT_POSE: area_of(SHUT_POSE, xs, zs, mask)}
+        # Each column across the eye lowered to meet about when Shut Eyes is held (and by the blink's peak): the
+        # whole of the eye's lid weights (within 3 cm, both lids), by each vertex's place across the eye.
+        lids = np.flatnonzero(near)
+        lid_cols = up_cols + down_cols
+        fit = LidFit(points, tris, names, weights, features, side, skeleton, up_verts, down_verts, lids, lid_cols, head)
+        guess = fit.start()
+        height = fit.height
+        # Lids that meet within CLOSE_SLACK of the end and, away from the corners (where the lids join), press into
+        # each other no more than LID_TOLERANCE there are left as they are, as on some of the game's own faces.
+        _frontal, contact = fit.gaps(weights, SHUT_POSE, 1.0)
+        trusted = height >= LID_CORNER * height.max()
+        fitted = np.ones(len(fit.xs))
+        fit_columns = not shows_in(SHUT_POSE, at=1.0 - CLOSE_SLACK) or contact[trusted].min() < -LID_TOLERANCE
+        if fit_columns:
+            fitted = fit.fit(guess)
+        if fitted.min() < 1.0:
+            weights = fit.weighted(fitted)
+            # The rays may miss what the scans see (a lid's corner, an odd fold), and raising may not reach it: an
+            # eye shut with the weights as they came isn't left open, the columns going back toward those weights
+            # as little as shuts it (by bisection).
+            if first[SHUT_POSE] <= 0.0 and shows_in(SHUT_POSE, weights):
+                short, enough = 0.0, 1.0
+                while enough - short > CLOSE_PRECISION:
+                    middle = (short + enough) / 2.0
+                    if shows_in(SHUT_POSE, fit.weighted(fitted + middle * (1.0 - fitted))):
+                        short = middle
+                    else:
+                        enough = middle
+                fitted = fitted + enough * (1.0 - fitted)
+                weights = fit.weighted(fitted)
         # Raised for the whole Shut Eyes expression, then for the blink's peak: {pose: (before, after, stuck)}.
         shown = {}
+        raised = False
         for pose, deform in turned:
             m_up = deform[UPPER_LID + "01_" + side]
             m_down = deform.get(LOWER_LID + "01_" + side)
-            before = after = None
+            before = first.get(pose)
+            after = None
             stuck = 0.0
             for round_ in range(LID_ROUNDS + 1):
                 xs, zs, _hits, mask = opening(pose)
@@ -1518,28 +2046,41 @@ def close_eyes(points, tris, names, weights, features, labels, skeleton):
                                            mode="valid")
                     factor = np.interp(points[verts, 0], xs, np.maximum(smoothed, 1.0))
                     previous = weights[verts][:, columns].sum(1)
-                    _scale_lid(weights, verts, columns, 1.0 + (factor - 1.0) * fall)
+                    # The head gives what's needed first, as it takes what lowering frees: raised, then fitted
+                    # down again, the brows and cheeks move the lids as much as before.
+                    _scale_lid(weights, verts, columns, 1.0 + (factor - 1.0) * fall, head)
                     changed |= bool(np.abs(weights[verts][:, columns].sum(1) - previous).max() > 1e-4)
+                raised |= changed
                 if not changed:
                     break
             shown[pose] = (before, after, stuck)
         before, after, stuck = shown[SHUT_POSE]
         # The blink's peak is only kept closed when raising closed it.
         blink = shown.get(BLINK_POSE, (0.0, 0.0, 0.0))[1]
-        # Lids meeting much earlier slide on past each other while the eyes stay shut: all of the eye's lid weights
-        # are scaled by the least that still closes it CLOSE_SLACK / 2 before the whole Shut Eyes expression (by
-        # bisection with rays twice as far apart) and at the blink's peak (with all of them, for its slit), then
-        # checked with all of them. A lid's travel goes with its weight, so they met at about that share times
-        # the scale.
-        early = meets = None
-        lowered = 1.0
+        # Raising goes past (LID_OVERLAP, over whole stretches of the lid): once the eye is shut, the columns are
+        # fitted again from there, and kept if the scans still find it shut in both poses.
+        if raised and after <= 0.0:
+            trim = LidFit(points, tris, names, weights, features, side, skeleton, up_verts, down_verts, lids, lid_cols,
+                          head)
+            factors = trim.fit(np.ones(len(trim.xs)), blink=blink <= 0.0)
+            if factors.min() < 1.0:
+                trimmed = trim.weighted(factors)
+                if not any(shows_in(pose, trimmed) for pose, _deform in turned if pose == SHUT_POSE or blink <= 0.0):
+                    weights = trimmed
+                    fitted = fitted * factors
+        # Lids that still meet much earlier slide on past each other while the eyes stay shut: all of the eye's lid
+        # weights are scaled by the least that still closes it CLOSE_SLACK / 2 before the whole Shut Eyes expression
+        # (by bisection with rays twice as far apart) and at the blink's peak (with all of them, for its slit), then
+        # checked with all of them. A lid's travel goes with its weight, so they met at about that share times the
+        # scale. The columns were fitted to meet about there, so this is only for lids that cover the eye before
+        # their margins meet.
+        high = 1.0
+        shut_factor = 1.0
         if after <= 0.0 and not opening(SHUT_POSE, 1.0 - CLOSE_SLACK)[3].any():
-            lids = np.flatnonzero(near)
-            columns = up_cols + down_cols
 
             def scaled(factor):
                 out = weights.copy()
-                _scale_lid(out, lids, columns, factor, head)
+                _scale_lid(out, lids, lid_cols, factor, head)
                 return out
 
             def shows(pose, at, factor, step=SCAN_STEP):
@@ -1565,15 +2106,153 @@ def close_eyes(points, tris, names, weights, features, labels, skeleton):
                 high = min(1.0, high * 1.05)
             if high < 1.0:
                 weights = scaled(high)
-                lowered = high
-                early = (1.0 - CLOSE_SLACK / 2.0) * shut_factor
-                meets = min(1.0, early / high)
-        if blink > 0.0 and early is not None:
+            else:
+                shut_factor = 1.0
+        # About the share of Shut Eyes the eye closed at as it came (its last column's margins met LID_MEET into it
+        # with its factor; that times the share the lowering found, if the margins were off), reported when that's
+        # more than CLOSE_SLACK early, with the factor on average across the opening and about the share they meet
+        # at now (by the lowering, else by the rays).
+        early = meets = None
+        lowered = float(np.average(fitted, weights=height)) * high
+        closed_at = LID_MEET * (float(guess.max()) if fit_columns else 1.0) * shut_factor
+        if closed_at < 1.0 - CLOSE_SLACK:
+            early = closed_at
+            meets = min(1.0, (1.0 - CLOSE_SLACK / 2.0) * shut_factor / high) if high < 1.0 else fit.meets(weights)
+        if blink > 0.0 and high < 1.0:
             xs, zs, _hits, mask = opening(BLINK_POSE)
             blink = area_of(BLINK_POSE, xs, zs, mask)
         report[side] = {"before": before, "after": after, "stuck": stuck * 1000.0 if after > 0.0 else 0.0,
                         "blink": blink, "early": early, "lowered": lowered, "meets": meets}
     return weights, report
+
+
+def _cotan_laplacian(points, tris):
+    """(edges (m, 2), weights (m,), lumped vertex areas) of the cotangent Laplacian of a mesh (``tris`` over
+    ``points``). Edge weights below LAPLACIAN_FLOOR (edges facing obtuse corners) are raised to it, so smoothing with
+    it never overshoots."""
+    count = len(points)
+    a, b, c = points[tris[:, 0]], points[tris[:, 1]], points[tris[:, 2]]
+    edges, cots = [], []
+    for (i, j), (p, q, r) in (((0, 1), (a, b, c)), ((1, 2), (b, c, a)), ((2, 0), (c, a, b))):
+        u, v = p - r, q - r
+        cross = np.linalg.norm(np.cross(u, v), axis=1)
+        edges.append(np.sort(tris[:, [i, j]], axis=1))
+        cots.append(0.5 * (u * v).sum(1) / np.maximum(cross, 1e-15))
+    edges = np.vstack(edges)
+    key = edges[:, 0] * count + edges[:, 1]
+    unique, inverse = np.unique(key, return_inverse=True)
+    weights = np.maximum(np.bincount(inverse.reshape(-1), np.concatenate(cots), minlength=len(unique)),
+                         LAPLACIAN_FLOOR)
+    area = 0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1)
+    mass = np.zeros(count)
+    for k in range(3):
+        np.add.at(mass, tris[:, k], area / 3.0)
+    return np.stack([unique // count, unique % count], 1), weights, mass
+
+
+def _screened_smooth(edges, weights, mass, values, free, length):
+    """``values`` smoothed over ``free`` nodes, the others held: the minimum of the integral of |grad x|^2 +
+    |x - values|^2 / length^2 (a screened Poisson equation, (L + M / length^2) x = M values / length^2), solved by
+    conjugate gradients with a Jacobi preconditioner. ``length`` (per node) is how far the smoothing reaches."""
+    count = len(values)
+    free = free & (mass > 0.0)
+    lam = mass / np.maximum(length, 1e-9) ** 2
+    a, b = edges[:, 0], edges[:, 1]
+
+    def apply(x):
+        flow = weights * (x[a] - x[b])
+        return np.bincount(a, flow, minlength=count) - np.bincount(b, flow, minlength=count) + lam * x
+
+    diag = np.maximum(np.bincount(a, weights, minlength=count) + np.bincount(b, weights, minlength=count) + lam,
+                      1e-30)
+    x = values.astype(np.float64).copy()
+    r = np.where(free, lam * values - apply(x), 0.0)
+    z = r / diag
+    p = z.copy()
+    rz = float(r @ z)
+    stop = SMOOTH_TOLERANCE * SMOOTH_TOLERANCE * rz
+    for _ in range(SMOOTH_ITERATIONS):
+        if rz <= stop:
+            break
+        q = np.where(free, apply(p), 0.0)
+        step = rz / max(float(p @ q), 1e-300)
+        x += step * p
+        r -= step * q
+        z = r / diag
+        rz, previous = float(r @ z), rz
+        p = z + (rz / max(previous, 1e-300)) * p
+    return x
+
+
+def _node_spacing(points, edges, count):
+    """Mean length of the edges at each node."""
+    length = np.linalg.norm(points[edges[:, 0]] - points[edges[:, 1]], axis=1)
+    total = np.bincount(edges[:, 0], length, minlength=count) + np.bincount(edges[:, 1], length, minlength=count)
+    number = np.bincount(edges[:, 0], minlength=count) + np.bincount(edges[:, 1], minlength=count)
+    return total / np.maximum(number, 1)
+
+
+def smooth_lid_weights(points, tris, names, weights, features, reference, warped):
+    """The lid weights of a custom face skin (``points``/``tris``, ``weights`` over ``names``, as taken from the
+    game's face ``reference`` at the ``warped`` points), smoothed where the face's mesh is finer than the game's.
+
+    Taken from the game's triangles, a lid's weight is linear across each of them and bends at their edges. And
+    where a lid stands out from the game's (a thick, puffy lid fold), its vertices' closest points on the game's
+    face fall on an edge of it (the game's lid crease), so rows of them take the same weight: the weight stops
+    falling across the fold, then drops sharply above it. On the game's coarse mesh those bends are its own edges
+    and don't show; on a finer custom lid they crumple it as the eye closes, with creases across it. So around each
+    eye (within LID_SMOOTH_REACH of its center), the total weight of each lid's bones is smoothed over the skin, as
+    far as LID_SMOOTH_SCALE of how much wider the game's triangles are than the face's there: not at all on the
+    game's own mesh, whose weights stay the game's. The faint tail of a lid's weight up the socket and down the cheek
+    (below LID_SMOOTH_FLOOR) keeps the game's, so the lids pull hardly more of the socket than before, and within
+    LID_SMOOTH_KEEP of a lid's margin the skin keeps that lid's weight, which `close_eyes` fits the closing to. Each
+    vertex keeps its split among the lid's bones; the head makes room, or takes what's freed (see `_scale_lid`)."""
+    welded = Welded(points, tris)
+    count = welded.count
+    if not features.eyes or not count:
+        return weights
+    node_points = welded.points
+    near = np.zeros(count, dtype=bool)
+    for _upper, _lower, eye in features.eyes.values():
+        near |= np.linalg.norm(node_points - eye.center, axis=1) < LID_SMOOTH_REACH
+    work = np.flatnonzero(near)
+    local = np.full(count, -1, dtype=np.int64)
+    local[work] = np.arange(len(work))
+    sub_tris = local[welded.tris]
+    sub_tris = sub_tris[np.all(sub_tris >= 0, axis=1)]
+    if not len(sub_tris):
+        return weights
+    edges, edge_weights, mass = _cotan_laplacian(node_points[work], sub_tris)
+    # How far to smooth: by how much the game's triangles are wider than the face's where each node takes its
+    # weights from, both measured in the game's space, where the face was warped to.
+    node_warped = np.zeros((count, 3))
+    node_warped[welded.node] = warped
+    spacing = _node_spacing(node_warped[work], edges, len(work))
+    game = Welded(reference.points, reference.tris)
+    game_spacing = _node_spacing(game.points, game.edges, game.count)[game.node]
+    tri, loc, _dist = nearest_on(reference.bvh(), node_warped[work])
+    game_spacing = interpolate(game_spacing[:, None], reference.tris, tri,
+                               barycentric(reference.points, reference.tris, tri, loc))[:, 0]
+    length = LID_SMOOTH_SCALE * np.maximum(game_spacing - spacing, 0.0)
+    copies = np.maximum(np.bincount(welded.node, minlength=count), 1).astype(np.float64)
+    rows = local[welded.node]
+    head = names.index(HEAD) if HEAD in names else None
+    weights = weights.copy()
+    for side, (upper, lower, eye) in features.eyes.items():
+        at = node_points[work]
+        movable = (np.linalg.norm(at - eye.center, axis=1) < LID_SMOOTH_REACH) & (length > LID_SMOOTH_MIN)
+        for columns, margin in zip(lid_columns(names, side), (upper, lower)):
+            if not columns:
+                continue
+            before = (np.bincount(welded.node, weights[:, columns].sum(1), minlength=count) / copies)[work]
+            free = movable & (before > LID_SMOOTH_FLOOR) & (polyline_parameter(margin, at)[1] > LID_SMOOTH_KEEP)
+            if not free.any():
+                continue
+            after = np.clip(_screened_smooth(edges, edge_weights, mass, before, free, length), 0.0, 1.0)
+            factor = np.where(free, after / np.maximum(before, 1e-12), 1.0)
+            verts = np.flatnonzero((rows >= 0) & (np.abs(factor[np.maximum(rows, 0)] - 1.0) > 1e-9))
+            _scale_lid(weights, verts, columns, factor[rows[verts]], head)
+    return weights
 
 
 def limit_weights(weights, max_groups):
@@ -1633,6 +2312,7 @@ def skin_weights(fit, *, close=True, max_groups=DEFAULT_MAX_GROUPS):
     ring = reference.ring()
     if ring is not None and fit.features.ring is not None:
         weights = _ring_weights(fit.points, fit.tris, weights, ring)
+    weights = smooth_lid_weights(fit.points, fit.tris, names, weights, fit.features, reference, fit.warped)
     if close and reference.skeleton.deformations(SHUT_POSE):
         weights, eyes = close_eyes(fit.points, fit.tris, names, weights, fit.features, fit.labels, reference.skeleton)
     return names, limit_weights(weights, max_groups), eyes
@@ -1911,13 +2591,22 @@ def graph_nearest(points, tris, sources):
     return owner[welded.node], dist[welded.node]
 
 
+def across_line(line, points, s, d, q):
+    """How far ``points`` lie from polyline ``line`` across it, given their position along it ``s`` (0..1), their
+    distance ``d`` to it and closest points ``q`` (see `polyline_parameter`): past its ends, without how far past."""
+    along = np.zeros(len(points))
+    for end, tangent in ((s <= 0.0, line[0] - line[1]), (s >= 1.0, line[-1] - line[-2])):
+        tangent = tangent / max(np.linalg.norm(tangent), 1e-12)
+        along[end] = np.maximum((points[end] - q[end]) @ tangent, 0.0)
+    return np.sqrt(np.maximum(d * d - along * along, 0.0))
+
+
 class LashRoots:
     """Where each point of a lash part around eye ``side`` grows from: its root (``root``, the index of the
-    point it hangs from, the closest along the part's surface among the points by a lash line; ``length``,
-    how far along the surface), the lid (``lid``: 0 upper, 1 lower), where the root is along that lid's lash
-    line (``s``, 0..1 by length; ``q``, the closest point of the line; ``d``, how far) and along its margin
-    (``m``, 0..1 by length). ``both``: the part grows from both lids (lashes around the whole eye, a tear
-    line along the opening's rim)."""
+    point it hangs from, the closest along the part's surface among the points by a lash line), the lid
+    (``lid``: 0 upper, 1 lower) and where the root is along that lid's lash line (``s``, 0..1 by length; ``d``,
+    how far from it). ``both``: the part grows from both lids (lashes around the whole eye, a tear line along
+    the opening's rim)."""
 
     def __init__(self, points, tris, features, side):
         self.side = side
@@ -1953,103 +2642,419 @@ class LashRoots:
         # Roots every millimetre along each lid: the points there closest to its lash line, counting how much
         # farther from the eyeball's center than the innermost point there they are too, so lashes sunk into
         # the lid still grow from their ends by the eyeball, and strips over the eye from their edges on the lid.
+        # Where lashes fan out past the ends of the strip's root edge, a millimetre of the lid may hold only their
+        # tips: a millimetre whose closest point lies more than LASH_ROOT_FAR farther from the lash line (across
+        # it, not counting how far past its ends) than the part's closest points do elsewhere (median) has none.
         roots = np.zeros(len(points), dtype=bool)
         radius = np.linalg.norm(points - features.eyes[side][2].center, axis=1)
-        for lid, mine, s, d in ((0, upper, su, du), (1, ~upper, sl, dl)):
+        for lid, mine, s, d, q in ((0, upper, su, du, qu), (1, ~upper, sl, dl, ql)):
             if not mine.any():
                 continue
+            across = across_line(features.lash_line(side, lid), points, s, d, q)
             column = np.floor(s * lengths[lid] / LASH_ROOT_SPACING).astype(np.int64)
+            found = []
             for c in np.unique(column[mine]):
                 here = mine & (column == c)
                 if d[here].min() < LASH_DISTANCE:
+                    found.append((here, across[here].min()))
+            limit = np.median([best for _here, best in found]) + LASH_ROOT_FAR if found else 0.0
+            for here, best in found:
+                if best <= limit:
                     score = d + radius - radius[here].min()
                     roots |= here & (score <= score[here].min() + LASH_ROOT_BAND)
         if not roots.any():
             roots[int(np.argmin(np.minimum(du, dl)))] = True
-        owner, length = graph_nearest(points, tris, np.flatnonzero(roots))
+        owner, _length = graph_nearest(points, tris, np.flatnonzero(roots))
         self.root = np.where(owner >= 0, owner, np.arange(len(points)))
-        self.length = np.where(owner >= 0, length, 0.0)
         self.lid = np.where(upper[self.root], 0, 1)
         self.s = np.where(self.lid == 0, su[self.root], sl[self.root])
-        self.q = np.where((self.lid == 0)[:, None], qu[self.root], ql[self.root])
         self.d = np.where(self.lid == 0, du[self.root], dl[self.root])
-        mu = polyline_parameter(upper_margin, points)[0]
-        ml = polyline_parameter(lower_margin, points)[0]
-        self.m = np.where(self.lid == 0, mu[self.root], ml[self.root])
 
 
-def lash_weights(roots, features, skin_points_, skin_tris, skin_weights_, names):
-    """Weights for a lash part (see LashRoots): those of the lid margin where each point's root grows from,
-    so every strand moves along with its root on the lid; toward the tips, some of the lid weight goes to
-    the head (LASH_TIP_SHARE)."""
-    out = np.zeros((len(roots.root), skin_weights_.shape[1]))
-    head = names.index(HEAD) if HEAD in names else None
-    fade = LASH_TIP_SHARE * smoothstep((roots.length - LASH_TIP_START) / LASH_TIP_LENGTH)
+def harmonic_fill(points, tris, fixed, values, hold=None, along=None, across=1.0):
+    """Values (columns of ``values``) at every one of ``points`` of a mesh (``tris``, welded at split seams):
+    those given for the ``fixed`` points (indices; rows of ``values``) kept there, and between them the
+    smoothest blend along the surface, each point the average of its neighbours weighted by closeness (a
+    harmonic field). It varies continuously, stays within what the fixed points have (weights blend into
+    weights: none negative, their sums kept) and follows the mesh rather than straight lines. ``hold`` (per
+    fixed point, 1 by default) below 1 keeps a point's value only that much: it takes that share of it and the
+    rest from its neighbours (none at 0). With ``along`` (every point's distance from the fixed points, along the
+    mesh), an edge counts less the more it runs across that distance's rise, down to ``across`` as much for one
+    running square to it: values then spread out along strands growing from the fixed points, and only a little
+    from strand to strand. Points of a piece without fixed points take the closest fixed point's."""
+    values = np.asarray(values, dtype=np.float64).reshape(len(fixed), -1)
+    welded = Welded(points, tris)
+    count = welded.count
+    nodes = welded.node[np.asarray(fixed, dtype=np.int64)]
+    field = np.zeros((count, values.shape[1]))
+    held = np.zeros(count)
+    if hold is None:
+        hold = np.ones(len(nodes))
+    hold = np.clip(np.asarray(hold, dtype=np.float64), 0.0, 1.0)
+    use = hold > 0.0
+    nodes, values, hold = nodes[use], values[use], hold[use]
+    if not len(nodes):
+        return field[welded.node]
+    np.add.at(field, nodes, values)
+    np.maximum.at(held, nodes, hold)
+    given = held > 0.0
+    field[given] /= np.bincount(nodes, minlength=count)[given][:, None]
+    edges = welded.edges
+    known = (held >= 1.0) | given & (np.bincount(edges.ravel(), minlength=count) == 0)
+    # Pieces no fixed point reaches take the closest fixed point's values.
+    label = hairing.components(count, edges)
+    reached = np.zeros(label.max() + 1, dtype=bool)
+    reached[label[given]] = True
+    lost = np.flatnonzero(~reached[label])
+    if len(lost):
+        sources = np.flatnonzero(given)
+        for start in range(0, len(lost), 2048):
+            chunk = lost[start:start + 2048]
+            d = np.linalg.norm(welded.points[chunk][:, None] - welded.points[sources][None], axis=2)
+            field[chunk] = field[sources[d.argmin(1)]]
+        known[lost] = True
+    free = np.flatnonzero(~known)
+    if len(free) and len(edges):
+        # Each free point: (sum of w (x - neighbour)) + k (x - its value) = 0, w = 1 / edge length and k = 0, or
+        # hold / (1 - hold) of the sum of its w when it's held a little; the fixed neighbours move to the right-hand
+        # side. Solved by conjugate gradients (Jacobi preconditioned), all columns at once.
+        length = np.maximum(np.linalg.norm(welded.points[edges[:, 0]] - welded.points[edges[:, 1]], axis=1),
+                            SPREAD_EDGE)
+        weight = 1.0 / length
+        if along is not None:
+            rise = np.zeros(count)
+            rise[welded.node] = np.asarray(along, dtype=np.float64)
+            steep = np.minimum(np.abs(rise[edges[:, 0]] - rise[edges[:, 1]]) / length, 1.0)
+            weight *= across + (1.0 - across) * steep * steep
+        a = np.concatenate([edges[:, 0], edges[:, 1]])
+        b = np.concatenate([edges[:, 1], edges[:, 0]])
+        weight = np.concatenate([weight, weight])
+        degree = np.bincount(a, weight, minlength=count)
+        index = np.full(count, -1, dtype=np.int64)
+        index[free] = np.arange(len(free))
+        inner = (index[a] >= 0) & (index[b] >= 0)
+        rows, cols, w_inner = index[a[inner]], index[b[inner]], weight[inner]
+        order = np.argsort(rows, kind="stable")
+        rows, cols, w_inner = rows[order], cols[order], w_inner[order]
+        border = (index[a] >= 0) & (index[b] < 0)
+        rhs = np.zeros((len(free), field.shape[1]))
+        np.add.at(rhs, index[a[border]], weight[border][:, None] * field[b[border]])
+        pull = degree[free] * held[free] / np.maximum(1.0 - held[free], 1e-9)
+        rhs += pull[:, None] * field[free]
+        diagonal = np.maximum(degree[free] + pull, 1e-30)
+        starts = np.flatnonzero(np.diff(np.concatenate([[-1], rows])))
+        has = rows[starts] if len(rows) else np.zeros(0, dtype=np.int64)
+
+        def apply(x):
+            y = diagonal[:, None] * x
+            if len(rows):
+                y[has] -= np.add.reduceat(w_inner[:, None] * x[cols], starts, axis=0)
+            return y
+
+        x = rhs / diagonal[:, None]
+        r = rhs - apply(x)
+        z = r / diagonal[:, None]
+        p = z.copy()
+        rz = (r * z).sum(0)
+        scale = np.maximum(np.linalg.norm(rhs, axis=0), 1e-30)
+        for _ in range(SPREAD_ITERATIONS):
+            if (np.linalg.norm(r, axis=0) / scale).max() < SPREAD_TOLERANCE:
+                break
+            ap = apply(p)
+            alpha = rz / np.where(np.abs((p * ap).sum(0)) > 1e-300, (p * ap).sum(0), 1e-300)
+            x += alpha * p
+            r -= alpha * ap
+            z = r / diagonal[:, None]
+            rz_next = (r * z).sum(0)
+            p = z + (rz_next / np.where(rz > 1e-300, rz, 1e-300)) * p
+            rz = rz_next
+        field[free] = np.maximum(x, 0.0)
+    return field[welded.node]
+
+
+def lash_weights(points, tris, roots, features, surface, names):
+    """Weights for a lash part (``points``, where it will be, and ``tris``; see LashRoots) around an eye of the
+    skin's ``features``: each root that sits on its lid (LASH_ATTACH) takes the weights of the skin there (its
+    closest point, never on the other lid; ``surface``, a SidedTransfer of the skin with its new weights over
+    ``names``), so it stays on the lid as it moves, and roots standing off the skin less of them the farther off
+    they are (LASH_FLOAT). The rest of the part blends their weights smoothly along the strands growing from them
+    (`harmonic_fill`, LASH_ACROSS): every strand moves with where it grows along the lid, without steps between
+    strands, and lashes around the whole eye turn from one lid's weights into the other's about the corners
+    (LASH_LID_BLEND, LASH_SIDE_BAND). Toward the tips some of the lid weight goes to the head (LASH_TIP_SHARE, by
+    the distance from the roots on the lid along the part), so long lashes lag a little as the lid closes."""
+    count = len(points)
+    candidates = np.flatnonzero(roots.root == np.arange(count))
+    lids = roots.lid[candidates]
+    tri, bary = surface.lookup(points[candidates], np.array(EYE_LABELS[roots.side], dtype=np.int64)[lids])
+    anchor = interpolate(surface.weights, surface.tris, tri, bary)
+    gap = np.linalg.norm(interpolate(surface.points, surface.tris, tri, bary) - points[candidates], axis=1)
+    # Per lid: its roots and how much each holds on to the skin's weights; how far every point is from the roots on
+    # the lid along the part (the way its strand grows).
+    hold = np.zeros(len(candidates))
+    fixed = []
     for lid in (0, 1):
-        mine = np.flatnonzero(roots.lid == lid)
-        if not len(mine):
-            continue
-        line, w = line_weights(features, features.eyes[roots.side][lid], skin_points_, skin_tris, skin_weights_)
-        w = weights_along(line, w, roots.m[mine])
-        columns = lid_columns(names, roots.side)[lid]
-        if head is not None and columns:
-            given = w[:, columns] * fade[mine, None]
-            w[:, columns] -= given
-            w[:, head] += given.sum(1)
-        out[mine] = w
+        mine = np.flatnonzero(lids == lid)
+        if len(mine):
+            hold[mine] = 1.0 - smoothstep((gap[mine] - np.percentile(gap[mine], 25) - LASH_ATTACH) / LASH_FLOAT)
+            fixed.append(mine[hold[mine] > 0.0])
+    length = graph_nearest(points, tris, candidates[hold >= 1.0])[1]
+    length = np.where(np.isfinite(length), length, 0.0)
+    fields = [harmonic_fill(points, tris, candidates[mine], anchor[mine], hold[mine], length, LASH_ACROSS)
+              for mine in fixed]
+    if len(fields) == 2:
+        # Lashes around the whole eye: each lid's field where its strands are (1 at the upper roots, 0 at the lower
+        # ones, spread likewise), turning into the other's over LASH_LID_BLEND of that about the corners, so no
+        # strand takes weight from the other lid's roots.
+        both = np.concatenate(fixed)
+        upper = harmonic_fill(points, tris, candidates[both], (lids[both] == 0).astype(np.float64), hold[both],
+                              length, LASH_ACROSS)[:, 0]
+        share = smoothstep((upper - 0.5) / LASH_LID_BLEND + 0.5)
+        # Whatever strand it's on, a point well above the upper margin goes with the upper lid, one well below the
+        # lower margin with the lower lid (strands curling round a corner would be pushed into the other lid).
+        upper_margin, lower_margin, _eye = features.eyes[roots.side]
+        x, z = points[:, 0], points[:, 2]
+        share = np.clip(share, smoothstep((z - polyline_z(upper_margin, x)) / LASH_SIDE_BAND),
+                        1.0 - smoothstep((polyline_z(lower_margin, x) - z) / LASH_SIDE_BAND))[:, None]
+        out = share * fields[0] + (1.0 - share) * fields[1]
+    else:
+        out = fields[0]
+    head = names.index(HEAD) if HEAD in names else None
+    up, down = lid_columns(names, roots.side)
+    columns = up + down
+    if head is not None and columns:
+        fade = LASH_TIP_SHARE * smoothstep((length - LASH_TIP_START) / LASH_TIP_LENGTH)
+        given = out[:, columns] * fade[:, None]
+        out[:, columns] -= given
+        out[:, head] += given.sum(1)
     return out
 
 
-def lash_offsets(points, roots, features, lift=0.0):
-    """How far to move each point of a lash part (see LashRoots) so the roots sit where the game's lashes grow
-    from the lids (LASH_ROOT_OUT and LASH_ROOT_ALONG off the lash lines), and ``lift`` farther out from the
-    eyeball: along each lid, what the root closest to the line every millimetre needs is averaged smoothly
-    (LASH_SNAP_SMOOTH), and every point moves with its root. Lashes spanning less than 3 mm move as one
-    piece."""
-    eye = features.eyes[roots.side][2]
-    offsets = np.zeros((len(points), 3))
-    for lid in (0, 1):
-        mine = np.flatnonzero(roots.lid == lid)
-        if not len(mine):
-            continue
-        line = features.lash_line(roots.side, lid)
-        length = np.linalg.norm(np.diff(line, axis=0), axis=1).sum()
-        own = np.unique(roots.root[mine])
-        s = roots.s[own]
-        d = roots.d[own]
-        q = roots.q[own]
-        ahead = resample(line, 200)
-        position = np.clip(s * 199, 0, 198).astype(np.int64)
-        tangent = ahead[position + 1] - ahead[position]
+class LashFrame:
+    """A lid's lash line with its frame, sampled evenly: ``points``, their position along it (``s``, 0..1 by
+    length), the skin's outward ``normals`` there (smoothed along the lid), ``away`` (across the line, on the
+    skin, away from the opening) and the line's ``length``."""
+
+    def __init__(self, features, side, lid, count=100):
+        line = features.lash_line(side, lid)
+        self.length = float(np.linalg.norm(np.diff(line, axis=0), axis=1).sum())
+        self.points = resample(line, count)
+        self.s = np.linspace(0.0, 1.0, count)
+        tangent = np.gradient(self.points, axis=0)
         tangent /= np.maximum(np.linalg.norm(tangent, axis=1, keepdims=True), 1e-12)
-        outward = q - eye.center
-        outward -= (outward * tangent).sum(1, keepdims=True) * tangent
-        outward /= np.maximum(np.linalg.norm(outward, axis=1, keepdims=True), 1e-12)
-        along = np.cross(tangent, outward)
-        along *= np.where(along[:, 2:3] >= 0.0, 1.0, -1.0) * (1.0 if lid == 0 else -1.0)
-        target = q + outward * (LASH_ROOT_OUT[lid] + lift) + along * LASH_ROOT_ALONG[lid] - points[own]
-        if (s.max() - s.min()) * length < 0.003:
-            root_offsets = np.repeat(target[int(np.argmin(d))][None], len(own), axis=0)
-        else:
-            bins = max(2, int((s.max() - s.min()) * length * 1000.0))
-            edges = np.linspace(s.min(), s.max() + 1e-9, bins + 1)
-            centers, chosen = [], []
-            for b0, b1 in zip(edges[:-1], edges[1:]):
-                inside = np.flatnonzero((s >= b0) & (s < b1))
-                if len(inside):
-                    best = inside[np.argmin(d[inside])]
-                    centers.append(s[best])
-                    chosen.append(target[best])
-            # A smooth average along the lid (Gaussian, LASH_SNAP_SMOOTH wide), so the lashes move without
-            # creasing where their roots are uneven.
-            centers = np.array(centers)
-            chosen = np.array(chosen)
-            spread = (s[:, None] - centers[None]) * length / LASH_SNAP_SMOOTH
-            kernel = np.exp(-0.5 * spread * spread)
-            root_offsets = kernel @ chosen / np.maximum(kernel.sum(1, keepdims=True), 1e-12)
-        lookup = {int(root): k for k, root in enumerate(own)}
-        offsets[mine] = root_offsets[[lookup[int(root)] for root in roots.root[mine]]]
-    return offsets
+        tri, loc, _dist = nearest_on(features.bvh, self.points)
+        normals = interpolate(features.normals(), features.tris, tri,
+                              barycentric(features.points, features.tris, tri, loc))
+        normals = smooth_polyline(normals, passes=4)
+        normals -= (normals * tangent).sum(1, keepdims=True) * tangent
+        self.normals = normals / np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12)
+        away = np.cross(tangent, self.normals)
+        # Turned away from the opening's center where that's clear, in the middle of the lid (by the corners it
+        # isn't), and so all along: the line's tangent and normals turn smoothly, so their cross product does too.
+        upper, lower, _eye = features.eyes[side]
+        center = np.vstack([upper, lower]).mean(0)
+        middle = len(away) // 2
+        self.away = away if (self.points[middle] - center) @ away[middle] >= 0.0 else -away
+
+    def at(self, s):
+        """(points, normals, away) of the frame at positions ``s`` along the line."""
+        position = np.clip(np.asarray(s, dtype=np.float64), 0.0, 1.0) * (len(self.s) - 1)
+        k = np.clip(np.floor(position).astype(np.int64), 0, len(self.s) - 2)
+        t = (position - k)[:, None]
+        out = []
+        for values in (self.points, self.normals, self.away):
+            v = values[k] * (1.0 - t) + values[k + 1] * t
+            out.append(v if values is self.points else v / np.maximum(np.linalg.norm(v, axis=1, keepdims=True), 1e-12))
+        return out
+
+
+def smooth_along(s_from, values, s_to, width, weights=None):
+    """``values`` at positions ``s_from`` along a line averaged at positions ``s_to`` with a Gaussian ``width``
+    wide (in the same units), each counting by its ``weights`` when given."""
+    d = (np.asarray(s_to)[:, None] - np.asarray(s_from)[None]) / width
+    d = d * d
+    kernel = np.exp(-0.5 * (d - d.min(1, keepdims=True)))
+    if weights is not None:
+        kernel = kernel * np.asarray(weights)[None]
+    return kernel @ values / np.maximum(kernel.sum(1, keepdims=True), 1e-300)
+
+
+def skin_depth(bvh, points, directions):
+    """How far ``points`` lie out from the skin (``bvh``), preferably along unit ``directions`` (negative: inside
+    it), as (depth, the skin's point there, the way out of the skin there): a point outside looks back along its
+    direction for skin facing it, one inside looks forward for where it comes out; the closest point of the skin
+    is taken instead when that way finds none within LASH_SNAP_REACH or finds it much farther than the closest
+    (LASH_SNAP_DETOUR: past a lid's edge), or when the skin is closer than LASH_SNAP_TOLERANCE anyway (a ray from
+    the surface may miss it)."""
+    depth = np.zeros(len(points))
+    surface = np.array(points, dtype=np.float64)
+    out = np.array(directions, dtype=np.float64)
+    for i, (p, n) in enumerate(zip(points, directions)):
+        location, normal, _index, distance = bvh.find_nearest(Vector(p))
+        if location is None:
+            continue
+        inside = (Vector(p) - location).dot(normal) < 0.0
+        if distance >= LASH_SNAP_TOLERANCE:
+            hit = bvh.ray_cast(Vector(p), Vector(n) if inside else -Vector(n), LASH_SNAP_REACH)
+            if hit[0] is not None and (inside or hit[1].dot(Vector(n)) > 0.0) and (
+                    hit[3] <= LASH_SNAP_DETOUR * distance + LASH_SNAP_TOLERANCE):
+                depth[i] = -hit[3] if inside else hit[3]
+                surface[i] = hit[0]
+                continue
+        depth[i] = -distance if inside else distance
+        surface[i] = location
+        out[i] = normal
+    return depth, surface, out
+
+
+def signed_skin_distance(bvh, points):
+    """Signed distances of ``points`` to the skin (negative inside it) and the skin's normal at the closest
+    points."""
+    out = np.zeros(len(points))
+    normals = np.zeros((len(points), 3))
+    for i, p in enumerate(points):
+        location, normal, _index, distance = bvh.find_nearest(Vector(p))
+        if location is None:
+            out[i] = np.inf
+            continue
+        out[i] = distance if (Vector(p) - location).dot(normal) >= 0.0 else -distance
+        normals[i] = normal
+    return out, normals
+
+
+def posed_skins(points, tris, names, weights, skeleton):
+    """[(BVHTree, deformations)] of the skin (``points``, ``tris``, ``weights`` over ``names``) in the poses that
+    close the eyes, Shut Eyes and the blink's peak, for those ``skeleton`` has."""
+    found = []
+    for pose in (SHUT_POSE, BLINK_POSE):
+        deform = skeleton.deformations(pose)
+        if deform:
+            found.append((bvh_of(skin_points(points, names, weights, deform), tris), deform))
+    return found
+
+
+def lash_offsets(points, roots, features, lift=0.0, poses=()):
+    """How far to move each point of a lash part (``points``; see LashRoots) so it sits on the lids:
+    roots floating off the lid or sunk into it move along the lid's normal (at its front edge, the lash line)
+    until they sit LASH_ROOT_OUT and ``lift`` out from the skin; along the lid, they stay where they are unless
+    they're well past the front edge (LASH_OFF_LID), and those go to where the game's lashes grow (LASH_ROOT_ALONG
+    from the edge). What the roots need is averaged smoothly along each lid (LASH_SNAP_SMOOTH), and every point
+    of the part moves by that average where it is along the lid, so the part keeps its shape; lashes spanning
+    less than LASH_RIGID_SPAN move as one piece. Points aren't pushed into the skin (see LASH_INSIDE), at rest or
+    in any of ``poses`` (the skin's BVHTree in the pose, its deformations, and the bone names and weights the part
+    will move by), unless the move brings as many out of it."""
+    side = roots.side
+    bvh = features.bvh
+    target = LASH_ROOT_OUT + lift
+    frames = [(lid, LashFrame(features, side, lid)) for lid in (0, 1) if (roots.lid == lid).any()]
+    if not frames:
+        return np.zeros((len(points), 3))
+
+    def needs(moved):
+        """Per lid, with the part's points at ``moved``: (its roots' positions along the lid, what each needs, whether
+        the part moves as one piece there)."""
+        out = []
+        for lid, frame in frames:
+            own = np.unique(roots.root[roots.lid == lid])
+            edge, normal, away = frame.at(roots.s[own])
+            depth, surface, outward = skin_depth(bvh, moved[own], normal)
+            # Where the part meets the lid: the roots deepest in the skin (or least off it) within a millimetre
+            # along the lid. A strip sunk into the lid comes out by those, not by points beside them that stay out.
+            at = roots.s[own] * frame.length
+            beside = np.abs(at[:, None] - at[None]) < LASH_ROOT_SPACING
+            keep = depth <= np.where(beside, depth[None], np.inf).min(1) + 1e-9
+            own, edge, normal, away = own[keep], edge[keep], normal[keep], away[keep]
+            depth, surface, outward = depth[keep], surface[keep], outward[keep]
+            s = roots.s[own]
+            root = moved[own]
+            # Small errors are left alone: correct lashes (the game's own) don't move.
+            amount = smoothstep((np.abs(depth - target) - LASH_SNAP_TOLERANCE) / LASH_SNAP_TOLERANCE)
+            need = (surface + outward * target - root) * amount[:, None]
+            # Roots well past the front edge (up the lid's front, down the cheek) go back to where the game's grow.
+            past = ((root + need - edge) * away).sum(1) - LASH_ROOT_ALONG[lid] - LASH_OFF_LID
+            off = smoothstep(past / LASH_OFF_LID_BLEND)[:, None]
+            grow = edge + away * LASH_ROOT_ALONG[lid] + normal * target
+            need = need * (1.0 - off) + (grow - root) * off
+            # Roots needing much more than those around them along the lid (a strip's end crossing the hollow of the
+            # eye's corner, off the skin where the rest lies on it) count for less: the part moves as most of its
+            # roots need, and one floating off or sunk all along still moves all along.
+            at = s * frame.length
+            around = (np.abs(at[:, None] - at[None]) < LASH_SNAP_AROUND) & ~np.eye(len(at), dtype=bool)
+            typical = np.array([np.median(need[row], axis=0) if row.any() else own_need
+                                for row, own_need in zip(around, need)])
+            spread = LASH_SNAP_SPREAD + LASH_SNAP_SHARE * np.linalg.norm(typical, axis=1)
+            trust = np.clip(1.0 - (np.linalg.norm(need - typical, axis=1) / spread) ** 2, 0.0, 1.0) ** 2
+            rigid = np.ptp(s) * frame.length < LASH_RIGID_SPAN
+            if rigid:
+                need = np.repeat((need * trust[:, None]).sum(0)[None] / max(trust.sum(), 1e-12), len(need), axis=0)
+            out.append((at, need, rigid, trust))
+        return out
+
+    # Where each point is along each lid, and how much each lid's roots count there: all for a part growing from
+    # one lid; by how close the point is to each lid's lash line for one growing from both.
+    along = []
+    for _lid, frame in frames:
+        s_p, d_p, _q = polyline_parameter(frame.points, points)
+        weight = 1.0 / np.maximum(d_p, 1e-5) ** 2 if len(frames) > 1 else np.ones(len(points))
+        along.append((s_p * frame.length, weight))
+    total_weight = sum(w for _s, w in along)
+    # The offsets of all points: each lid's roots' needs averaged smoothly along it at each point, and again from
+    # where that puts them, for up to LASH_SNAP_ROUNDS rounds (one average leaves some of what uneven roots need), so
+    # that snapping again finds little left to do.
+    offsets = np.zeros((len(points), 3))
+    rigid = False
+    for _round in range(LASH_SNAP_ROUNDS):
+        step = np.zeros((len(points), 3))
+        for (s, need, part_rigid, trust), (s_p, w) in zip(needs(points + offsets), along):
+            step += w[:, None] * smooth_along(s, need, s_p, LASH_SNAP_SMOOTH, trust)
+            rigid |= part_rigid
+        offsets += step / total_weight[:, None]
+        if np.linalg.norm(step / total_weight[:, None], axis=1).max() < LASH_SNAP_TOLERANCE:
+            break
+    # Nothing is pushed into the skin, at rest or in the poses (see LASH_INSIDE): the move is kept when it brings at
+    # least as many points out of the skin as it pushes in, at rest and in each pose, and none far deeper; else it's
+    # damped around the points it pushes in.
+    checks = [(bvh, None)] + [(pose_bvh, (deform, names, weights)) for pose_bvh, deform, names, weights in poses]
+
+    def depths(p):
+        return [signed_skin_distance(skin, p if move is None else skin_points(p, move[1], move[2], move[0]))[0]
+                for skin, move in checks]
+
+    before = depths(points)
+    # (A negative lift asks for the roots in the skin: that deep is allowed.)
+    allowed = [np.where(d < 0.0, np.minimum(d, -LASH_COVERED) if k else d, 0.0) + min(target, 0.0) - LASH_INSIDE
+               for k, d in enumerate(before)]
+    floor = [np.minimum(d, -LASH_COVERED) + min(target, 0.0) - LASH_INSIDE for d in before]
+    damp = np.ones(len(points))
+    for round_ in range(LASH_INSIDE_ROUNDS + 1):
+        moved = offsets * damp[:, None]
+        after = depths(points + moved)
+        pushed = [d < limit for d, limit in zip(after, allowed)]
+        brought = [(was < -LASH_INSIDE) & (d >= -LASH_INSIDE) for was, d in zip(before, after)]
+        if all(np.count_nonzero(p) <= np.count_nonzero(b) and (d >= low).all()
+               for p, b, d, low in zip(pushed, brought, after, floor)):
+            return moved
+        if round_ == LASH_INSIDE_ROUNDS:
+            break
+        # How much of its move each point pushed in can take: its depth changes about linearly along the move
+        # (LASH_INSIDE_SAFETY of that, as it doesn't quite).
+        bad = np.flatnonzero(np.any(pushed, axis=0))
+        share = damp[bad].copy()
+        for d, was, limit, hit in zip(after, before, allowed, pushed):
+            fraction = np.clip((was[bad] - limit[bad]) / np.maximum(was[bad] - d[bad], 1e-12), 0.0, 1.0)
+            share = np.where(hit[bad], np.minimum(share, damp[bad] * fraction * LASH_INSIDE_SAFETY), share)
+        if rigid:
+            damp[:] = share.min()
+            continue
+        # Around each, the move fades smoothly down to that share (a Gaussian LASH_SNAP_SMOOTH wide), so the part
+        # keeps its shape.
+        lengths = (points * points).sum(1)
+        for start in range(0, len(bad), 64):
+            chunk = bad[start:start + 64]
+            square = np.maximum(lengths[:, None] + lengths[chunk][None] - 2.0 * points @ points[chunk].T, 0.0)
+            bump = np.exp(-0.5 * square / (LASH_SNAP_SMOOTH * LASH_SNAP_SMOOTH))
+            candidate = share[start:start + 64][None] * bump + damp[:, None] * (1.0 - bump)
+            damp = np.minimum(damp, candidate.min(1))
+    return np.zeros((len(points), 3))
 
 
 def extra_weights(points, fit):
@@ -2252,7 +3257,8 @@ def plan_face(meshes, skin_index, reference, *, skin='ALL', parts='ALL', targets
     (what's inside the mouth or around it), 'LASHES' or 'NONE'.
     ``close``: fit the lid weights so the eyes are shut in the Shut Eyes expression (with 'ALL' and 'EYES').
     ``neck``: plan making the neck ring the game's (positions, normals, weights).
-    ``snap_lashes``: plan moving the lashes' roots onto the lash lines, ``lash_lift`` out from the eye.
+    ``snap_lashes``: plan sitting the lashes on the lids where they float off them or sink in (see `lash_offsets`),
+    ``lash_lift`` farther out.
     Raises FaceError when 'EYES' or 'MOUTH' can't find what they fit to: the eye openings, the lip line.
     """
     plan = Plan()
@@ -2263,6 +3269,11 @@ def plan_face(meshes, skin_index, reference, *, skin='ALL', parts='ALL', targets
     fit = FaceFit(skin_mesh.points, skin_mesh.tris, reference, eyes)
     plan.report["features"] = fit.features.summary()
     plan.report["reference"] = reference.features().summary()
+    if eyes and not plan.report["eyeballs"] and (skin in ('ALL', 'EYES') or parts in ('ALL', 'EYES', 'LASHES')):
+        # Without them the openings are found against spheres of the game's eyeballs, which fit custom eyes
+        # loosely: lids and lash lines are found less well (a lash part may pass for a film over the eye).
+        plan.report["warnings"].append("the eyeballs weren't selected, so the eyes were measured against spheres of "
+                                       "the game's eyeballs: select them too for a closer fit")
     # Every goal is over the game face's bones, the eyeballs' and the skin's own.
     names = list(reference.names)
     names += [bone for bone in dict.fromkeys(eyeball_bone(skeleton, side) for side in SIDES) if bone not in names]
@@ -2308,6 +3319,10 @@ def plan_face(meshes, skin_index, reference, *, skin='ALL', parts='ALL', targets
                 new = _ring_weights(points, fit.tris, new, (ring[0], ring[1], over(reference.names, ring[2], names)))
                 mask[found[2]] = 1.0
         skin_w = mask[:, None] * new + (1.0 - mask[:, None]) * current
+        if skin == 'EYES':
+            # Smoothed within the region only: outside it the face keeps its own weights.
+            smoothed = smooth_lid_weights(points, fit.tris, names, skin_w, fit.features, reference, fit.warped)
+            skin_w = mask[:, None] * smoothed + (1.0 - mask[:, None]) * skin_w
         if skin == 'EYES' and close and skeleton.deformations(SHUT_POSE):
             skin_w, plan.report["eyes"] = close_eyes(points, fit.tris, names, skin_w, fit.features, fit.labels,
                                                      skeleton)
@@ -2324,6 +3339,7 @@ def plan_face(meshes, skin_index, reference, *, skin='ALL', parts='ALL', targets
         others = []
     surface = SidedTransfer(fit.points, fit.tris, skin_w, fit.labels) if others else None
     skin_bvh = fit.features.bvh
+    snap_skins = None
     for i in others:
         mesh = meshes[i]
         goal = np.zeros((len(mesh.points), len(names)))
@@ -2348,16 +3364,19 @@ def plan_face(meshes, skin_index, reference, *, skin='ALL', parts='ALL', targets
             if kind == PART_EYEBALL:
                 goal[verts, names.index(eyeball_bone(skeleton, detail))] = 1.0
             elif kind == PART_LASH:
-                roots = LashRoots(pts, part_tris(mesh, verts), fit.features, detail)
+                tris = part_tris(mesh, verts)
+                roots = LashRoots(pts, tris, fit.features, detail)
+                # Their roots take the skin's weights where they sit.
+                goal[verts] = lash_weights(pts, tris, roots, fit.features, surface, names)
                 if snap_lashes:
-                    offsets[verts] = lash_offsets(pts, roots, fit.features, lash_lift)
-                if roots.both:
-                    # Around the whole eye: each point between the lids' weights by its height, as the
-                    # game's tear lines and lashes around the eye are weighted.
-                    goal[verts] = film_weights(pts + offsets[verts], fit.features, detail, fit.points, fit.tris,
-                                               skin_w)
-                else:
-                    goal[verts] = lash_weights(roots, fit.features, fit.points, fit.tris, skin_w, names)
+                    # Snapped lashes are kept out of the skin in the poses that close the eyes too, moved by the
+                    # weights they get; then weighted where they are.
+                    if snap_skins is None:
+                        snap_skins = posed_skins(fit.points, fit.tris, names, skin_w, skeleton)
+                    weights = limit_weights(goal[verts], max_groups)
+                    offsets[verts] = lash_offsets(pts, roots, fit.features, lash_lift,
+                                                  [(bvh, deform, names, weights) for bvh, deform in snap_skins])
+                    goal[verts] = lash_weights(pts + offsets[verts], tris, roots, fit.features, surface, names)
             elif kind == PART_FILM:
                 goal[verts] = film_weights(pts, fit.features, detail, fit.points, fit.tris, skin_w)
             elif kind == PART_SHELL:
