@@ -12,7 +12,7 @@ enabling an extension with factory settings makes Blender remove the wheels of e
 isn't enabled, and in your own profile those would be the ones you installed.
 
 Run from the repository root, with any Python 3:
-    python tools/check_install.py dist/magic_fit-1.0.0.zip [path to blender] [--skip-face]
+    python tools/check_install.py dist/magic_fit-1.0.2.zip [path to blender] [--skip-face]
 
 --skip-face leaves out Face Weights, for computers without the game (such as the release workflow's).
 """

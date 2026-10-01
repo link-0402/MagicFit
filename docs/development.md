@@ -45,12 +45,12 @@ Run from the repository's root (PowerShell). The core tests check the engines he
 
 ```
 # Core tests
-foreach ($t in 'core','fit_core','straighten_core','skirt_core','heels_core','smooth_core','hair_core',
+foreach ($t in 'core','fit_core','move_core','straighten_core','skirt_core','heels_core','smooth_core','hair_core',
                'face_core','relax_core','resize_core','lineup_core','transfer_core','cplus_core') {
     blender -b --factory-startup --python "tests/test_$t.py" }
 
 # UI tests
-foreach ($t in 'ui','fit_ui','fit_deformed_ui','straighten_ui','skirt_ui','heels_ui','smooth_ui','hair_ui',
+foreach ($t in 'ui','fit_ui','fit_deformed_ui','move_ui','straighten_ui','skirt_ui','heels_ui','smooth_ui','hair_ui',
                'face_ui','relax_ui','resize_ui','lineup_ui','clipping_ui','sidebar_ui','transfer_ui','cplus_ui') {
     blender --factory-startup --enable-event-simulate --python "tests/test_$t.py" }
 ```
