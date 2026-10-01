@@ -62,7 +62,7 @@ import numpy as np
 from mathutils.bvhtree import BVHTree
 from mathutils.kdtree import KDTree
 
-from . import resizing
+from . import fitting, resizing, straighten
 
 TORSO, NECK, HEAD = "torso", "neck", "head"
 SIDES = ("l", "r")
@@ -1533,30 +1533,6 @@ def _fit_frames(target):
     return frames
 
 
-def _vertex_normals(points, tris):
-    """Normals of a mesh's points, averaged over their triangles by area."""
-    corners = points[tris]
-    faces = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
-    normals = np.zeros_like(points)
-    for axis in range(3):
-        for k in range(3):
-            normals[:, axis] += np.bincount(tris[:, k], faces[:, axis], minlength=len(points))
-    return normals / np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-20)
-
-
-def _barycentric(corners, points):
-    """Barycentric coordinates of ``points`` in the triangles ``corners`` (n x 3 x 3), kept inside them."""
-    a = corners[:, 0]
-    v0, v1, v2 = corners[:, 1] - a, corners[:, 2] - a, points - a
-    d00, d01, d11 = (v0 * v0).sum(axis=1), (v0 * v1).sum(axis=1), (v1 * v1).sum(axis=1)
-    d20, d21 = (v2 * v0).sum(axis=1), (v2 * v1).sum(axis=1)
-    determinant = np.maximum(d00 * d11 - d01 * d01, 1e-30)
-    v = (d11 * d20 - d01 * d21) / determinant
-    w = (d00 * d21 - d01 * d20) / determinant
-    result = np.clip(np.column_stack((1.0 - v - w, v, w)), 0.0, 1.0)
-    return result / np.maximum(result.sum(axis=1, keepdims=True), 1e-12)
-
-
 def _triangle_parts(tris, labels):
     """Part of each triangle: its first corner's, unless the other two share another."""
     a, b, c = labels[tris[:, 0]], labels[tris[:, 1]], labels[tris[:, 2]]
@@ -1615,7 +1591,7 @@ def _match(trees, points, tris, normals, queries, parts, query_normals, reach, s
     location, face = trees.nearest(queries, parts, reach)
     found = np.flatnonzero(face >= 0)
     corners = tris[face[found]]
-    bary = _barycentric(points[corners], location[found])
+    bary = fitting._barycentric(location[found], *(points[corners[:, k]] for k in range(3)))
     normal = (bary[:, :, None] * normals[corners]).sum(axis=1)
     normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-20)
     offset = location[found] - queries[found]
@@ -1824,7 +1800,7 @@ def fit_shape(points, tris, weights, group_parts, body_points, body_tris, body_l
     model_rows = _evenly(np.flatnonzero((labels >= 0) & ~np.isin(labels, skipped)), FIT_SAMPLES)
     triangle_labels = _triangle_parts(tris, np.maximum(labels, 0))
     model_usable = ~np.isin(triangle_labels, skipped)
-    body_normals = _vertex_normals(body_points, body_tris)
+    body_normals = straighten.vertex_normals(body_points, body_tris)
     if body_labels is None:
         body_rows = _evenly(np.arange(len(body_points)), FIT_SAMPLES)
         body_triangle_labels, body_usable = None, np.ones(len(body_tris), dtype=bool)
@@ -1844,7 +1820,7 @@ def fit_shape(points, tris, weights, group_parts, body_points, body_tris, body_l
     current = np.array(points, dtype=np.float64)
     result = ShapeFit([names[k] for k in fitted], centers, axes, extent)
     for round_ in range(FIT_ROUNDS):
-        normals = _vertex_normals(current, tris)
+        normals = straighten.vertex_normals(current, tris)
         # The model's points onto the body: its normal, and the gap as how far the model lies out from it.
         found, corners, bary, normal, gap = _match(body_trees, body_points, body_tris, body_normals,
                                                    current[model_rows], model_query, normals[model_rows], reach,
