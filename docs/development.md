@@ -57,6 +57,14 @@ foreach ($t in 'ui','fit_ui','fit_deformed_ui','move_ui','straighten_ui','skirt_
 
 To run one test, use its line alone, for example `blender -b --factory-startup --python tests/test_fit_core.py`.
 
+`tools/run-tests.ps1` runs all of them (including the Fit Move tests) without taking over your desktop: the UI window doesn't take focus, `-Position X,Y,width,height` parks it on another screen, and a Blender crash is closed by the script instead of leaving its "stopped working" dialog open. It prints one line per test and exits non-zero if any failed. `-Only fit_core,fit_ui` runs a few, `-SkipUi` the headless ones, `-SkipFace` leaves out Face.
+
+```
+.\tools\run-tests.ps1 -Position 1920,0,1280,720
+```
+
+Known issue: `test_lineup_ui.py` crashes Blender (an access violation inside a `line_up` or edit-mode toggle call) in roughly half of its runs, on main as well as on branches, and passes when it doesn't crash. Run it again before reading anything into one crash.
+
 - **Screenshots:** set `MF_SCREENSHOTS` to a folder to keep them.
 - **Windows:** add `--no-window-focus` to keep the UI tests out of your way, and `-p x y width height` to place them, for example on another screen. Blender measures `y` upward from the bottom of the whole desktop.
 - **Face:** the face tests, and the face check of `tools/check_install.py`, need FFXIV installed where Magic Fit finds it by itself. The tests load the add-on from the repository, not as an extension, so they keep the faces in `datafiles/magic_fit/face_data.npz` in Blender's user folder.
