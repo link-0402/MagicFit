@@ -8,6 +8,7 @@ import math
 import os
 import sys
 import traceback
+import warnings
 from types import SimpleNamespace
 
 import bmesh
@@ -1321,7 +1322,9 @@ def test_sunk_strip_in_a_crease():
     # vertices on both sides of the crease head into each other. Round two had them follow those normals
     # once they were aimed, and get out along the normal of the side they were in every dab: edges at the
     # crease were squeezed to 0.11 times their length. Along the body's normal smoothed over Keep Together,
-    # they keep 0.61 of it.
+    # they keep 0.61 of it. Push Out also got a vertex on the crease line out of the side it had crossed to
+    # the shortest way, which led back into the side it came from, and so on every other dab: edges there
+    # came down to 0.24 times their length. Now it only does when that leads clear of the body (0.59).
     body = valley_body()
     for mode in ('PUSH', 'FIT'):
         co, edges, tris = tight_crease_strip(-0.004)
@@ -1380,6 +1383,29 @@ def hidden_top_sleeve(mode, fade_distance, depth, outer=False, strokes=2):
         gap = np.linalg.norm(co[count:, :2], axis=1) - np.linalg.norm(co[:count][shown, :2], axis=1)
         thickness = (gap.min(), gap.max())
     return moved, kept, thickness
+
+
+def test_fade_with_vertices_on_their_own():
+    # Clothing sunk into the other thigh gets out of it on its own (see `FitStroke._contact`), so a spot with
+    # nothing but such vertices has no stack. With Fade at Hidden near it, its blend was -inf minus -inf: a NaN
+    # (and a numpy warning on every dab), which only the vertices' own aim happened to leave out of the result.
+    body = legs()
+    co, tris, angle = loose_leg(0.013)
+    movable = co[:, 2] < 0.02
+    stroke = fitting.FitStroke(body, co, movable, mode='PUSH', offset=0.001, layer_radius=0.02, max_distance=0.05,
+                               edges=edges_of(tris), tris=tris, smooth=0.5, fade_distance=0.03)
+    check(stroke.fade is not None and (stroke.fade < 1.0).any(), "fade on their own: part of the leg fades out")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for i in range(2):
+            zs = np.linspace(-0.05, 0.05, 41)
+            for z in (zs if i % 2 == 0 else zs[::-1]):
+                for y in (-0.015, 0.0, 0.015):
+                    stroke.dab(np.array([-(LEG_GAP / 2.0 + 0.001), y, z]), 0.02, 0.5)
+    invalid = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+    check(not invalid, "fade on their own: no invalid values met ({} warnings{})".format(
+        len(invalid), "" if not invalid else ", " + str(invalid[0].message)))
+    check(np.isfinite(co).all(), "fade on their own: every position stays a number")
 
 
 def test_fade_at_hidden():
@@ -1539,6 +1565,26 @@ def test_changed_shape_keeps_topology():
     check(third.edges is not second.edges and len(third.co) == len(second.co) + len(seam) and
           same_surface(third, body_surface(opened, tris)), "opened seam: built again, as from scratch")
     fitting.BodySurface.clear_cache()
+
+
+def test_stroke_cache_cleared():
+    # The triangles of the mesh last stroked are kept as a list for the next stroke over it (see
+    # `FitStroke._layers`): disabling the add-on has to let go of them, as it does of the body's caches.
+    body = legs()
+    co, tris, angle = loose_leg(0.009)
+    stroke = fitting.FitStroke(body, co, np.ones(len(co), bool), mode='FIT', offset=0.001, layer_radius=0.02,
+                               max_distance=0.05, edges=edges_of(tris), tris=tris)
+    stroke.dab(np.array([-(LEG_GAP / 2.0 + 0.001), 0.0, 0.0]), 0.02, 0.5)
+    check(fitting.FitStroke._tri_list[0] is not None, "stroke cache: the triangles are kept after a stroke")
+    fitting.FitStroke.clear_cache()
+    check(fitting.FitStroke._tri_list == (None, None), "stroke cache: let go of by clear_cache")
+    check(np.isfinite(co).all(), "stroke cache: strokes still work without it")
+    stroke = fitting.FitStroke(body, co, np.ones(len(co), bool), mode='FIT', offset=0.001, layer_radius=0.02,
+                               max_distance=0.05, edges=edges_of(tris), tris=tris)
+    stroke.dab(np.array([-(LEG_GAP / 2.0 + 0.001), 0.0, 0.0]), 0.02, 0.5)
+    check(fitting.FitStroke._tri_list[0] is not None and np.isfinite(co).all(),
+          "stroke cache: built again by the next stroke")
+    fitting.FitStroke.clear_cache()
 
 
 def mesh_object(name, co, tris):
