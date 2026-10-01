@@ -1587,12 +1587,30 @@ class MAGIC_FIT_OT_fit_move(bpy.types.Operator):
         self.axis = None
         self.plane = False
         self.translation = Vector((0.0, 0.0, 0.0))
+        # What the move shows its text in, to clear again wherever the mouse is by then.
+        self.area = context.area
+        self.workspace = context.workspace
         self._handle = bpy.types.SpaceView3D.draw_handler_add(self._draw, (self,), 'WINDOW', 'POST_PIXEL')
-        context.window_manager.modal_handler_add(self)
-        self._show(context)
+        try:
+            context.window_manager.modal_handler_add(self)
+            self._show(context)
+        except Exception:
+            self._finish(context)
+            raise
         return {'RUNNING_MODAL'}
 
     def modal(self, context, event):
+        try:
+            return self._step(context, event)
+        except Exception:
+            self._abort(context)
+            raise
+
+    def cancel(self, context):
+        # Blender takes the operator down while it runs (a file is loaded, the area closes...).
+        self._abort(context)
+
+    def _step(self, context, event):
         kind, value = event.type, event.value
         if kind in {'MOUSEMOVE', 'INBETWEEN_MOUSEMOVE'}:
             xy = Vector((event.mouse_region_x, event.mouse_region_y))
@@ -1622,8 +1640,7 @@ class MAGIC_FIT_OT_fit_move(bpy.types.Operator):
             self._finish(context)
             return {'FINISHED'}
         elif kind in {'RIGHTMOUSE', 'ESC'} and value == 'PRESS':
-            write_edited(self.parts, self.touched, local_co=self.local_start[self.touched])
-            self._finish(context)
+            self._abort(context)
             return {'CANCELLED'}
         return {'RUNNING_MODAL'}
 
@@ -1664,15 +1681,34 @@ class MAGIC_FIT_OT_fit_move(bpy.types.Operator):
             text += "   {:s} {:s}".format("locking" if self.plane else "along", "XYZ"[self.axis])
         if self.move.size is not None:
             text += "   Proportional size: " + _length_text(context, self.move.size)
-        context.area.header_text_set(text)
-        context.workspace.status_text_set(FIT_MOVE_HINTS)
-        context.area.tag_redraw()
+        self.area.header_text_set(text)
+        self.workspace.status_text_set(FIT_MOVE_HINTS)
+        self.area.tag_redraw()
 
     def _finish(self, context):
-        bpy.types.SpaceView3D.draw_handler_remove(self._handle, 'WINDOW')
-        context.area.header_text_set(None)
-        context.workspace.status_text_set(None)
-        context.area.tag_redraw()
+        """Take the drawing and the texts down. Safe to call again, and after the area is gone."""
+        handle, self._handle = self._handle, None
+        if handle is not None:
+            bpy.types.SpaceView3D.draw_handler_remove(handle, 'WINDOW')
+        try:
+            self.area.header_text_set(None)
+            self.area.tag_redraw()
+        except ReferenceError:
+            pass
+        try:
+            self.workspace.status_text_set(None)
+        except ReferenceError:
+            pass
+
+    def _abort(self, context):
+        """Put the vertices back where they were and finish: for a move that ends without being confirmed."""
+        try:
+            write_edited(self.parts, self.touched, local_co=self.local_start[self.touched])
+        except (ReferenceError, ValueError, RuntimeError):
+            # The mesh is gone, or no longer in Edit Mode: nothing to put back.
+            pass
+        finally:
+            self._finish(context)
 
     @staticmethod
     def _draw(self):
