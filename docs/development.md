@@ -23,7 +23,7 @@ The extension id is `magic_fit`, and scenes keep their settings in `Scene.magic_
 `tools/check_install.py` installs a package into a throwaway Blender profile, enables it, and checks for extension policy warnings, a transfer with SciPy from the installed wheels, a Customize+ template, Hair Weights, and Face Weights with faces read from the game:
 
 ```
-python tools/check_install.py dist/magic_fit-1.0.2.zip
+python tools/check_install.py dist/magic_fit-1.0.3.zip
 ```
 
 Don't run such checks with your own Blender profile: enabling an extension with factory settings makes Blender delete the wheels of every extension that isn't enabled, including yours. The [tests](#tests) are safe, since they load the add-on from the repository. `--skip-face` leaves out Face, for computers without the game.
