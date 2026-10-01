@@ -378,8 +378,10 @@ def steps():
     bumpy_mesh = bpy.data.meshes.new("Bumpy")
     bm = bmesh.new()
     bmesh.ops.create_uvsphere(bm, u_segments=64, v_segments=32, radius=1.03)
+    # Uneven from vertex to vertex: Auto Smooth evens that out but keeps larger shapes like wrinkles (a
+    # ripple running smoothly along each ring of this coarse sphere stays).
     for i, vert in enumerate(bm.verts):
-        vert.co *= 1.0 + 0.004 * math.sin(i * 12.9898)
+        vert.co *= 1.0 + 0.008 * ((math.sin(i * 12.9898) * 43758.5453) % 1.0 - 0.5)
     bm.to_mesh(bumpy_mesh)
     bm.free()
     bumpy = bpy.data.objects.new("Bumpy", bumpy_mesh)

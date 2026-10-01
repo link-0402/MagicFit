@@ -67,6 +67,7 @@ def steps():
 
     scene = fixture.build()
     bpy.context.scene.body_fit_brush.lineup_stretch = True  # off by default; the joints only land exactly with it
+    bpy.context.scene.body_fit_brush.lineup_fit_shape = False  # and without reshaping after
     markers = scene["vrc_markers"]
     for obj in list(scene["bipeds"]) + [scene["anon"], scene["anon_armature"]]:
         obj.hide_set(True)
@@ -139,13 +140,27 @@ def steps():
     env.screenshot("lineup_03_no_stretch.png")
     settings.lineup_stretch = True
 
+    # --- Fit Shape, from Adjust Last Operation: the model is reshaped a little, and the panel's setting follows.
+    with env.override():
+        bpy.ops.ed.undo()
+    yield 0.4
+    fixture.select([bpy.data.objects["VRC Suit"]])
+    with env.override(sidebar):
+        result = bpy.ops.magic_fit.line_up('EXEC_DEFAULT', True, fit_shape=True)
+    yield 0.4
+    error = marker_error(markers)
+    check(result == {'FINISHED'} and 1e-4 < error < 0.02 and settings.lineup_fit_shape is True,
+          "fit shape: the joints stay near the body's ({:.1f} mm), and the panel's setting follows".format(1000 * error))
+    env.screenshot("lineup_04_fit_shape.png")
+    settings.lineup_fit_shape = False
+
     # --- Not in Edit Mode.
     with env.override():
         bpy.ops.object.mode_set(mode='EDIT')
     yield 0.2
     with env.override(sidebar):
         check(not bpy.ops.magic_fit.line_up.poll(), "edit mode: the button is greyed out")
-    env.screenshot("lineup_04_edit_mode.png")
+    env.screenshot("lineup_05_edit_mode.png")
     with env.override():
         bpy.ops.object.mode_set(mode='OBJECT')
     yield 0.2

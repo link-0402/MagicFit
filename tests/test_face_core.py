@@ -273,10 +273,10 @@ def test_features():
     for lid in (0, 1):
         line = features.lash_line('l', lid)
         d = facing.polyline_parameter(features.eyes['l'][lid], line)[1]
-        check(0.0003 < np.median(d) < facing.LASH_LINE_LIMIT,
+        check(0.0003 < np.median(d) < facing.LASH_EDGE_REACH,
               "features: the {:s} lash line is the lid's front edge, near the margin ({:.2f} mm)".format(
                   "upper" if lid == 0 else "lower", np.median(d) * 1000))
-    # A heavy brow hides the lid's edge seen from above: the lid's own edge is found all the same.
+    # A heavy brow overhangs the lid: the lid's own edge is found all the same.
     brow = face.reference('c1301', 2).features()
     d = facing.polyline_parameter(brow.eyes['l'][0], brow.lash_line('l', 0))[1]
     check(np.median(d) < 0.003, "features: an Au Ra male's upper lash line isn't the brow ({:.2f} mm)".format(
@@ -630,6 +630,12 @@ def test_snap_lashes():
     face.select(objects.values(), skin)
     check(bpy.ops.magic_fit.face_weights() == {'FINISHED'}, "snap: Face Weights first")
     before = face.points_of(etc)
+    # The game's own lashes sit where lashes belong: snapping leaves them there.
+    check(bpy.ops.magic_fit.face_repair(repair='LASHES') == {'FINISHED'}, "snap: Snap Lashes runs on the game's lashes")
+    moved = np.linalg.norm(face.points_of(etc) - before, axis=1)
+    check(moved.max() < 0.0001, "snap: the game's own lashes stay where they are ({:.2f} mm moved at most)".format(
+        moved.max() * 1000))
+    face.reshape(etc, lambda p: before)
     # The lashes pushed 1.5 mm into the head, as badly placed custom lashes are.
     face.reshape(etc, lambda p: p + np.array((0.0, 0.0015, 0.0)))
     pushed = face.points_of(etc)
@@ -642,19 +648,30 @@ def test_snap_lashes():
           "off, median)".format(np.median(off[lashes]) * 1000))
     check(lashes.any() and not lashes.all(), "snap: what isn't lashes (brows, the tear lines) stays where it is")
     features = face.reference().features()
+    sunk = facing.signed_skin_distance(features.bvh, pushed[lashes])[0] < -0.0001
+    still = facing.signed_skin_distance(features.bvh, after[lashes])[0] < -0.0001
+    check(lashes.any() and still.mean() < 0.25 * sunk.mean(),
+          "snap: the lashes come out of the head ({:.0f} % of them inside it, pushed: {:.0f} %)".format(
+              still.mean() * 100, sunk.mean() * 100))
     mesh = facing.Mesh("etc", after, facing.mesh_tris(etc.data), [], np.zeros((len(after), 0)))
-    distances = []
+    distances, depths = [], []
     for part in range(mesh.part_count):
         verts = np.flatnonzero(mesh.parts == part)
         if lashes[verts].any():
             side = 'l' if after[verts, 0].mean() > 0 else 'r'
             roots = facing.LashRoots(after[verts], facing.part_tris(mesh, verts), features, side)
             own = np.unique(roots.root)
-            distances += roots.d[own[roots.lid[own] == 0]].tolist()
-    # The game's own upper lashes grow 0.75 mm from the lash line (median of all its faces).
-    check(distances and 0.0002 < np.median(distances) < 0.0011,
-          "snap: the upper lashes' roots sit just off the lids' front edges, as the game's do ({:.2f} mm, "
-          "median)".format(np.median(distances) * 1000))
+            upper = own[roots.lid[own] == 0]
+            distances += roots.d[upper].tolist()
+            depths += facing.signed_skin_distance(features.bvh, after[verts][upper])[0].tolist()
+    # Pushed straight back, the lashes come out of the lid along its normal, on to its rim by the front edge (the
+    # game's own grow 0.2 mm from it, median of all its faces), sitting on the skin.
+    check(distances and np.median(distances) < 0.0013,
+          "snap: the upper lashes' roots sit by the lids' front edges ({:.2f} mm, median)".format(
+              np.median(distances) * 1000))
+    check(depths and abs(np.median(depths)) < 0.00015,
+          "snap: the upper lashes' roots sit on the lids ({:+.2f} mm off the skin, median)".format(
+              np.median(depths) * 1000))
 
 
 def test_detect():

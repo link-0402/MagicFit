@@ -11,8 +11,9 @@ import traceback
 
 import bpy
 import numpy as np
+from mathutils.bvhtree import BVHTree
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT =os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 
@@ -433,9 +434,11 @@ def test_deform():
 # -----------------------------------------------------------------------------
 # The operator on the fixture
 
-def fresh():
+def fresh(fit=False):
     scene = fixture.build()
     bpy.context.scene.body_fit_brush.lineup_stretch = True
+    # The joints land exactly on the body's without Fit Shape, which reshapes the model after (see test_fit_*).
+    bpy.context.scene.body_fit_brush.lineup_fit_shape = fit
     return scene
 
 
@@ -830,11 +833,227 @@ def test_refine_joints():
                         ("upperarm_l", (-0.025, 0.0, 0.0))):
         off[part] = exact[part] + np.array(shift)  # the model faces +X: this is forward / back
     refined, count = lineup.refine_joints(off, target, points, np.concatenate(tris), part_weights,
-                                          lineup.body_surface(scene["body"], bpy.context.evaluated_depsgraph_get()))
+                                          lineup.body_surface(scene["body"], bpy.context.evaluated_depsgraph_get())[0])
     before = max(np.linalg.norm(off[p] - exact[p]) for p in ("thigh_l", "thigh_r", "upperarm_l"))
     after = max(np.linalg.norm(refined[p] - exact[p]) for p in ("thigh_l", "thigh_r", "upperarm_l"))
     check(after < 0.4 * before and count >= 3,
           "refine: joints {:s} off move back to within {:s}".format(mm(before), mm(after)))
+
+
+# -----------------------------------------------------------------------------
+# Fit Shape
+
+def fit_scene(thickness, extra=None, name="Slim"):
+    """The fixture, with Fit Shape on, and a model like the body: VRChat bones at the body's own joints, its
+    tubes ``thickness`` times the body's, and ``extra`` (vertices, faces, weights) added to its mesh (a
+    skirt, a jacket). Returns (scene, model, markers, index of the first extra vertex)."""
+    scene = fresh(fit=True)
+    joints = {joint: np.array(point) for joint, point in fixture.mirror(fixture.BODY_JOINTS).items()}
+    vertices, faces, weights, markers = fixture.build_humanoid(joints, fixture.VRC_BONES, thickness=thickness)
+    first = len(vertices)
+    if extra is not None:
+        more, more_faces, more_weights = extra(joints)
+        vertices = np.concatenate((vertices, np.array(more)))
+        faces = faces + [tuple(i + first for i in face) for face in more_faces]
+        weights = weights + list(more_weights)
+    model = fixture.mesh_object(name, vertices, faces, weights)
+    armature = fixture.armature_object(name + " Armature", joints, fixture.VRC_BONES,
+                                       fixture.bone_list(joints, fixture.VRC_BONES))
+    modifier = model.modifiers.new("Armature", 'ARMATURE')
+    modifier.object = armature
+    model.parent = armature
+    return scene, model, markers, first
+
+
+def body_gaps(scene, points):
+    """How far ``points`` lie out from the body's surface (negative: inside it)."""
+    positions, tris = lineup.body_surface(scene["body"], bpy.context.evaluated_depsgraph_get())
+    tree = BVHTree.FromPolygons(positions.tolist(), tris.tolist(), all_triangles=True)
+    gaps = []
+    for point in points:
+        location, normal, _index, _distance = tree.find_nearest(point)
+        gaps.append(np.dot(point - np.array(location), np.array(normal)))
+    return np.array(gaps)
+
+
+def skin_of(points, markers):
+    """The points of a fixture humanoid that Fit Shape fits: not its markers, head or feet."""
+    joints = fixture.BODY_JOINTS
+    skin = (points[:, 2] < joints["head"][2]) & (points[:, 2] > joints["ankle_l"][2] + 0.02)
+    skin[list(markers)] = False
+    return skin
+
+
+def edge_ratios(model, before, after):
+    edges = np.array([edge.vertices[:] for edge in model.data.edges])
+    return (np.linalg.norm(after[edges[:, 0]] - after[edges[:, 1]], axis=1) /
+            np.linalg.norm(before[edges[:, 0]] - before[edges[:, 1]], axis=1))
+
+
+def test_fit_shape_slim():
+    # 15 % slimmer than the body and lined up joint on joint, the model sits inside it: Fit Shape brings its
+    # surface out onto the body's, keeps its joints on the body's and its mesh even.
+    scene, model, markers, _first = fit_scene(0.85)
+    before = fixture.world_positions(model)
+    skin = skin_of(before, markers)
+    gaps_before = body_gaps(scene, before[skin])
+    fixture.select([model])
+    result = bpy.ops.magic_fit.line_up()
+    after = fixture.world_positions(model)
+    gaps = body_gaps(scene, after[skin])
+    check(result == {'FINISHED'} and np.median(np.abs(gaps)) < 0.3 * np.median(np.abs(gaps_before)),
+          "fit: a slim model's surface moves out onto the body's (typically {:s} off, from {:s})".format(
+              mm(np.median(np.abs(gaps))), mm(np.median(np.abs(gaps_before)))))
+    check((gaps < -0.003).mean() < 0.05, "fit: hardly any of it stays inside ({:.1f} % over 3 mm)".format(
+        100.0 * (gaps < -0.003).mean()))
+    errors = fixture.marker_errors(model, markers, scene["body_joints"])
+    check(max(errors.values()) < 0.01, "fit: its joints stay on the body's ({:s} at most)".format(
+        mm(max(errors.values()))))
+    # The limbs' tubes start inside the torso's (hidden), where they blend into it: those edges shorten a little.
+    ratios = edge_ratios(model, before, after)
+    check(ratios.min() > 0.85 and ratios.max() < 1.25, "fit: its edges stretch evenly ({:.2f} to {:.2f})".format(
+        ratios.min(), ratios.max()))
+
+
+def test_fit_shape_thick():
+    # 15 % thicker, the model sits around the body, a centimetre off: it closes in some, never into the body.
+    scene, model, markers, _first = fit_scene(1.15)
+    before = fixture.world_positions(model)
+    skin = skin_of(before, markers)
+    gaps_before = body_gaps(scene, before[skin])
+    fixture.select([model])
+    bpy.ops.magic_fit.line_up()
+    gaps = body_gaps(scene, fixture.world_positions(model)[skin])
+    check(np.median(gaps) < 0.9 * np.median(gaps_before) and (gaps < -0.002).mean() < 0.02,
+          "fit: a thick model closes in ({:s} off, from {:s}), staying out of the body".format(
+              mm(np.median(gaps)), mm(np.median(gaps_before))))
+
+
+def test_fit_shape_skirt():
+    # A long skirt weighted to the hips and thighs hangs well off them. They thicken 18 % to fit the body, and
+    # the skirt moves out about as far as their surface does (2 cm), not 18 % of its own width.
+    def extra(joints):
+        return fixture.skirt(joints)
+
+    scene, model, markers, first = fit_scene(0.85, extra)
+    before = fixture.world_positions(model)
+    fixture.select([model])
+    bpy.ops.magic_fit.line_up()
+    after = fixture.world_positions(model)
+    moved = np.linalg.norm(after[first:] - before[first:], axis=1)
+    edges = np.array([edge.vertices[:] for edge in model.data.edges])
+    edges = edges[(edges >= first).all(axis=1)]
+    ratios = (np.linalg.norm(after[edges[:, 0]] - after[edges[:, 1]], axis=1) /
+              np.linalg.norm(before[edges[:, 0]] - before[edges[:, 1]], axis=1))
+    check(moved.max() < 0.03 and ratios.min() > 0.95 and ratios.max() < 1.15,
+          "fit: a skirt moves out with the hips, keeping its shape (moved {:s} at most, edges {:.2f} to "
+          "{:.2f})".format(mm(moved.max()), ratios.min(), ratios.max()))
+
+
+def test_fit_shape_layers():
+    # A jacket over the torso, a centimetre off the body, weighted like the torso: the torso under it still
+    # fits the body, and the jacket stays around it.
+    def extra(joints):
+        points = [joints[key] for key in fixture.TORSO_CHAIN] + [joints["head_top"]]
+        radii = [fixture.RADII[key] * 1.1 for key in fixture.TORSO_CHAIN]
+        vertices, faces, weights = fixture.tube(points, [fixture.VRC_BONES[k] for k in fixture.TORSO_CHAIN], radii,
+                                                fixture.VRC_BONES["hips"], lead=0.12)
+        return vertices, faces, weights
+
+    scene, model, markers, first = fit_scene(0.9, extra)
+    before = fixture.world_positions(model)
+    torso = np.zeros(len(before), dtype=bool)
+    torso[:first] = skin_of(before[:first], markers)
+    torso[:first] &= np.abs(before[:first, 0]) < 0.06  # the torso tube's middle, off the limbs
+    torso[:first] &= (before[:first, 2] > 1.05) & (before[:first, 2] < 1.3)
+    fixture.select([model])
+    bpy.ops.magic_fit.line_up()
+    after = fixture.world_positions(model)
+    gaps = body_gaps(scene, after[torso])
+    jacket = body_gaps(scene, after[first:][(after[first:, 2] > 1.05) & (after[first:, 2] < 1.3)])
+    check(np.median(np.abs(gaps)) < 0.004 and np.median(jacket) > 0.006,
+          "fit: under a jacket the torso fits ({:s} off), the jacket stays around it ({:s} off)".format(
+              mm(np.median(np.abs(gaps))), mm(np.median(jacket))))
+
+
+def test_fit_shape_rigid_parts():
+    # A stud on the chest, weighted half to the chest and half to the shoulder, keeps its shape: it moves the
+    # rigid way closest to how the two change.
+    def extra(joints):
+        center = np.array(joints["spine_c"]) + np.array((0.06, -0.14, 0.0))
+        corners = [center + 0.006 * np.array((x, y, z)) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)]
+        faces = [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)]
+        return corners, faces, [{"Chest": 0.5, "Shoulder_L": 0.5}] * 8
+
+    scene, model, markers, first = fit_scene(0.85, extra)
+    before = fixture.world_positions(model)[first:]
+    fixture.select([model])
+    bpy.ops.magic_fit.line_up()
+    after = fixture.world_positions(model)[first:]
+    sides = [np.linalg.norm(points[:, None] - points[None], axis=2) for points in (before, after)]
+    check(np.abs(sides[1] - sides[0]).max() < 1e-6 and np.linalg.norm(after - before, axis=1).max() > 1e-3,
+          "fit: a small loose part keeps its shape as it moves ({:s})".format(mm(np.abs(sides[1] - sides[0]).max())))
+
+
+def test_fit_shape_keys_and_bones():
+    # Shape keys change with the groups, and bones move exactly like the points at their heads.
+    scene = fresh(fit=True)
+    model, armature = scene["vrc"], scene["vrc_armature"]
+    wave_before = fixture.world_positions(model, "Wave") - fixture.world_positions(model, "Basis")
+    fixture.select([model])
+    result = bpy.ops.magic_fit.line_up()
+    wave = fixture.world_positions(model, "Wave") - fixture.world_positions(model, "Basis")
+    hands = np.linalg.norm(wave_before, axis=1) > 1e-6
+    lengths = np.linalg.norm(wave[hands], axis=1) / (0.02 / fixture.VRC_JOINTS["scale"])
+    check(result == {'FINISHED'} and 0.8 < lengths.min() and lengths.max() < 1.25,
+          "fit: shape keys change with their groups ({:.2f} to {:.2f} of their length)".format(
+              lengths.min(), lengths.max()))
+    co = fixture.world_positions(model)
+    markers = {joint: co[v] for v, joint in scene["vrc_markers"].items()}
+    armature = bpy.data.objects["VRC Armature"]
+    heads = {name: np.array(armature.matrix_world @ bone.head_local) for name, bone in armature.data.bones.items()}
+    errors = [np.linalg.norm(heads[name] - markers[joint]) for name, joint in
+              (("Arm_L", "shoulder_l"), ("Elbow_R", "elbow_r"), ("Knee_L", "knee_l"), ("Leg_R", "hip_r"))]
+    check(max(errors) < 1e-5, "fit: bones move like the points at their joints ({:s})".format(mm(max(errors))))
+    shown = fixture.displayed_positions(model)
+    check(np.abs(shown - co).max() < 1e-5, "fit: at rest the armature leaves the fitted mesh where it is")
+
+
+def test_fit_shape_again():
+    # Lined up and fitted once, a second time changes little.
+    scene, model, _markers, _first = fit_scene(0.85)
+    start = fixture.world_positions(model)
+    fixture.select([model])
+    bpy.ops.magic_fit.line_up()
+    once = fixture.world_positions(model)
+    fixture.select([model])
+    bpy.ops.magic_fit.line_up()
+    twice = fixture.world_positions(model)
+    first, second = np.abs(once - start).max(), np.abs(twice - once).max()
+    check(second < 0.3 * first, "fit: fitting again changes little ({:s}, after {:s})".format(mm(second), mm(first)))
+
+
+def test_conjugate_gradient():
+    rng = np.random.default_rng(5)
+    count = 12
+    pairs = [(g, g) for g in range(count)] + [(g, g + 1) for g in range(count - 1)] + [(g + 1, g) for g in range(count - 1)]
+    dense = np.zeros((count * 9, count * 9))
+    blocks = {}
+    for a, b in pairs:
+        if a <= b:
+            block = rng.standard_normal((9, 9)) * 0.3
+            if a == b:
+                block = block @ block.T + 9.0 * np.eye(9)
+            blocks[(a, b)] = block
+            blocks[(b, a)] = block.T
+    for (a, b), block in blocks.items():
+        dense[9 * a:9 * a + 9, 9 * b:9 * b + 9] = block
+    rhs = rng.standard_normal((count, 9))
+    keys = sorted(blocks)
+    solution = lineup._conjugate_gradient(np.array([k[0] for k in keys]), np.array([k[1] for k in keys]),
+                                          np.array([blocks[k] for k in keys]), rhs, np.zeros((count, 9)))
+    exact = np.linalg.solve(dense, rhs.ravel()).reshape(count, 9)
+    check(np.abs(solution - exact).max() < 1e-6, "fit: conjugate gradients solve the block system")
 
 
 def test_readiness():
@@ -879,6 +1098,8 @@ def test_registered():
     properties = bpy.context.scene.body_fit_brush.bl_rna.properties
     check("lineup_stretch" in properties and properties["lineup_stretch"].default is False,
           "setting: lineup_stretch, off by default")
+    check("lineup_fit_shape" in properties and properties["lineup_fit_shape"].default is True,
+          "setting: lineup_fit_shape, on by default")
     panel = getattr(bpy.types, "VIEW3D_PT_line_up_sidebar", None)
     check(panel is not None and panel.tab == 'LINE_UP', "panel: on the Line Up tab")
 

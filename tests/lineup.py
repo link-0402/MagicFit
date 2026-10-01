@@ -226,11 +226,13 @@ def finger_chains(joints, side, curl=0.0, forward=(0.0, -1.0, 0.0)):
     return chains
 
 
-def build_humanoid(joints, bone_names, sides=("l", "r"), torso_only_head=False, fingers=None):
+def build_humanoid(joints, bone_names, sides=("l", "r"), torso_only_head=False, fingers=None, thickness=1.0):
     """Vertices, faces and weights of a humanoid built from tubes, and its markers (vertex index -> joint
     name). ``bone_names`` maps the chain joint names (hips, hip, knee...) to bone names, "{s}"/"{S}"
     standing for the side. With ``fingers`` (a curl in degrees, see `finger_chains`), each hand gets
-    finger tubes weighted to Thumb1_L... Little3_L, blending in from the hand's bone."""
+    finger tubes weighted to Thumb1_L... Little3_L, blending in from the hand's bone. ``thickness`` scales
+    every tube's radius."""
+    radii = {key: radius * thickness for key, radius in RADII.items()}
     def bone(key, side=None):
         name = bone_names[key]
         if side is not None:
@@ -247,7 +249,7 @@ def build_humanoid(joints, bone_names, sides=("l", "r"), torso_only_head=False, 
         weights.extend(w)
 
     torso_points = [joints["hips"] - np.array((0.0, 0.0, 0.12))] + [joints[k] for k in TORSO_CHAIN] + [joints["head_top"]]
-    add(tube(torso_points[1:], [bone(k) for k in TORSO_CHAIN], [RADII[k] for k in TORSO_CHAIN],
+    add(tube(torso_points[1:], [bone(k) for k in TORSO_CHAIN], [radii[k] for k in TORSO_CHAIN],
              bone("hips"), lead=0.12))
     for side in sides:
         feet = "toe_" + side in joints
@@ -261,13 +263,13 @@ def build_humanoid(joints, bone_names, sides=("l", "r"), torso_only_head=False, 
             keys = LEG_CHAIN[:2]
             names = [n + "_" + side for n in ("hip", "knee")]
             end = joints["ankle_" + side]
-        add(tube([joints[n] for n in names] + [end], [bone(k, side) for k in keys], [RADII[k] for k in keys],
+        add(tube([joints[n] for n in names] + [end], [bone(k, side) for k in keys], [radii[k] for k in keys],
                  bone("hips")))
         arm = [joints[n + "_" + side] for n in ("clavicle", "shoulder", "elbow", "wrist", "hand_end")]
-        add(tube(arm, [bone(k, side) for k in ARM_CHAIN], [RADII[k] for k in ARM_CHAIN], bone("spine_c")))
+        add(tube(arm, [bone(k, side) for k in ARM_CHAIN], [radii[k] for k in ARM_CHAIN], bone("spine_c")))
         if fingers is not None:
             for finger, points in finger_chains(joints, side, fingers).items():
-                add(tube(points, [finger_bone(finger, k, side) for k in (1, 2, 3)], [FINGER_RADIUS] * 3,
+                add(tube(points, [finger_bone(finger, k, side) for k in (1, 2, 3)], [FINGER_RADIUS * thickness] * 3,
                          bone("wrist", side), lead=0.012))
         # Markers: one vertex per joint, weighted to the bone starting there.
         for key, joint in (("hip", "hip"), ("knee", "knee"), ("ankle", "ankle"), ("clavicle", "clavicle"),

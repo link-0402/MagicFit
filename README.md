@@ -55,13 +55,15 @@ The **[Weight Brushes](docs/guide.md#weight-brushes)** fix weights where you pai
 
 **[Body Fit](docs/guide.md#body-fit)** is a sculpt brush for Edit Mode. It pushes clothing out of the body where it clips, pulls loose parts in, or both. All layers move together, so thickness and details survive, unlike with a Shrinkwrap.
 
+**[Fit Move](docs/guide.md#fit-move)** moves vertices like Blender's Move, but its proportional editing keeps to the mesh: moving the trousers on one inner thigh leaves the other leg alone, split seams stay closed, and the edge of a hidden part stays joined to it.
+
 **[Resize](docs/guide.md#resize)** moves clothing made for one body to another, such as YAB to Rue, and saves the result as a shape key. The whole outfit moves as one smooth piece, so it doesn't tear where the body changes a lot. A dress that hangs from the breasts keeps hanging from them when they grow.
 
 **[Clipping marks](docs/guide.md#clipping-marks)** show live, in pink, where your meshes clip into the body, even while it's posed or scaled by Customize+.
 
 ### Line Up
 
-**[Line Up](docs/guide.md#line-up)** takes a model from other games, turns and poses it so its hips, shoulders and limb joints land on the selected body's. The model keeps its own shape. It reads the common rigs by bone name, and models without a usable armature by their vertex groups.
+**[Line Up](docs/guide.md#line-up)** takes a model from other games, turns and poses it so its hips, shoulders and limb joints land on the selected body's. With Fit Shape, it then scales, turns and moves each bone a little so the model sits around the body, keeping its details. It reads the common rigs by bone name, and models without a usable armature by their vertex groups.
 Only tested against Sims 4, VRChat and Unreal Engine models for the time being. If you encounter an issue with a model from another game, please open an issue to let me know about it so I can extend this feature.
 
 ### Texture Relax

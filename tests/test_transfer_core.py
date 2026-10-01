@@ -250,6 +250,25 @@ class NumericalTests(unittest.TestCase):
         self.assertFalse(np.isin(seam, wt.fold_aware_free_borders(v, f, merge)).any())
         self.assertFalse(np.isin(seam, wt.free_border_vertices(v, f, merge)).any())
 
+        def rim_is_border(degrees, facing):
+            # Two layers meeting at y == 0, the lower one opening the given angle downwards. Back to back,
+            # the upper faces up and the lower down; facing each other, the other way round.
+            lower = front.copy()
+            lower[:, 2] = -np.tan(np.radians(degrees)) * lower[:, 1]
+            upper_faces, lower_faces = (ff[:, ::-1], ff) if facing else (ff, ff[:, ::-1])
+            v = np.vstack([front, lower])
+            f = np.vstack([upper_faces, lower_faces + len(front)])
+            merge = wt.find_vertex_merge_map(v, wt.BRIDGE_WELD)
+            # Without the corners, which end the open sides too.
+            rim = np.flatnonzero(np.isclose(v[:, 1], 0) & (v[:, 0] > 0.01) & (v[:, 0] < 0.09))
+            return np.isin(rim, wt.fold_aware_free_borders(v, f, merge))
+
+        # Layers 25° apart are a fold back to back, but facing each other they're two surfaces pinched
+        # together (like thighs that touch below a crotch seam) and go on. A 50° wedge isn't a fold either.
+        self.assertTrue(rim_is_border(25, facing=False).all())
+        self.assertFalse(rim_is_border(25, facing=True).any())
+        self.assertFalse(rim_is_border(50, facing=False).any())
+
     def test_forward_kinematics_turns_children_but_scales_only_the_bone(self):
         rest = np.tile(np.eye(4), (2, 1, 1))
         rest[1, :3, 3] = (0, 0, -0.4)

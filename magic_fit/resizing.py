@@ -422,7 +422,7 @@ class ShapeChange:
                                 self.source, self.target, tris, anchors=loose, progress=keep_progress)
         result = points[copies]
         if rigid is not None:
-            _keep_rigid(start, result, np.asarray(rigid))
+            keep_rigid(start, result, np.asarray(rigid))
         return result
 
 
@@ -501,7 +501,7 @@ def keep_close(start, moved, edges, source, target, tris, anchors=None, progress
     return points[weld]
 
 
-def _keep_rigid(before, after, groups):
+def keep_rigid(before, after, groups):
     """Move each group of points (label >= 0 in ``groups``) from ``before`` the rigid way (rotation and
     translation) that comes closest to where they are in ``after``, in place."""
     members = np.flatnonzero(groups >= 0)
