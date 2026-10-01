@@ -5,9 +5,14 @@
 .DESCRIPTION
     Runs every tests/test_*.py: the core tests headless, the UI tests in a
     Blender window that doesn't take focus (--no-window-focus), optionally
-    placed with -Position so it sits on another screen or in a corner while
-    you work. Prints one line per test and a summary, and exits non-zero if
-    any test failed. The last lines of a failing test's output are shown.
+    on your other screen (-OtherScreen) while you work. Prints one line per
+    test and a summary, and exits non-zero if any test failed. The last lines
+    of a failing test's output are shown.
+
+    The brush tests measure their brush in screen pixels against a model
+    framed to fit the window, so they expect a full-screen window like
+    Blender's own: in a smaller one the brush reaches further over the model
+    and checks like "only under the brush" fail.
 
     If Blender crashes, the script closes the "Blender has stopped working"
     dialog itself (it kills the process once the crash log is written), marks
@@ -20,10 +25,15 @@
     Blender executable. Defaults to Blender 5.2 in Program Files, else blender
     on PATH.
 
+.PARAMETER OtherScreen
+    Opens the UI test window full size on the first screen that isn't the
+    primary one, out of your way.
+
 .PARAMETER Position
-    X, Y, width and height of the UI test window, like Blender's -p. Y is
-    measured upward from the bottom of the whole desktop. Defaults to a small
-    window; leave it out to let Blender choose.
+    X, Y, width and height of the UI test window, like Blender's -p: the
+    window's top lands at (height of the whole desktop - Y - height). Left
+    out, Blender fills the primary screen. Brush tests fail in small windows
+    (see above).
 
 .PARAMETER Only
     Test names (without test_) to run, for example fit_core, fit_ui.
@@ -38,7 +48,7 @@
     .\tools\run-tests.ps1
 
 .EXAMPLE
-    .\tools\run-tests.ps1 -Position 1920,0,1280,720
+    .\tools\run-tests.ps1 -OtherScreen
 
 .EXAMPLE
     .\tools\run-tests.ps1 -Only fit_core,fit_ui
@@ -46,6 +56,7 @@
 [CmdletBinding()]
 param(
     [string] $BlenderPath = '',
+    [switch] $OtherScreen,
     [int[]] $Position = @(),
     [string[]] $Only = @(),
     [switch] $SkipUi,
@@ -61,6 +72,18 @@ if (-not $BlenderPath) {
     $BlenderPath = if (Test-Path $default) { $default } else { (Get-Command blender).Source }
 }
 if ($Position.Count -ne 0 -and $Position.Count -ne 4) { throw '-Position needs X, Y, width and height.' }
+if ($OtherScreen) {
+    Add-Type -AssemblyName System.Windows.Forms
+    $screen = [System.Windows.Forms.Screen]::AllScreens | Where-Object { -not $_.Primary } | Select-Object -First 1
+    if (-not $screen) { throw 'There is no screen besides the primary one.' }
+    $area = $screen.WorkingArea
+    $desktop = [System.Windows.Forms.SystemInformation]::VirtualScreen
+    # Blender puts a window's top (below its title bar) at desktop height - Y - height, in screen coordinates.
+    # A window as wide as the screen is maximized there, the size Blender opens at on the primary screen.
+    $titleBar = [System.Windows.Forms.SystemInformation]::CaptionHeight
+    $height = $area.Height - $titleBar
+    $Position = @($area.X, ($desktop.Height - $height - ($area.Y + $titleBar)), $area.Width, $height)
+}
 
 $core = 'core','fit_core','move_core','straighten_core','skirt_core','heels_core','smooth_core','hair_core',
         'face_core','relax_core','resize_core','lineup_core','transfer_core','cplus_core'
