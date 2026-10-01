@@ -39,5 +39,6 @@ def unregister():
     painting.clear_cache()
     smoothing.clear_cache()
     fitting.BodySurface.clear_cache()
+    fitting.FitStroke.clear_cache()
     operators.clear_follow_cache()
     facing.clear_cache()

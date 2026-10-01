@@ -139,6 +139,11 @@ FACING_FULL = 0.0
 FACING_COSINE = 0.0
 # ...up to this far (in metres) past the closest body point, or Keep Together if that is farther.
 GAP_REACH = 0.03
+# Push Out gets such a vertex out of the part it has sunk into the shortest way, along that part's normal,
+# but only where that leads to at least this share of the offset clear of the rest of the body. In a
+# crease it doesn't: out of one side leads into the other, and the vertex would be kicked back and forth
+# across the crease line, bunching the mesh up there.
+EXIT_CLEARANCE = 0.5
 # Where the mesh faces the way of the body's normal at a vertex's closest point within this cosine (about
 # 37 degrees; a mesh spanning a right-angled crease faces its sides at 45), it lies along the body rather
 # than spanning a crease: the vertex turns from the normal smoothed over Keep Together toward that one,
@@ -903,6 +908,10 @@ class FitStroke:
     # after stroke over the same mesh, building that list took half the time to build the tree.
     _tri_list = (None, None)
 
+    @classmethod
+    def clear_cache(cls):
+        cls._tri_list = (None, None)
+
     def __init__(
             self, body, co, movable, *,
             mode='PUSH', offset=0.002, layer_radius=0.02, max_distance=None, edges=None, tris=None, smooth=0.0,
@@ -1230,6 +1239,9 @@ class FitStroke:
             # Faded stacks take on only part of what their neighbours share, and head for between that
             # and their anchor's height. Going over them again doesn't move them farther.
             own = stack[faded] if floor is None else np.maximum(stack[faded], floor[faded])
+            # Spots with nothing but vertices on their own (see `_contact`) have no stack: they head for the
+            # offset alone and take nothing from here, but the blend stays a number.
+            own = np.where(np.isfinite(own), own, 0.0)
             part = spot_fade[faded]
             shared = np.where(known[faded], target[faded], own)
             blend = part * (own + part * np.maximum(shared - own, 0.0)) + (1.0 - part) * to_anchor[faded]
@@ -1423,18 +1435,26 @@ class FitStroke:
         corners = self.tris[tris]
         facing = self.tri_unit[tris]
 
-        def upright(points):
-            a, b, c = (points[corners[:, k]] for k in range(3))
+        def upright(points, rows):
+            a, b, c = (points[rows[:, k]] for k in range(3))
             return np.einsum("ij,ij->i", np.cross(b - a, c - a), facing) > 0.0
-        keep = upright(self.co)
+        keep = upright(self.co, corners)
         corners, facing = corners[keep], facing[keep]
         if not len(corners):
             return indices, motion
-        moves = np.zeros((len(self.co), 3))
+        # Only the corners of these triangles are looked at, so the moves are kept for those alone (the
+        # mesh can be a lot larger than the brush).
+        verts, rows = np.unique(corners, return_inverse=True)
+        rows = rows.reshape(corners.shape)
+        base = self.co[verts]
+        slot = np.minimum(np.searchsorted(verts, indices), len(verts) - 1)
+        there = verts[slot] == indices
+        slot = slot[there]
+        moves = np.zeros((len(verts), 3))
         scale = np.ones(len(indices))
         for attempt in range(FOLD_TRIES + 1):
-            moves[indices] = scale[:, None] * motion
-            over = ~upright(self.co + moves)
+            moves[slot] = (scale[:, None] * motion)[there]
+            over = ~upright(base + moves, rows)
             if not over.any():
                 break
             # Whole welded groups halve their steps.
@@ -1864,17 +1884,20 @@ class FitStroke:
         other thigh) moves just as the spot it rides on does instead, rather than being turned sideways
         toward that body. Returns the riders that moved, their motion appended to ``motion``, and how
         much of it each needs to get out of the body (see `_out_of`)."""
-        moves = np.zeros((len(self.co), 3))
-        moves[indices] = motion
         corners = self.tris[self.carrier[riders]]
         bary = self.carrier_bary[riders]
+        # Moves are kept for the vertices that matter: those that move, the riders and what they ride on.
+        verts = np.unique(np.concatenate((indices, riders, corners.reshape(-1))))
+        moves = np.zeros((len(verts), 3))
+        moves[np.searchsorted(verts, indices)] = motion
+        corners, here = np.searchsorted(verts, corners), np.searchsorted(verts, riders)
         for _ in range(2):
-            moves[riders] = np.einsum("ij,ijk->ik", bary, moves[corners])
-        rise = np.einsum("ij,ij->i", moves[riders], near.normal)
+            moves[here] = np.einsum("ij,ijk->ik", bary, moves[corners])
+        rise = np.einsum("ij,ij->i", moves[here], near.normal)
         rise = np.maximum(rise, np.minimum(self.offset - near.distance, 0.0))
         astray = np.einsum("ij,ij->i", direction, near.normal) < FACING_COSINE
         direction, gain = self._turn(direction, near.normal)
-        carried = np.where(astray[:, None], moves[riders], (rise / gain)[:, None] * direction)
+        carried = np.where(astray[:, None], moves[here], (rise / gain)[:, None] * direction)
         moving = np.abs(carried).max(axis=1) > 1e-12
         out = _out_of(near.distance[moving], np.einsum("ij,ij->i", carried[moving], near.normal[moving]))
         return riders[moving], np.concatenate((motion, carried[moving])), out
@@ -1889,8 +1912,9 @@ class FitStroke:
 
         - ``alone``: vertices closer to that other part than the offset, or in it, that their line finds
           no part of the body to measure from, or any with Push Out (which never pulls them in toward
-          the part they face). They move out of the other part the shortest way, along its normal, on
-          their own: they share nothing with the vertices around them, which head the other way.
+          the part they face), unless the shortest way out of the other part leads into another one (a
+          crease, see ``EXIT_CLEARANCE``). They move out of the other part the shortest way, along its
+          normal, on their own: they share nothing with the vertices around them, which head the other way.
         - ``lost``: the others that their line finds no part of the body for. They are too far from the
           part they face to tell where it is, and are left where they are.
         """
@@ -1912,9 +1936,10 @@ class FitStroke:
         sunk into that other part. They take where the line back from them meets the body from the side
         they face (past the part they have sunk into, see `BodySurface.along`) if that is within
         ``GAP_REACH`` (or Keep Together) of the closest point and doesn't graze it (see ``MIN_GAIN``).
-        With ``clear``, only those at least the offset clear of the other part do. Directions of zero
-        length face no way and keep ``near``. Returns (near, the rows of those facing away, which of them
-        found the body along their line)."""
+        With ``clear``, only those at least the offset clear of the other part do, and those the shortest
+        way out of it (along its normal) doesn't lead clear of the body (see ``EXIT_CLEARANCE``). Directions
+        of zero length face no way and keep ``near``. Returns (near, the rows of those facing away, which
+        of them found the body along their line)."""
         facing = np.einsum("ij,ij->i", directions, directions) > 0.0
         away = np.flatnonzero(facing & (np.einsum("ij,ij->i", directions, near.normal) < FACING_COSINE))
         if not len(away):
@@ -1923,13 +1948,23 @@ class FitStroke:
         line = self.body.along(self.co[vertices[away]], directions[away], limits, through=True)
         found = line.found & (np.einsum("ij,ij->i", directions[away], line.normal) >= MIN_GAIN)
         if clear:
-            found &= near.distance[away] >= self.offset
+            unclear = np.flatnonzero(found & (near.distance[away] < self.offset))
+            if len(unclear):
+                found[unclear] = self._exit_blocked(vertices[away[unclear]], near.take(away[unclear]))
         if found.any():
             near = near.take(np.ones(len(vertices), dtype=bool))
             mask = np.zeros(len(vertices), dtype=bool)
             mask[away[found]] = True
             near.put(mask, line.take(found))
         return near, away, found
+
+    def _exit_blocked(self, vertices, near):
+        """Which of ``vertices``, closer to the body than the offset (``near``: their closest points), the
+        shortest way out of the part they are closest to, along its normal, would take less than
+        ``EXIT_CLEARANCE`` of the offset clear of the body: into another part of it, as in a crease."""
+        lift = (self.offset - near.distance)[:, None] * near.normal
+        there = self.body.nearest(self.co[vertices] + lift)
+        return there.found & (there.distance < self.offset * EXIT_CLEARANCE - 1e-6)
 
     @staticmethod
     def _turn(direction, normal, least=MIN_GAIN):
@@ -2029,23 +2064,28 @@ class FitStroke:
         if not active.any() or self.pairs <= 0.0:
             return shift
         # Where each vertex heads for, from its reference position: as far as it has come, for those
-        # that aren't candidates.
-        heading = self.co - self.start
-        heading[candidates] = aim[:, None] * direction
+        # that aren't candidates. Kept for the vertices that matter: the candidates, the riders and what
+        # they ride on (the mesh can be a lot larger than the brush).
         members = candidates
+        corners = None
         if riders is not None and len(riders):
             corners = self.tris[self.carrier[riders]]
-            bary = self.carrier_bary[riders]
-            for _ in range(2):
-                heading[riders] = np.einsum("ij,ijk->ik", bary, heading[corners])
             members = np.concatenate((candidates, riders))
+        verts = np.unique(members if corners is None else np.concatenate((members, corners.reshape(-1))))
+        heading = self.co[verts] - self.start[verts]
+        heading[np.searchsorted(verts, candidates)] = aim[:, None] * direction
+        if corners is not None:
+            bary = self.carrier_bary[riders]
+            corners, here = np.searchsorted(verts, corners), np.searchsorted(verts, riders)
+            for _ in range(2):
+                heading[here] = np.einsum("ij,ijk->ik", bary, heading[corners])
         unique, inverse = np.unique(self.weld[members], return_inverse=True)
         inverse = inverse.reshape(-1)
         edges = self._local_edges(unique)
         if not len(edges):
             return shift
         points = np.zeros((len(unique), 3))
-        points[inverse] = self.start[members] + heading[members]
+        points[inverse] = self.start[members] + heading[np.searchsorted(verts, members)]
         held = np.ones(len(unique), dtype=bool)
         held[inverse[:len(candidates)]] = False
         original = points.copy()
