@@ -184,6 +184,7 @@ def steps():
         bpy.ops.ed.undo()
     yield 0.3
     obj = bpy.data.objects["Strips"]
+    tool_settings = bpy.context.scene.tool_settings
     check(np.array_equal(positions(obj), start), "undo restored every vertex")
 
     # --- G, along Z only, a larger proportional size (wheel), confirmed with a click.
@@ -210,6 +211,7 @@ def steps():
         bpy.ops.ed.undo()
     yield 0.3
     obj = bpy.data.objects["Strips"]
+    tool_settings = bpy.context.scene.tool_settings
     tool_settings.proportional_size = 0.032
 
     # --- Esc puts everything back.

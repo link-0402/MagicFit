@@ -148,6 +148,8 @@ def steps():
     with env.override(sidebar):
         result = bpy.ops.magic_fit.line_up('EXEC_DEFAULT', True, fit_shape=True)
     yield 0.4
+    # The undo above freed the settings read before it: reading or writing them crashes Blender, now or later.
+    settings = bpy.context.scene.body_fit_brush
     error = marker_error(markers)
     check(result == {'FINISHED'} and 1e-4 < error < 0.02 and settings.lineup_fit_shape is True,
           "fit shape: the joints stay near the body's ({:.1f} mm), and the panel's setting follows".format(1000 * error))

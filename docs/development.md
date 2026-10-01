@@ -57,13 +57,15 @@ foreach ($t in 'ui','fit_ui','fit_deformed_ui','move_ui','straighten_ui','skirt_
 
 To run one test, use its line alone, for example `blender -b --factory-startup --python tests/test_fit_core.py`.
 
-`tools/run-tests.ps1` runs all of them (including the Fit Move tests) without taking over your desktop: the UI window doesn't take focus, `-Position X,Y,width,height` parks it on another screen, and a Blender crash is closed by the script instead of leaving its "stopped working" dialog open. It prints one line per test and exits non-zero if any failed. `-Only fit_core,fit_ui` runs a few, `-SkipUi` the headless ones, `-SkipFace` leaves out Face.
+`tools/run-tests.ps1` runs all of them (including the Fit Move tests) without taking over your desktop: the UI window doesn't take focus, `-OtherScreen` opens it full size on your second screen, and a Blender crash is closed by the script instead of leaving its "stopped working" dialog open. It prints one line per test and exits non-zero if any failed. `-Only fit_core,fit_ui` runs a few, `-SkipUi` the headless ones, `-SkipFace` leaves out Face.
 
 ```
-.\tools\run-tests.ps1 -Position 1920,0,1280,720
+.\tools\run-tests.ps1 -OtherScreen
 ```
 
-Known issue: `test_lineup_ui.py` crashes Blender (an access violation inside a `line_up` or edit-mode toggle call) in roughly half of its runs, on main as well as on branches, and passes when it doesn't crash. Run it again before reading anything into one crash.
+The brush tests need a full-screen window: their brush is measured in pixels against a model framed to fit the window, so in a smaller one (even 1920×1080) it reaches further and checks like "only under the brush" fail.
+
+When writing a UI test: undo and redo reload the scene and free what Python read from it before, from objects and meshes down to `scene.body_fit_brush`. Look everything up again after them. Reading or writing such a leftover doesn't raise an error: it crashes Blender, in some runs and not others, often later and somewhere unrelated (freeing an operator's properties, a depsgraph update).
 
 - **Screenshots:** set `MF_SCREENSHOTS` to a folder to keep them.
 - **Windows:** add `--no-window-focus` to keep the UI tests out of your way, and `-p x y width height` to place them, for example on another screen. Blender measures `y` upward from the bottom of the whole desktop.
