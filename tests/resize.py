@@ -6,7 +6,7 @@ Body: the front of a torso with two breasts (meters, y < 0 is the front). Its ba
 its shape key "Small" pulls each breast toward its center to 45 % of its size, fading out toward its
 base, like a devkit's size key. The breasts' fronts move back by 3.5 cm while the chest around them
 stays put. Its UV map is the chest seen from the front; `coarse_body` makes another body with other
-vertices but the same UV layout, like another body mod's.
+vertices but the same UV layout, like another body mod's, or without a UV map, like another game's.
 
 Garments, all fitted to the large breasts:
 - "Suit": skin tight, 3 mm off the chest (along its normals), following it into the cleavage.
@@ -118,9 +118,10 @@ def add_uvs(obj, uv):
 
 
 def body_object(name, large, small, quads, uv):
-    """A body mesh with UVs ``uv`` and a shape key "Small" (off)."""
+    """A body mesh with UVs ``uv`` (None for no UV map) and a shape key "Small" (off)."""
     obj = mesh_object(name, large, quads)
-    add_uvs(obj, uv)
+    if uv is not None:
+        add_uvs(obj, uv)
     obj.shape_key_add(name="Basis", from_mix=False)
     key = obj.shape_key_add(name="Small", from_mix=False)
     key.data.foreach_set("co", np.asarray(small).astype(np.float32).ravel())
@@ -134,9 +135,10 @@ COARSE_ZS = np.linspace(ZS[0], ZS[-1], 37)
 
 
 def coarse_body(name="Coarse Body", uv=body_uvs):
-    """The body again with other, fewer vertices (like another body mod) and the same UV layout."""
+    """The body again with other, fewer vertices (like another body mod) and the same UV layout; with ``uv``
+    None, without a UV map (like a body from another game)."""
     large, small, quads = body_shapes(COARSE_XS, COARSE_ZS)
-    return body_object(name, large, small, quads, uv(large))
+    return body_object(name, large, small, quads, None if uv is None else uv(large))
 
 
 def offset_sheet(xs, zs, offset):

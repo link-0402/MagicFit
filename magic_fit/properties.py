@@ -929,11 +929,29 @@ class BodyFitBrushSettings(bpy.types.PropertyGroup):
     resize_to_object: PointerProperty(
         name="To Body",
         description=(
-            "The body to fit the meshes to: a copy of the From body in another shape, or another body with the "
-            "same UV layout (like Rue for RueXB). Empty: the From body"
+            "The body to fit the meshes to: a copy of the From body in another shape, or another body, matched "
+            "to it as Match By says. Empty: the From body"
         ),
         type=bpy.types.Object,
         poll=_poll_mesh,
+    )
+    resize_match: EnumProperty(
+        name="Match By",
+        description="How to tell which spot of the To body each spot of the From body is, when they're different meshes",
+        items=(
+            ('AUTO', "Auto",
+             "By vertices when the To body is a copy of the From body, else by UV map when the bodies share a "
+             "layout, else by shape"),
+            ('VERTICES', "Vertices",
+             "Vertex by vertex: the To body is a copy of the From body in another shape"),
+            ('UV', "UV Map",
+             "By the UV maps, for bodies made for the same skin textures, like RueXB and Rue"),
+            ('SHAPE', "Shape",
+             "By shape, for bodies of any kind lying on each other, like an outfit's own body from another game "
+             "lined up on the Mannequin: each spot goes to the closest spot of the To body. Hands, feet and "
+             "heads follow the rest"),
+        ),
+        default='AUTO',
     )
     resize_to_key: StringProperty(
         name="To Shapekey",

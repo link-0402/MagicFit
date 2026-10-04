@@ -1073,6 +1073,9 @@ class VIEW3D_PT_resize_sidebar(tabs.TabPanel, bpy.types.Panel):
         row.alert = body is None
         row.prop(settings, "resize_from_object")
         col.prop(settings, "resize_to_object")
+        row = col.row()
+        row.active = settings.resize_to_object not in (None, body)
+        row.prop(settings, "resize_match")
         col.prop(settings, "resize_use_keys")
         if settings.resize_use_keys:
             _draw_key_search(col, settings, "resize_from_key", body, "From Shapekey")
