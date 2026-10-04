@@ -14,6 +14,8 @@ from .operators import (
     MAGIC_FIT_OT_body_fit,
     MAGIC_FIT_OT_connect_parts,
     MAGIC_FIT_OT_detect_face,
+    MAGIC_FIT_OT_face_meshes_clear,
+    MAGIC_FIT_OT_face_meshes_from_selection,
     MAGIC_FIT_OT_face_pose,
     MAGIC_FIT_OT_face_repair,
     MAGIC_FIT_OT_face_weights,
@@ -288,6 +290,40 @@ def _draw_face_experimental(layout):
     box = layout.box().column(align=True)
     box.label(text="Experimental", icon='EXPERIMENTAL')
     box.label(text="Check the results in the game", icon='BLANK1')
+
+
+def _draw_face_list(layout, settings, prop, add, label):
+    """A list of the Face panel's Meshes: a picker per mesh (clearing one takes it off the list), and an empty picker
+    below for the next."""
+    items = [item for item in getattr(settings, prop) if item.object is not None]
+    for index, item in enumerate(items):
+        layout.prop(item, "object", text=label if index == 0 else " ")
+    layout.prop(settings, add, text=" " if items else label, icon='ADD')
+
+
+def _draw_face_meshes(layout, settings):
+    """Face Weights' Meshes: the face and each of its parts, set by hand or from the selection."""
+    box = layout.box()
+    col = box.column()
+    col.label(text="Meshes", icon='OUTLINER_OB_MESH')
+    col.prop(settings, "face_skin")
+    col.prop(settings, "face_eyeballs")
+    _draw_face_list(col, settings, "face_lashes", "face_add_lash", "Lashes")
+    col.separator(factor=0.5)
+    col.prop(settings, "face_teeth")
+    col.prop(settings, "face_tongue")
+    col.prop(settings, "face_mouth")
+    col.prop(settings, "face_tongue_piercing")
+    col.separator(factor=0.5)
+    _draw_face_list(col, settings, "face_others", "face_add_other", "Other Parts")
+    row = col.row(align=True)
+    row.use_property_split = False
+    row.operator(MAGIC_FIT_OT_face_meshes_from_selection.bl_idname, icon='RESTRICT_SELECT_OFF')
+    row.operator(MAGIC_FIT_OT_face_meshes_clear.bl_idname, text="", icon='TRASH')
+    if settings.face_skin is None:
+        hint = col.column(align=True)
+        hint.label(text="No Face set: the face tools use", icon='INFO')
+        hint.label(text="the selected meshes", icon='BLANK1')
 
 
 def _draw_face_main(layout, settings):
@@ -911,6 +947,7 @@ class VIEW3D_PT_face_weights_sidebar(tabs.TabPanel, bpy.types.Panel):
         col = layout.column()
         _draw_face_experimental(col)
         _draw_game_face(col, settings)
+        _draw_face_meshes(col, settings)
         col.prop(settings, "face_close_eyes")
         col.prop(settings, "face_match_neck")
         col.prop(settings, "face_max_groups")

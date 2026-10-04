@@ -5,6 +5,7 @@ They need FFXIV installed where Magic Fit finds it by itself. Run from the repos
     blender -b --factory-startup --python tests/test_face_core.py
 """
 
+import math
 import os
 import shutil
 import struct
@@ -15,6 +16,7 @@ import zipfile
 
 import bpy
 import numpy as np
+from mathutils import Quaternion
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -40,7 +42,267 @@ def use_settings(**values):
     defaults.update(values)
     for key, value in defaults.items():
         setattr(settings, key, value)
+    operators.clear_face_meshes(settings)
     return settings
+
+
+def set_meshes(settings, objects, socket=True):
+    """Set the Face panel's Meshes to the parts of `face.build_mouth`'s ``objects``."""
+    settings.face_skin = objects["skin"]
+    settings.face_eyeballs = objects["eye_l"]
+    settings.face_others.add().object = objects["eye_r"]
+    settings.face_teeth = objects["teeth"]
+    settings.face_tongue = objects["tongue"]
+    settings.face_mouth = objects["socket"] if socket else None
+    settings.face_tongue_piercing = objects["piercing"]
+
+
+def check_mouth(objects, info, what, race=face.RACE, number=face.NUMBER, welded=False):
+    """Each row of teeth on its own gum bone, the tongue with the game's tongue weights, the box lining the mouth
+    following the teeth on its side, the barbell moving as one piece with the tongue. Posed in the game's Talk
+    expression, the lower row moves and the upper doesn't, and the box passes through no teeth; with the tongue bones
+    bent, the barbell stays where it sits on the tongue."""
+    data = face.reference(race, number)
+    names = data.names
+    teeth = face.weights_of(objects["teeth"], names)[:len(info["upper"])]
+    upper, lower = names.index("j_f_hagukiup"), names.index("j_f_hagukidn")
+    rows = info["upper"]
+    own = np.where(rows, teeth[:, upper], teeth[:, lower])
+    # Rows joined into one piece hand over from one bone to the other within a millimetre of where they join.
+    check(own.min() > (0.5 if welded else 0.99) and (own > 0.99).mean() > 0.95,
+          "{:s}: each row of teeth follows its own gum bone (least {:.2f}, {:.0%} fully)".format(
+              what, own.min(), (own > 0.99).mean()))
+    _region, _teeth, _rows, (_points, _tris, game_tongue, _bvh) = data.mouth()
+    tongue = face.weights_of(objects["tongue"], names)[info["tongue"]]
+    error = 0.5 * np.abs(tongue - game_tongue).sum(1)
+    check(error.max() < 0.02,
+          "{:s}: the tongue has the game's tongue weights ({:.3f} off at most)".format(what, error.max()))
+    piercing = face.weights_of(objects["piercing"], names)
+    on_tongue = piercing[:, column(names, "j_f_bero")].sum(1)
+    tongue_points = face.points_of(objects["tongue"])[info["tongue"]]
+    nearest = np.argmin(np.linalg.norm(tongue_points[:, None] - face.points_of(objects["piercing"]).mean(0), axis=2))
+    like = 0.5 * np.abs(piercing[0] - tongue[nearest]).sum()
+    check(np.abs(piercing - piercing[0]).max() < 0.002 and on_tongue.min() > 0.5 and like < 0.2,
+          "{:s}: the barbell moves as one piece with the tongue ({:.2f} on the tongue bones, {:.2f} off the tongue's "
+          "weights where it sits)".format(what, on_tongue.min(), like))
+    socket_object = objects.get("socket", objects["skin"])
+    socket = face.weights_of(socket_object, names)[info["socket"]]
+    points = face.points_of(socket_object)[info["socket"]]
+    roof = points[:, 2] > points[:, 2].max() - 1e-6
+    roof_up = (socket[roof, upper] > socket[roof, lower]).mean()
+    # It takes the tongue bones' weight only where the face around it has some (the game's mouth floor by the tongue's
+    # root), never the tongue's.
+    skin_tongue = face.weights_of(objects["skin"], names)[:, column(names, "j_f_bero")].sum(1).max()
+    socket_tongue = socket[:, column(names, "j_f_bero")].sum(1).max()
+    check(roof_up >= 0.6 and socket_tongue <= skin_tongue + 0.01,
+          "{:s}: the box lining the mouth follows the upper teeth at its roof ({:.0%}), never the tongue ({:.2f} on "
+          "the tongue bones at most, the face around it {:.2f})".format(what, roof_up, socket_tongue, skin_tongue))
+    # In the game's Talk expression the jaw opens: the lower row moves, the upper one doesn't.
+    skin = objects["skin"]
+    bpy.context.view_layer.objects.active = skin
+    keys = ("teeth", "tongue", "piercing", "skin") + (("socket",) if "socket" in objects else ())
+    rest = {key: posed_points(objects[key]) for key in keys}
+    check(bpy.ops.magic_fit.face_pose(pose='TALK') == {'FINISHED'}, "{:s}: the Talk test pose".format(what))
+    posed = {key: posed_points(objects[key]) for key in keys}
+    moved = np.linalg.norm(posed["teeth"] - rest["teeth"], axis=1)[:len(rows)]
+    whole = own > 0.99
+    check(moved[rows & whole].max() < 0.0005 and moved[~rows & whole].min() > 0.0005,
+          "{:s}: in the Talk pose every lower tooth moves with the jaw ({:.1f} mm at least), no upper one does "
+          "({:.2f} mm at most)".format(what, moved[~rows & whole].min() * 1000, moved[rows & whole].max() * 1000))
+    # As the mouth opens the box never passes through the teeth, and through the face less than weighted by hand
+    # (roof on the upper gum bone, floor on the lower): counting its triangles crossing theirs that didn't at rest.
+    # (Here the face keeps the game's own mouth lining too, which the box partly overlaps.)
+    box_key = "socket" if "socket" in objects else "skin"
+    box_tris = face._subset(rest[box_key], facing.mesh_tris(objects[box_key].data),
+                            np.isin(np.arange(len(rest[box_key])), info["socket"]))[1]
+    face_tris = facing.mesh_tris(skin.data)
+    if box_key == "skin":
+        in_box = np.zeros(len(rest["skin"]), dtype=bool)
+        in_box[info["socket"]] = True
+        face_tris = face_tris[~in_box[face_tris].any(1)]
+    teeth_tris = facing.mesh_tris(objects["teeth"].data)
+    teeth_tris = teeth_tris[np.all(teeth_tris < len(rows), axis=1)]
+    others = [("skin", face_tris), ("teeth", teeth_tris)]
+    hand = np.zeros((len(points), len(names)))
+    hand[:, upper] = points[:, 2] > 0.5 * (points[:, 2].min() + points[:, 2].max())
+    hand[:, lower] = 1.0 - hand[:, upper]
+    boxes = {"rest": rest[box_key][info["socket"]], "planned": posed[box_key][info["socket"]],
+             "by hand": facing.skin_points(points, names, hand, data.skeleton.deformations('TALK'))}
+
+    def crossings(box_points, state):
+        box = facing.bvh_of(box_points, box_tris)
+        return {(key, pair) for key, tris in others for pair in box.overlap(facing.bvh_of(state[key], tris))}
+
+    at_rest = crossings(boxes["rest"], rest)
+    new = {label: crossings(boxes[label], posed) - at_rest for label in ("planned", "by hand")}
+    count = {label: len({pair[0] for _key, pair in found}) for label, found in new.items()}
+    teeth_crossed = len({pair[0] for key, pair in new["planned"] if key == "teeth"})
+    check(teeth_crossed == 0 and count["planned"] <= count["by hand"],
+          "{:s}: in the Talk pose the box passes through no teeth, and through the face at {:d} of its {:d} triangles "
+          "(weighted by hand: {:d})".format(what, count["planned"], len(box_tris), count["by hand"]))
+    # The game's expressions move the tongue with the jaw, which hides a barbell slipping along it: bend the tongue
+    # bones themselves.
+    bpy.ops.magic_fit.face_pose(pose='REST')
+    armature = armature_of(skin)
+    for name in ("j_f_bero_02", "j_f_bero_03"):
+        bone = armature.pose.bones[name]
+        bone.rotation_mode = 'QUATERNION'
+        bone.rotation_quaternion = Quaternion((1.0, 0.0, 0.0), math.radians(25.0))
+    bpy.context.view_layer.update()
+    bent = {key: posed_points(objects[key]) for key in ("tongue", "piercing")}
+    tongue_tris = face._subset(rest["tongue"], facing.mesh_tris(objects["tongue"].data),
+                               np.isin(np.arange(len(rest["tongue"])), info["tongue"]))[1]
+    gaps = []
+    for state in (rest, bent):
+        bvh = facing.bvh_of(state["tongue"][info["tongue"]], tongue_tris)
+        gaps.append(facing.nearest_on(bvh, state["piercing"])[2])
+    tip_moved = np.linalg.norm(bent["tongue"] - rest["tongue"], axis=1).max()
+    drift = np.abs(gaps[1] - gaps[0]).max()
+    check(tip_moved > 0.003 and drift < 0.0003,
+          "{:s}: with the tongue bent ({:.1f} mm), the barbell stays where it sits on it ({:.2f} mm off at "
+          "most)".format(what, tip_moved * 1000, drift * 1000))
+    bpy.ops.magic_fit.face_pose(pose='REST')
+
+
+def test_mouth():
+    """A face whose mouth comes in parts: its teeth 2 mm lower than the game's (as resculpted faces have them), a
+    tongue, a box lining the mouth and a barbell through the tongue; from the selection, set on the Face panel, with
+    the teeth and tongue in one mesh, with the box a loose part of the face, with the rows joined into one piece and
+    the tongue resculpted, and on a race with a long tongue (Hyur males) and a small one (Lalafell)."""
+    for what, picked, options, race in (
+            ("mouth, selected", False, {}, face.RACE),
+            ("mouth, set as Meshes", True, {}, face.RACE),
+            ("mouth, teeth and tongue in one mesh", True, dict(joined=True), face.RACE),
+            ("mouth, the box in the face's mesh", False, dict(socket_in_skin=True), face.RACE),
+            ("mouth, rows in one piece, tongue resculpted", False,
+             dict(welded=True, tongue_move=(0.0, 0.003, -0.001), tongue_scale=1.15), face.RACE),
+            ("mouth, Hyur male", False, {}, "c0101"),
+            ("mouth, Lalafell", False, {}, "c1101")):
+        face.clear_scene()
+        settings = use_settings()
+        objects, info = face.build_mouth(race=race, **options)
+        skin = objects["skin"]
+        if picked:
+            set_meshes(settings, objects, socket="socket" in objects)
+            face.select([], None)
+        else:
+            face.select(objects.values(), skin)
+        check(bpy.ops.magic_fit.face_weights() == {'FINISHED'}, "{:s}: Face Weights".format(what))
+        check_mouth(objects, info, what, race=race, welded=options.get("welded", False))
+
+
+def test_mouth_cases():
+    """Without a tongue, no row of teeth is taken for one; a barbell joined into the tongue's mesh, set as the Tongue
+    and the Tongue Piercing, still moves as one piece on the tongue, which keeps the game's tongue weights."""
+    for race in (face.RACE, "c1101"):
+        face.clear_scene()
+        use_settings()
+        objects, info = face.build_mouth(race=race)
+        for key in ("tongue", "piercing"):
+            bpy.data.objects.remove(objects.pop(key))
+        face.select(objects.values(), objects["skin"])
+        check(bpy.ops.magic_fit.face_weights() == {'FINISHED'}, "no tongue ({:s}): Face Weights".format(race))
+        names = face.reference(race).names
+        teeth = face.weights_of(objects["teeth"], names)
+        rows = info["upper"]
+        own = np.where(rows, teeth[:, names.index("j_f_hagukiup")], teeth[:, names.index("j_f_hagukidn")])
+        check(own.min() > 0.99 and teeth[:, column(names, "j_f_bero")].sum() == 0.0,
+              "no tongue ({:s}): both rows stay on their gum bones, none on the tongue's ({:.2f} least)".format(
+                  race, own.min()))
+    face.clear_scene()
+    settings = use_settings()
+    objects, info = face.build_mouth()
+    tongue, piercing = objects["tongue"], objects["piercing"]
+    points = np.vstack([face.points_of(tongue), face.points_of(piercing)])
+    tris = np.vstack([facing.mesh_tris(tongue.data), facing.mesh_tris(piercing.data) + len(tongue.data.vertices)])
+    count = len(tongue.data.vertices)
+    for key in ("tongue", "piercing"):
+        bpy.data.objects.remove(objects.pop(key))
+    joined = face._object("Tongue and Barbell", points, tris)
+    objects["tongue"] = objects["piercing"] = joined
+    set_meshes(settings, objects)
+    face.select([], None)
+    check(bpy.ops.magic_fit.face_weights() == {'FINISHED'}, "pierced tongue: Face Weights")
+    data = face.reference()
+    weights = face.weights_of(joined, data.names)
+    barbell = weights[count:]
+    game_tongue = data.mouth()[3][2]
+    error = 0.5 * np.abs(weights[:count] - game_tongue).sum(1)
+    check(np.abs(barbell - barbell[0]).max() < 0.002 and barbell[0, column(data.names, "j_f_bero")].sum() > 0.5
+          and error.max() < 0.02,
+          "pierced tongue: the barbell in the tongue's mesh moves as one piece on the tongue, which keeps the game's "
+          "tongue weights ({:.3f} off at most)".format(error.max()))
+
+
+def test_mesh_rules():
+    """With Meshes set: a repair changes only the selected meshes among them; the brush paints only meshes under
+    Meshes; a mesh there taken out of the scene is reported, not used."""
+    face.clear_scene()
+    settings = use_settings()
+    objects, _info = face.build_mouth()
+    set_meshes(settings, objects)
+    face.select([], None)
+    check(bpy.ops.magic_fit.face_weights() == {'FINISHED'}, "meshes: Face Weights")
+    teeth = objects["teeth"]
+    weigh_all(teeth)
+    names = [g.name for g in teeth.vertex_groups]
+    before = face.weights_of(teeth, names)
+    weigh_all(objects["piercing"])
+    face.select([objects["piercing"]], objects["piercing"])
+    check(bpy.ops.magic_fit.face_repair(repair='PARTS') == {'FINISHED'},
+          "meshes: Attach Parts on the selected piercing")
+    piercing_kao = face.weights_of(objects["piercing"], ["j_kao"]).max()
+    check(np.array_equal(face.weights_of(teeth, names), before) and piercing_kao < 0.5,
+          "meshes: ...weights the piercing again ({:.2f} left on the head) and leaves the teeth, not selected, as they "
+          "are".format(piercing_kao))
+    other = face._object("Stray", *face.sphere((0.0, -0.09, 1.47), 0.003))
+    other.modifiers.new("Armature", 'ARMATURE').object = armature_of(objects["skin"])
+    try:
+        facing.build_stroke(bpy.context, other, settings)
+        result = "built"
+    except facing.FaceError as error:
+        result = str(error)
+    check("isn't under Meshes" in result, "meshes: the brush won't paint a mesh that isn't under Meshes")
+    bpy.context.scene.collection.objects.unlink(objects["eye_l"])
+    bpy.context.view_layer.update()
+    message = operators.check_face_ready(objects["skin"], settings) or ""
+    check("isn't in this scene" in message, "meshes: a mesh under Meshes taken out of the scene stops the brush")
+    check("isn't in this scene" in (operators.check_face_pose_ready(bpy.context) or ""),
+          "meshes: ...and the Test Poses, and says why")
+    bpy.context.scene.collection.objects.link(objects["eye_l"])
+
+
+def test_fill_meshes():
+    """Fill from Selection sets every mesh where it belongs; the lists add and drop meshes."""
+    face.clear_scene()
+    settings = use_settings()
+    objects, _info = face.build_mouth()
+    face.select(objects.values(), objects["eye_l"])
+    check(bpy.ops.magic_fit.face_meshes_from_selection() == {'FINISHED'}, "fill: runs")
+    others = [item.object for item in settings.face_others]
+    check(settings.face_skin == objects["skin"] and settings.face_teeth == objects["teeth"]
+          and settings.face_tongue == objects["tongue"] and settings.face_mouth == objects["socket"]
+          and settings.face_tongue_piercing == objects["piercing"],
+          "fill: the face, teeth, tongue, the mouth's inside and the tongue piercing each where they belong")
+    check({settings.face_eyeballs, *others} == {objects["eye_l"], objects["eye_r"]} and len(others) == 1,
+          "fill: one eyeball under Eyeballs, the other under Other Parts")
+    face.clear_scene()
+    use_settings()
+    objects, _info = face.build_mouth(joined=True, socket_in_skin=True)
+    face.select(objects.values(), objects["skin"])
+    check(bpy.ops.magic_fit.face_meshes_from_selection() == {'FINISHED'}, "fill: runs again")
+    check(settings.face_teeth == objects["teeth"] and settings.face_tongue == objects["teeth"]
+          and settings.face_mouth is None,
+          "fill: a mesh with teeth and tongue goes under both; a box in the face's mesh stays with the face")
+    other = objects["piercing"]
+    settings.face_add_lash = other
+    settings.face_add_lash = other
+    check([item.object for item in settings.face_lashes] == [other] and settings.face_add_lash is None,
+          "lists: a mesh picked is added once, and the picker empties")
+    settings.face_lashes[0].object = None
+    check(not settings.face_lashes, "lists: clearing a mesh takes it off the list")
+    check(bpy.ops.magic_fit.face_meshes_clear() == {'FINISHED'} and settings.face_skin is None
+          and settings.face_teeth is None and not settings.face_others, "clear: empties the Meshes")
 
 
 def armature_of(obj):
@@ -784,7 +1046,14 @@ def test_readiness():
     objects = face.build(extras=False, eyes=False)
     skin = objects["skin"]
     face.select([], None)
-    check("Select the face" in (operators.check_face_tools_ready(bpy.context) or ""), "ready: nothing selected")
+    check("select the face" in (operators.check_face_tools_ready(bpy.context) or ""), "ready: nothing selected")
+    settings.face_skin = skin
+    bpy.context.scene.collection.objects.unlink(skin)
+    check("isn't in this scene" in (operators.check_face_tools_ready(bpy.context) or ""),
+          "ready: a Face set under Meshes but taken out of the scene")
+    bpy.context.scene.collection.objects.link(skin)
+    check(operators.check_face_tools_ready(bpy.context) is None, "ready: the Face set under Meshes, nothing selected")
+    settings.face_skin = None
     face.select([skin], skin)
     settings.group_mode = 'ACTIVE'
     check("All Groups" in (operators.check_face_tools_ready(bpy.context) or ""), "ready: not in Current Group mode")
@@ -805,7 +1074,8 @@ def main():
         for test in (test_reference, test_game_data, test_saved_data_rules, test_textools, test_first_use, test_features, test_closure_box, test_face_weights, test_shut_eyes, test_small_eyes,
                      test_blink_peak, test_neck, test_moved_face,
                      test_repairs, test_repairs_need_features, test_body_selected, test_masks, test_snap_lashes,
-                     test_detect, test_lashes_alone, test_left_out, test_brush, test_readiness):
+                     test_detect, test_lashes_alone, test_left_out, test_brush, test_readiness, test_mouth,
+                     test_fill_meshes, test_mesh_rules, test_mouth_cases):
             print("==", test.__name__)
             try:
                 test()

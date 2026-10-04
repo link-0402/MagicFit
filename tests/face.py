@@ -97,6 +97,121 @@ def build(race=RACE, number=NUMBER, extras=True, eyes=True):
     return objects
 
 
+def _subset(points, tris, keep):
+    """The vertices ``keep`` (bool) of a mesh and its triangles among them, renumbered."""
+    index = np.flatnonzero(keep)
+    lookup = np.full(len(points), -1)
+    lookup[index] = np.arange(len(index))
+    sub = lookup[np.asarray(tris)]
+    return np.asarray(points)[index], sub[np.all(sub >= 0, axis=1)]
+
+
+def _grid(corner, u, v, steps=4):
+    """Points and triangles of a flat quad from ``corner`` along ``u`` and ``v``, ``steps`` squares each way."""
+    points = [np.asarray(corner) + np.asarray(u) * i / steps + np.asarray(v) * j / steps
+              for j in range(steps + 1) for i in range(steps + 1)]
+    tris = []
+    for j in range(steps):
+        for i in range(steps):
+            a = j * (steps + 1) + i
+            tris += [(a, a + 1, a + steps + 2), (a, a + steps + 2, a + steps + 1)]
+    return np.array(points), np.array(tris)
+
+
+def _merged(parts):
+    points, tris, start = [], [], 0
+    for p, t in parts:
+        points.append(p)
+        tris.append(np.asarray(t) + start)
+        start += len(p)
+    return np.vstack(points), np.vstack(tris)
+
+
+def build_mouth(race=RACE, number=NUMBER, drop=0.002, socket_in_skin=False, joined=False, welded=False,
+                tongue_move=(0.0, 0.0, 0.0), tongue_scale=1.0):
+    """A face whose mouth comes in parts of its own, as custom faces' do: the game face's skin without its teeth and
+    tongue ('skin'), its teeth and gums ('teeth', upper and lower rows; moved ``drop`` down, as a resculpt would put
+    them), its tongue ('tongue'; with ``joined`` in the teeth's mesh, after them), a box lining the mouth around them,
+    open at the front ('socket'; with ``socket_in_skin`` a loose part of the skin, after the skin's own vertices), a
+    barbell through the tongue (two balls and a bar, 'piercing') and the eyeballs. With ``welded`` the rows are joined
+    at the back into one piece (gums of both rows in one mesh); the tongue is moved by ``tongue_move`` and scaled by
+    ``tongue_scale`` about its middle (a resculpted tongue). None weighted. Returns the objects and, for checking,
+    {'upper': whether each teeth vertex is in the upper row, 'tongue': the tongue's vertices in its mesh, 'socket': the
+    socket's vertices in its mesh}."""
+    face = reference(race, number)
+    label = "{:s}f{:04d}".format(race, face.number)
+    names = face.names
+    up = face.weights[:, names.index("j_f_hagukiup")]
+    down = face.weights[:, names.index("j_f_hagukidn")]
+    teeth = up + down > 0.99
+    # The tongue: the game's loose part mostly on the tongue bones.
+    on_tongue = face.weights[:, [j for j, name in enumerate(names) if name.startswith("j_f_bero")]].sum(1)
+    parts, count = facing.loose_parts(face.points, face.tris)
+    tongue = np.isin(parts, [k for k in range(count) if on_tongue[parts == k].mean() > 0.5])
+    teeth_points, teeth_tris = _subset(face.points, face.tris, teeth)
+    teeth_points = teeth_points - (0.0, 0.0, drop)
+    if welded:
+        # A strip at the back of each side joining the rows' back-most vertices: one piece.
+        rows = (up > down)[teeth]
+        bridge = []
+        for side in (1.0, -1.0):
+            ends = []
+            for row in (rows, ~rows):
+                mine = np.flatnonzero(row & (teeth_points[:, 0] * side > 0.005))
+                ends.append(mine[np.argsort(-teeth_points[mine, 1])[:2]])
+            (u1, u2), (l1, l2) = ends
+            bridge += [(u1, l1, u2), (u2, l1, l2)]
+        teeth_tris = np.vstack([teeth_tris, bridge])
+    tongue_points, tongue_tris = _subset(face.points, face.tris, tongue)
+    middle = tongue_points.mean(0)
+    tongue_points = middle + (tongue_points - middle) * tongue_scale + np.asarray(tongue_move)
+    skin_points, skin_tris = _subset(face.points, face.tris, ~teeth & ~tongue)
+    # The box lining the mouth, snug around the rows of teeth like a mod's mouth socket: roof, floor, sides and back,
+    # open at the front behind the lips.
+    low, high = teeth_points.min(0) - (0.002, 0.0, 0.001), teeth_points.max(0) + (0.002, 0.002, 0.001)
+    low[1] = teeth_points[:, 1].min() + 0.004
+    size = high - low
+    walls = [_grid(low + (0, 0, size[2]), (size[0], 0, 0), (0, size[1], 0)),  # roof
+             _grid(low, (0, size[1], 0), (size[0], 0, 0)),  # floor
+             _grid(low, (0, 0, size[2]), (0, size[1], 0)),  # sides
+             _grid(low + (size[0], 0, 0), (0, size[1], 0), (0, 0, size[2])),
+             _grid(low + (0, size[1], 0), (size[0], 0, 0), (0, 0, size[2]))]  # back
+    socket_points, socket_tris = _merged(walls)
+    # A barbell through the tongue a third of the way back from its tip: a bar across it, a ball at each end.
+    tip = tongue_points[:, 1].min()
+    y = tip + (tongue_points[:, 1].max() - tip) / 3.0
+    near = np.abs(tongue_points[:, 1] - y) < 0.002
+    middle = np.array((0.0, y, 0.5 * (tongue_points[near, 2].min() + tongue_points[near, 2].max())))
+    reach = 0.5 * (tongue_points[near, 2].max() - tongue_points[near, 2].min()) + 0.0015
+    bar_points, bar_tris = _merged([_grid(middle + (-0.0005, -0.0005, -reach), (0.001, 0, 0), (0, 0, 2 * reach), 2),
+                                    _grid(middle + (-0.0005, 0.0005, -reach), (0, 0, 2 * reach), (0.001, 0, 0), 2)])
+    balls = [sphere(middle + (0.0, 0.0, side * reach), 0.0015, 6, 8) for side in (-1, 1)]
+    piercing_points, piercing_tris = _merged([(bar_points, bar_tris)] + balls)
+    objects = {}
+    info = {"upper": (up > down)[teeth]}
+    if socket_in_skin:
+        info["socket"] = np.arange(len(skin_points), len(skin_points) + len(socket_points))
+        skin_points, skin_tris = _merged([(skin_points, skin_tris), (socket_points, socket_tris)])
+    else:
+        objects["socket"] = _object("Mouth", socket_points, socket_tris)
+        info["socket"] = np.arange(len(socket_points))
+    objects["skin"] = _object(label + "_fac_a", skin_points, skin_tris)
+    if joined:
+        info["tongue"] = np.arange(len(teeth_points), len(teeth_points) + len(tongue_points))
+        objects["teeth"] = _object("Teeth and Tongue", *_merged([(teeth_points, teeth_tris),
+                                                                 (tongue_points, tongue_tris)]))
+        objects["tongue"] = objects["teeth"]
+    else:
+        info["tongue"] = np.arange(len(tongue_points))
+        objects["teeth"] = _object("Teeth", teeth_points, teeth_tris)
+        objects["tongue"] = _object("Tongue", tongue_points, tongue_tris)
+    objects["piercing"] = _object("Tongue Piercing", piercing_points, piercing_tris)
+    for side, eye in face.eyes().items():
+        points, tris = sphere(eye.center, eye.radius * 0.97)
+        objects["eye_" + side] = _object("Eyeball_" + side, points, tris)
+    return objects, info
+
+
 def select(objects, active):
     for obj in bpy.context.scene.objects:
         obj.select_set(False)

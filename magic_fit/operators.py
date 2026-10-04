@@ -229,6 +229,9 @@ def check_face_ready(obj, settings):
         return problem
     if straighten.deforming_armature(obj) is None:
         return "Give the face Face Weights first: the brush needs its armature with the face bones"
+    missing = missing_face_mesh(bpy.context)
+    if missing is not None:
+        return "'{:s}' (under Meshes) isn't in this scene: set another mesh there or clear it".format(missing.name)
     reference = facing.Reference.loaded()
     if (reference is not None and settings.face_source == 'PICK'
             and not reference.has_face(settings.face_race, settings.face_number)):
@@ -261,6 +264,24 @@ def face_targets(context):
     return result
 
 
+def face_meshes(context):
+    """(objects, roles, picked): the meshes the face tools work on, and what each was set as on the Face panel
+    ({index: set of facing.ROLE_*}): the Meshes set there when its Face is (``picked``; the Face first), else the
+    active and selected meshes (with no roles: each is told apart by where it sits and its shape)."""
+    picked = facing.picked_meshes(context.scene.magic_fit)
+    if picked is not None:
+        return picked[0], picked[1], True
+    return face_targets(context), {}, False
+
+
+def missing_face_mesh(context):
+    """A mesh set on the Face panel (Meshes) that isn't in this scene (deleted, or in another), or None."""
+    picked = facing.picked_meshes(context.scene.magic_fit)
+    if picked is None:
+        return None
+    return next((obj for obj in picked[0] if context.view_layer.objects.get(obj.name) is not obj), None)
+
+
 def check_face_tools_ready(context):
     """Why Face Weights and the face repairs can't be used right now, or None when they can."""
     problem = facing.face_data_problem()
@@ -268,10 +289,12 @@ def check_face_tools_ready(context):
         return problem
     if context.mode not in {'OBJECT', 'PAINT_WEIGHT'}:
         return "Use the face tools in Object or Weight Paint mode"
-    targets = face_targets(context)
+    targets, _roles, picked = face_meshes(context)
     if not targets:
-        return "Select the face and its parts (eyes, lashes, teeth, piercings)"
+        return "Set the Face under Meshes, or select the face and its parts (eyes, lashes, teeth, piercings)"
     for target in targets:
+        if picked and context.view_layer.objects.get(target.name) is not target:
+            return "'{:s}' (under Meshes) isn't in this scene: set another mesh there or clear it".format(target.name)
         if target.library is not None or target.data.library is not None:
             return "'{:s}' is linked from another file".format(target.name)
     reference = facing.Reference.loaded()
@@ -292,13 +315,16 @@ def check_face_tools_ready(context):
 
 def pose_armature(context):
     """The armature Test Pose moves: the active object if it's one, else the one deforming the active mesh
-    (while Customize+ is on, the armature its hidden rig follows)."""
+    (while Customize+ is on, the armature its hidden rig follows), else the one deforming the Face set on the Face
+    panel."""
     obj = context.object
-    if obj is None:
-        return None
-    if obj.type == 'ARMATURE':
+    if obj is not None and obj.type == 'ARMATURE':
         return obj
-    return hairing.weighted_armature(obj) if obj.type == 'MESH' else None
+    armature = hairing.weighted_armature(obj) if obj is not None and obj.type == 'MESH' else None
+    face = context.scene.magic_fit.face_skin
+    if armature is None and face is not None and context.view_layer.objects.get(face.name) is face:
+        armature = hairing.weighted_armature(face)
+    return armature
 
 
 def check_face_pose_ready(context):
@@ -308,11 +334,14 @@ def check_face_pose_ready(context):
         return problem
     if context.mode not in {'OBJECT', 'PAINT_WEIGHT', 'POSE'}:
         return "Pose the face in Object, Weight Paint or Pose mode"
+    missing = missing_face_mesh(context)
+    if missing is not None:
+        return "'{:s}' (under Meshes) isn't in this scene: set another mesh there or clear it".format(missing.name)
     armature = pose_armature(context)
     if armature is None:
-        if context.object is not None and context.object.type == 'MESH':
+        if (context.object is not None and context.object.type == 'MESH') or context.scene.magic_fit.face_skin:
             return "Give the face Face Weights first: the poses move the face bones of its armature"
-        return "Make the face (or its armature) active"
+        return "Make the face (or its armature) active, or set it under Meshes"
     if not any(bone.name.startswith(facing.UPPER_LID) for bone in armature.data.bones):
         return "Armature '{:s}' has no face bones: give the face Face Weights first".format(armature.name)
     return None
@@ -2154,9 +2183,12 @@ _PART_WORDS = (
     (facing.PART_LASH, "lash part", "lash parts"),
     (facing.PART_FILM, "film over an eye", "films over the eyes"),
     (facing.PART_SHELL, "part on the skin", "parts on the skin"),
-    (facing.PART_INSIDE, "part inside the mouth", "parts inside the mouth"),
+    (facing.PART_TEETH, "part of the teeth", "parts of the teeth"),
+    (facing.PART_TONGUE, "tongue", "tongue parts"),
+    (facing.PART_MOUTH, "inside of the mouth", "parts lining the mouth"),
+    (facing.PART_PIERCING, "part of a tongue piercing", "parts of tongue piercings"),
     (facing.PART_EXTRA, "part where the game's face has one", "parts where the game's face has some"),
-    (facing.PART_RIGID, "part moving as one piece with the skin", "parts moving as one piece with the skin"),
+    (facing.PART_RIGID, "part moving as one piece with what it's on", "parts moving as one piece with what they're on"),
 )
 
 
@@ -2181,6 +2213,28 @@ def face_parts_text(plan):
             totals[kind] = totals.get(kind, 0) + count
     return ", ".join("{:d} {:s}".format(totals[kind], plural if totals[kind] > 1 else single)
                      for kind, single, plural in _PART_WORDS if totals.get(kind))
+
+
+def face_mouth_text(report):
+    """What the mouth's parts became, for the report, or None."""
+    mouth = report.get("mouth")
+    if not mouth:
+        return None
+    done = []
+    rows = [(mouth["upper"], "on the upper gum bone"), (mouth["lower"], "on the lower one")]
+    if mouth["upper"] or mouth["lower"] or mouth["both"]:
+        teeth = ", ".join("{:d} {:s}".format(count, words) for count, words in rows if count)
+        if mouth["both"]:
+            teeth += "{:s}{:d} split between them (gums of both rows in one piece)".format(", " if teeth else "",
+                                                                                      mouth["both"])
+        done.append("teeth and gums: " + teeth)
+    if mouth["tongue"]:
+        done.append("the tongue has the game's tongue weights")
+    if mouth["inside"]:
+        done.append("the inside of the mouth follows the teeth and lips around it")
+    if mouth["piercings"]:
+        done.append("the tongue piercing moves with the tongue")
+    return "Mouth: " + "; ".join(done) if done else None
 
 
 def face_eyes_text(report):
@@ -2219,8 +2273,11 @@ def textools_warning(reference, race, number):
 
 
 class _FaceTool:
-    """Face Weights and the face repairs: what `facing.plan_face` plans for the selected meshes, done."""
+    """Face Weights and the face repairs: what `facing.plan_face` plans for the face's meshes, done. A repair
+    (``selected_only``) with the Meshes set changes only the selected ones among them (all, when none is selected); the
+    rest are still looked at (a piercing attaches to the tongue)."""
     bl_options = {'REGISTER', 'UNDO'}
+    selected_only = False
 
     @classmethod
     def poll(cls, context):
@@ -2232,15 +2289,19 @@ class _FaceTool:
 
     def run(self, context, title, **plan_args):
         settings = context.scene.magic_fit
-        targets = face_targets(context)
+        targets, roles, picked = face_meshes(context)
         reference = face_reference(self, context)
         if reference is None:
             return {'CANCELLED'}
         # Everything is worked out before anything changes, so a problem leaves every mesh as it was.
         try:
-            job = facing.setup(targets, settings)
-            plan = facing.plan_face(job.meshes, job.skin, job.face, targets=job.parts,
-                                    max_groups=settings.face_max_groups, **plan_args)
+            job = facing.setup(targets, settings, roles=roles, skin=0 if picked else None)
+            changed = job.parts
+            if picked and self.selected_only:
+                chosen = [i for i in job.parts if job.objects[i].select_get()]
+                changed = chosen or job.parts
+            plan = facing.plan_face(job.meshes, job.skin, job.face, targets=changed, part_meshes=job.parts,
+                                    roles=job.roles, max_groups=settings.face_max_groups, **plan_args)
         except facing.FaceError as error:
             self.report({'ERROR'}, str(error))
             return {'CANCELLED'}
@@ -2307,6 +2368,9 @@ class _FaceTool:
         parts = face_parts_text(plan)
         if parts:
             self.report({'INFO'}, "Parts: " + parts)
+        mouth = face_mouth_text(plan.report)
+        if mouth:
+            self.report({'INFO'}, mouth)
         if neck is not None:
             self.report({'INFO'}, "Neck: the {:d} vertices of the opening have the game's positions, normals and "
                                   "weights".format(len(neck.verts)))
@@ -2337,6 +2401,15 @@ class _FaceTool:
         if job.left_out:
             self.report({'WARNING'}, "Left out {:s}: weighted to bones the face doesn't use (hair, the body)".format(
                 ", ".join("'{:s}'".format(job.objects[i].name) for i in job.left_out)))
+        if picked:
+            outside = [obj for obj in face_targets(context) if not any(
+                obj == other or obj.data == other.data for other in targets)]
+            if outside:
+                one = len(outside) == 1
+                self.report({'WARNING'}, "{:s} {:s} selected but not under Meshes, so not weighted: add {:s} there, or "
+                                         "clear the Meshes to use the selection".format(
+                                             ", ".join("'{:s}'".format(obj.name) for obj in outside[:4]),
+                                             "is" if one else "are", "it" if one else "them"))
         if job.how == 'SHAPE':
             self.report({'WARNING'}, SHAPE_MATCH.format(face_title))
         warning = textools_warning(reference, face.race, face.number)
@@ -2346,8 +2419,9 @@ class _FaceTool:
 
 
 class MAGIC_FIT_OT_face_weights(_FaceTool, bpy.types.Operator):
-    """Weight the selected face and its parts (eyes, lashes, teeth, piercings) like the game face it replaces,
-    fitted to its shape. The lids meet when the eyes are shut and the neck matches the game's"""
+    """Weight the face and its parts (eyes, lashes, teeth, tongue, piercings; set under Meshes, or else the selected
+    meshes) like the game face it replaces, fitted to its shape. The lids meet when the eyes are shut and the neck
+    matches the game's"""
     bl_idname = "magic_fit.face_weights"
     bl_label = "Face Weights"
 
@@ -2364,16 +2438,17 @@ FACE_REPAIRS = (
      "the eyes follow them",
      'HIDE_ON', dict(skin='EYES', parts='EYES', close=True)),
     ('LASHES', "Snap Lashes",
-     "Sit the selected lashes on the lids where they float off or sink in (out by Lash Lift), keeping their "
-     "shape and where they are along the lid, and make each lash follow its lid. Select the face and eyeballs too",
+     "Sit the lashes on the lids where they float off or sink in (out by Lash Lift), keeping their shape and "
+     "where they are along the lid, and make each lash follow its lid. With Meshes set, only the selected ones "
+     "among them (all, when none is); without, select the face and eyeballs too",
      'SNAP_ON', dict(skin='NONE', parts='LASHES', snap_lashes=True)),
     ('MOUTH', "Fix Mouth",
      "Weight the lips and mouth like the game's face. Teeth, tongue and piercings in or around the mouth "
      "follow them",
      'MONKEY', dict(skin='MOUTH', parts='MOUTH')),
     ('PARTS', "Attach Parts",
-     "Make the selected parts (eyeballs, lashes, teeth, piercings, horns...) follow the face. The face keeps "
-     "its own weights",
+     "Make the parts (eyeballs, lashes, teeth, piercings, horns...) follow the face. With Meshes set, only the "
+     "selected ones among them (all, when none is). The face keeps its own weights",
      'LINKED', dict(skin='NONE', parts='ALL')),
     ('NECK', "Match Neck",
      "Give the neck the game's weights and move its edge onto the game's, so no seam shows where the face "
@@ -2384,9 +2459,10 @@ _FACE_REPAIR = {repair[0]: repair for repair in FACE_REPAIRS}
 
 
 class MAGIC_FIT_OT_face_repair(_FaceTool, bpy.types.Operator):
-    """Repair one thing on the selected face, using the game face it replaces"""
+    """Repair one thing on the face, using the game face it replaces"""
     bl_idname = "magic_fit.face_repair"
     bl_label = "Repair Face"
+    selected_only = True
 
     repair: EnumProperty(
         name="Repair",
@@ -2406,6 +2482,110 @@ class MAGIC_FIT_OT_face_repair(_FaceTool, bpy.types.Operator):
         return self.run(context, label, **args)
 
 
+# What a mesh's parts must all be for it to go into a picker (Fill from Selection), in the order the pickers are
+# filled: a mesh holding anything else goes under Other Parts, where its parts are each told apart.
+_PICKER_KINDS = (
+    ("face_eyeballs", {facing.PART_EYEBALL}),
+    ("face_teeth", {facing.PART_TEETH, facing.PART_TONGUE, facing.PART_MOUTH}),
+    ("face_tongue", {facing.PART_TEETH, facing.PART_TONGUE, facing.PART_MOUTH}),
+    ("face_mouth", {facing.PART_TEETH, facing.PART_TONGUE, facing.PART_MOUTH}),
+    ("face_tongue_piercing", {facing.PART_PIERCING}),
+)
+# ...and which of its kinds put it there (a mesh with teeth and the tongue goes under both).
+_PICKER_KIND = {"face_eyeballs": facing.PART_EYEBALL, "face_teeth": facing.PART_TEETH,
+                "face_tongue": facing.PART_TONGUE, "face_mouth": facing.PART_MOUTH,
+                "face_tongue_piercing": facing.PART_PIERCING}
+
+
+def clear_face_meshes(settings):
+    """Empty the Face panel's Meshes."""
+    settings.face_skin = None
+    for prop, _role in facing.PICKERS:
+        setattr(settings, prop, None)
+    for prop, _role in facing.LISTS:
+        getattr(settings, prop).clear()
+
+
+def fill_face_meshes(settings, job, kinds):
+    """Set the Face panel's Meshes from ``job`` (FaceSetup) and what its meshes' parts are (``kinds``, see
+    facing.find_parts). Returns how each mesh was set, for the report."""
+    clear_face_meshes(settings)
+    settings.face_skin = job.objects[job.skin]
+    done = ["'{:s}' as the Face".format(job.objects[job.skin].name)]
+    for i in job.parts:
+        obj = job.objects[i]
+        mine = set(kinds.get(i, {}))
+        placed = []
+        for prop, allowed in _PICKER_KINDS:
+            if mine and mine <= allowed and _PICKER_KIND[prop] in mine and getattr(settings, prop) is None:
+                setattr(settings, prop, obj)
+                placed.append(settings.bl_rna.properties[prop].name)
+        if not placed and mine and mine <= {facing.PART_LASH, facing.PART_FILM}:
+            settings.face_lashes.add().object = obj
+            placed.append("Lashes")
+        if not placed:
+            settings.face_others.add().object = obj
+            placed.append("Other Parts")
+        done.append("'{:s}' as {:s}".format(obj.name, " and ".join(placed)))
+    return done
+
+
+class MAGIC_FIT_OT_face_meshes_from_selection(bpy.types.Operator):
+    """Set the Meshes from the selected meshes: which one is the face, and what each other one is (eyeballs,
+    lashes, teeth, tongue, ...), told apart by where they sit and their shape. Check them, and change any that's
+    wrong"""
+    bl_idname = "magic_fit.face_meshes_from_selection"
+    bl_label = "Fill from Selection"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        problem = facing.face_data_problem()
+        if problem is not None:
+            cls.poll_message_set(problem)
+            return False
+        if context.mode not in {'OBJECT', 'PAINT_WEIGHT'}:
+            cls.poll_message_set("Fill the Meshes in Object or Weight Paint mode")
+            return False
+        if not face_targets(context):
+            cls.poll_message_set("Select the face and its parts")
+            return False
+        return True
+
+    def execute(self, context):
+        settings = context.scene.magic_fit
+        if face_reference(self, context) is None:
+            return {'CANCELLED'}
+        try:
+            job = facing.setup(face_targets(context), settings)
+            kinds = facing.find_parts(job)
+        except facing.FaceError as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
+        if job.how != 'PICK':
+            remember_face(settings, job.face.race, job.face.number)
+        done = fill_face_meshes(settings, job, kinds)
+        self.report({'INFO'}, "Meshes: " + ", ".join(done))
+        if kinds.get(job.skin, {}).get(facing.PART_MOUTH):
+            self.report({'INFO'}, "The Face has the inside of the mouth as a loose part of its own: it's weighted as "
+                                  "that")
+        if job.left_out:
+            self.report({'WARNING'}, "Left out {:s}: weighted to bones the face doesn't use (hair, the body)".format(
+                ", ".join("'{:s}'".format(job.objects[i].name) for i in job.left_out)))
+        return {'FINISHED'}
+
+
+class MAGIC_FIT_OT_face_meshes_clear(bpy.types.Operator):
+    """Empty the Meshes: the face tools then work on the selected meshes"""
+    bl_idname = "magic_fit.face_meshes_clear"
+    bl_label = "Clear Meshes"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        clear_face_meshes(context.scene.magic_fit)
+        return {'FINISHED'}
+
+
 class MAGIC_FIT_OT_detect_face(bpy.types.Operator):
     """Find which game face the selected face replaces. Uses names like c0801f0002 if there are any, else
     the closest shape"""
@@ -2418,8 +2598,13 @@ class MAGIC_FIT_OT_detect_face(bpy.types.Operator):
         if context.mode not in {'OBJECT', 'PAINT_WEIGHT', 'POSE'}:
             cls.poll_message_set("Detect the face in Object or Weight Paint mode")
             return False
-        if not face_targets(context):
-            cls.poll_message_set("Select the face")
+        if not face_meshes(context)[0]:
+            cls.poll_message_set("Select the face, or set it under Meshes")
+            return False
+        missing = missing_face_mesh(context)
+        if missing is not None:
+            cls.poll_message_set("'{:s}' (under Meshes) isn't in this scene: set another mesh there or clear it".format(
+                missing.name))
             return False
         problem = facing.face_data_problem()
         if problem is not None:
@@ -2431,7 +2616,7 @@ class MAGIC_FIT_OT_detect_face(bpy.types.Operator):
         settings = context.scene.magic_fit
         if face_reference(self, context) is None:
             return {'CANCELLED'}
-        found = facing.detect(face_targets(context))
+        found = facing.detect(face_meshes(context)[0])
         if found is None:
             self.report({'ERROR'}, facing.NOT_DETECTED)
             return {'CANCELLED'}
@@ -2555,7 +2740,7 @@ class MAGIC_FIT_OT_face_pose(bpy.types.Operator):
         if reference is None:
             return {'CANCELLED'}
         race, number = settings.face_race, settings.face_number
-        meshes = face_targets(context)
+        meshes = face_meshes(context)[0]
         if settings.face_source == 'DETECT' and meshes:
             found = facing.detect(meshes, reference)
             if found is not None:
@@ -2907,6 +3092,8 @@ classes = (
     MAGIC_FIT_OT_pick_hair_skeleton,
     MAGIC_FIT_OT_face_weights,
     MAGIC_FIT_OT_face_repair,
+    MAGIC_FIT_OT_face_meshes_from_selection,
+    MAGIC_FIT_OT_face_meshes_clear,
     MAGIC_FIT_OT_detect_face,
     MAGIC_FIT_OT_pick_face,
     MAGIC_FIT_OT_face_pose,

@@ -51,6 +51,7 @@ import re
 import numpy as np
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
+from mathutils.kdtree import KDTree
 
 from . import facedata, fitting, goals, hairing, painting, straighten
 from .goals import DEFAULT_MAX_GROUPS, smoothstep
@@ -207,8 +208,11 @@ SMOOTH_ITERATIONS = 500
 LAPLACIAN_FLOOR = 0.05
 # Neck ring: custom ring vertices at most this far from the game's ring are snapped onto it.
 RING_TOLERANCE = 0.002
-# A mesh without the game's neck opening is the face when it covers this share of the game's face.
+# A mesh without the game's neck opening is the face when it covers this share of the game's face; a mesh set as the
+# face on the Face panel must cover PICKED_COVER of it (a custom face may be resculpted a lot, but lashes or a tongue
+# set there by mistake cover next to none).
 SKIN_COVER = 0.5
+PICKED_COVER = 0.1
 # Parts: lying on the skin when 90 % of the part is closer to it than this; a lash when it comes this
 # close to a lid margin; the attach point of a rigid part is where it comes within ATTACH_RANGE of the
 # closest point it has to the skin.
@@ -220,6 +224,72 @@ ATTACH_RANGE = 0.001
 LASH_STANDS_OUT = 0.0012
 # Parts inside the mouth smaller than this (across) move as one piece: studs, single teeth.
 RIGID_SIZE = 0.012
+# A part is inside the mouth when its middle lies within MOUTH_BOX of the lip bones' (across, up or down, in front of
+# them), in front of the neck bone, behind the face's skin seen from the front (by MOUTH_COVER at least), and not on
+# the skin. On 180 mod faces this finds 3788 of the 3920 parts their authors weighted to the gum or tongue bones (the
+# lip line alone: 3092; most of the rest lie on the lips), and takes 84 other parts, mostly piercings through the lips,
+# which move as one piece anyway (see TEETH_SET).
+MOUTH_BOX = (0.035, 0.02, 0.01)
+MOUTH_COVER = 0.0005
+# A small part inside the mouth is a tooth when its mesh has at least TEETH_SET of them or it sits in a bigger part of
+# the teeth (within ROWS_TOUCH, as a tooth in its gum); a lone one (a lip piercing, a grill's stud) moves as one piece
+# with what it's on.
+TEETH_SET = 4
+# The mouth's parts (see `sort_mouth`). Teeth and gums follow the upper gum bone or the lower one, all of a vertex's
+# weight, as the game's do (`teeth_rows` tells the rows apart). The tongue is the part inside the mouth, at least
+# MOUTH_SIZE across, with the most surface along the tongue bones (within TONGUE_REACH of them) for its size, that's
+# tongue-like (`tongue_like`): at least TONGUE_VOTE times the share of the game's tongue (which reaches down the throat,
+# past them). The inside of the mouth (a bag or box lining it) is the part around the others: rays from their middle
+# hit it up and down and in at least MOUTH_HITS of five directions (up, down, both sides, back; not the front, where
+# it's open) within MOUTH_REACH, and it holds no teeth (gums do).
+UPPER_GUM = "j_f_hagukiup"
+LOWER_GUM = "j_f_hagukidn"
+JAW = "j_f_dago"
+TONGUE_BONES = "j_f_bero"
+TONGUE_VOTE = 0.5
+TONGUE_REACH = 0.012
+MOUTH_SIZE = 0.01
+MOUTH_HITS = 3
+MOUTH_REACH = 0.06
+# The inside of the mouth goes with the upper teeth where it's ROW_BLEND closer to them than to the lower ones, and
+# with the lower teeth the other way, blending between (the sides of a bag stretch as the jaw opens).
+ROW_BLEND = 0.002
+# Telling the rows of teeth apart (see `teeth_rows`): a big connected piece is cut into two rows when its halves lie
+# ROWS_APART apart, leaning at most ROWS_LEAN degrees from upright; the cut is fitted with a plane pitched up to
+# ROWS_PITCH degrees either way, and eases from one row to the other over ROWS_HANDOVER along the mesh. Its Fiedler
+# vector is found with a dense eigensolver up to ROWS_DENSE welded vertices, else by at most ROWS_LANCZOS Lanczos
+# steps. A piece within ROWS_TOUCH of one ROWS_RATIO times its size sits in it (a tooth in its gum). Groups left are
+# two rows when they stack (seen from above in ROWS_CELL cells) or lie ROWS_GAP apart in height; one row ROWS_SURE
+# off the lip line's height is on that side of it, closer by the way its teeth point. On 176 mod faces, against the
+# mods' own weights: no single tooth on the wrong side, 0.24 % of the vertices (where gums of both rows join), the same
+# with the teeth moved 2 mm, scaled by 15 % or tilted by 8 degrees.
+ROWS_APART = 0.004
+ROWS_LEAN = 55.0
+ROWS_PITCH = 30
+ROWS_HANDOVER = 0.001
+ROWS_DENSE = 600
+ROWS_LANCZOS = 160
+ROWS_TOUCH = 0.0008
+ROWS_RATIO = 2.5
+ROWS_CELL = 0.003
+ROWS_GAP = 0.004
+ROWS_SURE = 0.003
+# A tongue lies under the tongue bones' line: at least TONGUE_UNDER of TONGUE_SAMPLES points along it (those over the
+# part) have it within TONGUE_DEPTH below; landing on the game's teeth at most TONGUE_MARGIN more than on its tongue,
+# unless it has TONGUE_SURE times the game tongue's share along the bones. A part lying on the game face's teeth (half
+# of it within GAME_TEETH_GAP, once warped) is teeth, not the mouth's lining.
+TONGUE_UNDER = 0.5
+TONGUE_MARGIN = 0.3
+TONGUE_SURE = 1.1
+TONGUE_SAMPLES = 16
+TONGUE_DEPTH = 0.03
+GAME_TEETH_GAP = 0.002
+# Loose parts this close to each other move as one piece: a barbell's balls and bar.
+PIECE_GAP = 0.0003
+# A piece smaller than PIERCING_SIZE found inside the mouth is a piercing on the tongue when it passes into the tongue
+# or PIERCING_SHARE of it lies on it (within ATTACH_RANGE), and it's closer to the tongue than to any teeth.
+PIERCING_SIZE = 0.03
+PIERCING_SHARE = 0.25
 # A part by the margins with more than this share over the eye opening is a film over the eyeball: it
 # stretches between the lids instead of growing from them.
 FILM_SHARE = 0.4
@@ -506,6 +576,7 @@ class FaceModel:
         self._extras_transfer = None
         self._ring = None
         self._bvh = None
+        self._mouth = None
 
     def bvh(self):
         """BVHTree of the skin."""
@@ -540,6 +611,41 @@ class FaceModel:
             self._extras_transfer = (SidedTransfer(points, tris, weights, np.zeros(len(points), dtype=np.int64)),
                                      bvh_of(points, tris)) if len(tris) else False
         return self._extras_transfer or None
+
+    def mouth(self):
+        """The skin's mouth: (region of each vertex: 0 elsewhere, 1 teeth and gums (mostly on the gum bones), 2 the
+        tongue (mostly on the tongue bones); its teeth's points and whether each is upper (on the upper gum bone);
+        its tongue (points, triangles, weights, BVHTree), or None)."""
+        if self._mouth is None:
+            def share(test):
+                columns = [j for j, name in enumerate(self.names) if test(name)]
+                return self.weights[:, columns].sum(1) if columns else np.zeros(len(self.points))
+
+            upper = share(lambda name: name == UPPER_GUM)
+            lower = share(lambda name: name == LOWER_GUM)
+            on_tongue = share(lambda name: name.startswith(TONGUE_BONES))
+            region = np.zeros(len(self.points), dtype=np.int64)
+            region[upper + lower > 0.5] = 1
+            region[on_tongue > 0.5] = 2
+            teeth = region == 1
+            # The tongue: the skin's loose parts mostly on the tongue bones (the game's is a loose part of its own).
+            parts, count = loose_parts(self.points, self.tris)
+            tongue = np.zeros(len(self.points), dtype=bool)
+            for part in range(count):
+                verts = parts == part
+                if on_tongue[verts].mean() > 0.5:
+                    tongue |= verts
+            found = None
+            if tongue.any():
+                verts = np.flatnonzero(tongue)
+                lookup = np.full(len(self.points), -1, dtype=np.int64)
+                lookup[verts] = np.arange(len(verts))
+                tris = lookup[self.tris]
+                tris = tris[np.all(tris >= 0, axis=1)]
+                if len(tris):
+                    found = (self.points[verts], tris, self.weights[verts], bvh_of(self.points[verts], tris))
+            self._mouth = (region, self.points[teeth], (upper > lower)[teeth], found)
+        return self._mouth
 
     def ring(self):
         """(positions, normals, weights) of the neck ring's vertices (every split copy), or None."""
@@ -2414,6 +2520,10 @@ def neck_weights(points, tris, reference):
 
 PART_EYEBALL, PART_LASH, PART_FILM, PART_SHELL, PART_INSIDE, PART_EXTRA, PART_RIGID = (
     "EYEBALL", "LASH", "FILM", "SHELL", "INSIDE", "EXTRA", "RIGID")
+# What parts inside the mouth (PART_INSIDE) turn out to be (see `sort_mouth`): teeth and gums, the tongue, the inside
+# of the mouth (a bag or box lining it); and piercings on the tongue.
+PART_TEETH, PART_TONGUE, PART_MOUTH, PART_PIERCING = "TEETH", "TONGUE", "MOUTH", "PIERCING"
+MOUTH_KINDS = (PART_TEETH, PART_TONGUE, PART_MOUTH)
 
 
 def opening_share(points, features, side):
@@ -2498,6 +2608,28 @@ def nearest_margin(features, points):
     return best
 
 
+def inside_mouth(center, skin_bvh, features, skeleton):
+    """Whether a part with its middle at ``center`` is inside the mouth: within MOUTH_BOX of the lip bones (across,
+    up and down, in front of them) and in front of the neck bone (not the back of the head), with the face's skin
+    (``skin_bvh``) in front of it seen from the front. Without lip bones: behind the lip line, near it."""
+    neck = skeleton.head(NECK)[1]
+    middle = features.mouth_center
+    if middle is None:
+        lip = features.lip
+        if lip is None or not lip[:, 0].min() - 0.002 < center[0] < lip[:, 0].max() + 0.002:
+            return False
+        order = np.argsort(lip[:, 0])
+        yc = np.interp(center[0], lip[order, 0], lip[order, 1])
+        zc = np.interp(center[0], lip[order, 0], lip[order, 2])
+        return yc + 0.002 < center[1] < neck and abs(center[2] - zc) < 0.015
+    across, height, front = MOUTH_BOX
+    if (abs(center[0] - middle[0]) > across or abs(center[2] - middle[2]) > height or
+            not middle[1] - front < center[1] < neck):
+        return False
+    hit = skin_bvh.ray_cast(Vector((center[0], middle[1] - 0.1, center[2])), Vector((0.0, 1.0, 0.0)), 0.2)
+    return hit[0] is not None and hit[0][1] < center[1] - MOUTH_COVER
+
+
 def classify_part(points, skin_bvh, features, skeleton, names=None, weights=None, label=""):
     """What a loose part (``points`` in the reference's model space) is: (kind, detail), detail being the
     eye side for eyeballs, lashes and films."""
@@ -2509,16 +2641,8 @@ def classify_part(points, skin_bvh, features, skeleton, names=None, weights=None
     margin = nearest_margin(features, points)
     if on_skin and margin is not None and margin[1] < LASH_DISTANCE and dist.max() > LASH_STANDS_OUT:
         on_skin = False  # lashes sunk into the lid, not makeup on it: they still stand out somewhere
-    lip = features.lip
-    if lip is not None and not on_skin:
-        center = points.mean(0)
-        if lip[:, 0].min() - 0.002 < center[0] < lip[:, 0].max() + 0.002:
-            order = np.argsort(lip[:, 0])
-            yc = np.interp(center[0], lip[order, 0], lip[order, 1])
-            zc = np.interp(center[0], lip[order, 0], lip[order, 2])
-            # Behind the lips, but in front of the neck bone (the spine): not at the back of the head.
-            if yc + 0.002 < center[1] < skeleton.head(NECK)[1] and abs(center[2] - zc) < 0.015:
-                return PART_INSIDE, None
+    if not on_skin and inside_mouth(points.mean(0), skin_bvh, features, skeleton):
+        return PART_INSIDE, None
     if on_skin:
         return PART_SHELL, None
     if margin is not None and margin[1] < LASH_DISTANCE:
@@ -3091,6 +3215,541 @@ def rigid_weights(points, skin_bvh, skin_points_, skin_tris, skin_weights_):
 
 
 # -----------------------------------------------------------------------------
+# Mouth
+
+def touching(a, b, gap=PIECE_GAP):
+    """Whether parts ``a`` and ``b`` (FoundParts) touch: their triangles cross, or a point of one lies within ``gap``
+    of the other's surface."""
+    if np.any(a.points.min(0) > b.points.max(0) + gap) or np.any(b.points.min(0) > a.points.max(0) + gap):
+        return False
+    if len(a.tris) and len(b.tris):
+        return bool(a.bvh().overlap(b.bvh()) or nearest_on(a.bvh(), b.points)[2].min() < gap or
+                    nearest_on(b.bvh(), a.points)[2].min() < gap)
+    return bool(np.linalg.norm(a.points[:, None] - b.points[None], axis=2).min() < gap)
+
+
+def pieces(parts):
+    """The loose parts (``parts``, FoundParts) grouped into pieces that move as one: parts touching each other (see
+    `touching`), like a barbell's balls and bar. Lists of indices into ``parts``."""
+    count = len(parts)
+    parent = list(range(count))
+
+    def root(k):
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+
+    for a in range(count):
+        for b in range(a + 1, count):
+            if root(a) != root(b) and touching(parts[a], parts[b]):
+                parent[root(b)] = root(a)
+    groups = {}
+    for k in range(count):
+        groups.setdefault(root(k), []).append(k)
+    return list(groups.values())
+
+
+def tongue_weights(points, fit):
+    """Weights for a tongue (``points``) over the game face's bones: the game's tongue's at the matching point, the
+    tongue laid onto the game's from the tip (the 1st percentile of each's points front to back) and scaled by how
+    much wider or narrower the game's is (between the 1st and 99th percentile across), up and down by the ratio of
+    their heights: tip, middle and root move like the game's, and a tongue modelled only to its visible front isn't
+    stretched down the game's throat. Without a game tongue, the game face's weights where it lands once warped."""
+    found = fit.reference.mouth()[3]
+    if found is None:
+        return fit.reference_weights(points)
+    tongue_points, tongue_tris, weights, bvh = found
+    low, high = np.percentile(points, (1, 99), axis=0)
+    game_low, game_high = np.percentile(tongue_points, (1, 99), axis=0)
+    scale = (game_high - game_low) / np.maximum(high - low, 1e-6)
+    mapped = np.empty_like(points)
+    mapped[:, 0] = 0.5 * (game_low[0] + game_high[0]) + (points[:, 0] - 0.5 * (low[0] + high[0])) * scale[0]
+    mapped[:, 1] = game_low[1] + (points[:, 1] - low[1]) * scale[0]
+    mapped[:, 2] = game_low[2] + (points[:, 2] - low[2]) * scale[2]
+    tri, loc, _dist = nearest_on(bvh, mapped)
+    return interpolate(weights, tongue_tris, tri, barycentric(tongue_points, tongue_tris, tri, loc))
+
+
+def tongue_line(skeleton):
+    """The tongue bones' heads from the root to the tip, and one bone farther on toward the tip; None without two."""
+    heads = [skeleton.head(name) for name in sorted(name for name in skeleton.names if name.startswith(TONGUE_BONES))]
+    if len(heads) < 2:
+        return None
+    return np.array(heads + [2.0 * heads[-1] - heads[-2]])
+
+
+def tongue_area(points, tris, fit):
+    """(how much of a part's surface lies along the tongue bones (within TONGUE_REACH of `tongue_line`), its whole
+    area): a tongue lies along them, teeth and the mouth's lining around them, a piercing on them is small. Without
+    tongue bones, the share that lands on the game's tongue once warped onto its face stands in."""
+    area = np.zeros(len(points))
+    if len(tris):
+        sides = np.cross(points[tris[:, 1]] - points[tris[:, 0]], points[tris[:, 2]] - points[tris[:, 0]])
+        np.add.at(area, tris.ravel(), np.repeat(0.5 * np.linalg.norm(sides, axis=1) / 3.0, 3))
+    line = tongue_line(fit.reference.skeleton)
+    if line is not None:
+        near = polyline_parameter(line, points)[1] < TONGUE_REACH
+    else:
+        reference = fit.reference
+        tri, loc, _dist = nearest_on(reference.bvh(), fit.warp(points))
+        nearest = reference.tris[tri, np.argmax(barycentric(reference.points, reference.tris, tri, loc), axis=1)]
+        near = reference.mouth()[0][nearest] == 2
+    return float(area[near].sum()), float(area.sum())
+
+
+def under_tongue_line(part, fit):
+    """The share of the tongue bones' line (TONGUE_SAMPLES points from the root to past the tip, those over the part
+    front to back) under which the part lies, within TONGUE_DEPTH: all of it for a tongue (or the line runs inside
+    it), next to none for a row of teeth around it. 1 without tongue bones."""
+    line = tongue_line(fit.reference.skeleton)
+    if line is None or not len(part.tris):
+        return 1.0
+    samples = resample(line, TONGUE_SAMPLES)
+    low, high = part.points[:, 1].min(), part.points[:, 1].max()
+    samples = samples[(samples[:, 1] >= low) & (samples[:, 1] <= high)]
+    if not len(samples):
+        return 0.0
+    down = Vector((0.0, 0.0, -1.0))
+    return float(np.mean([part.bvh().ray_cast(Vector(p), down, TONGUE_DEPTH)[0] is not None for p in samples]))
+
+
+def game_landing(part, fit):
+    """Where a part lands once warped onto the game's face: (the share of its points closest to the game's tongue,
+    the share closest to its teeth and gums, the share within GAME_TEETH_GAP of those)."""
+    reference = fit.reference
+    tri, loc, dist = nearest_on(reference.bvh(), fit.warp(part.points))
+    nearest = reference.tris[tri, np.argmax(barycentric(reference.points, reference.tris, tri, loc), axis=1)]
+    region = reference.mouth()[0][nearest]
+    teeth = region == 1
+    return float((region == 2).mean()), float(teeth.mean()), float((teeth & (dist < GAME_TEETH_GAP)).mean())
+
+
+def on_game_teeth(part, fit):
+    """Whether a part lies on the game face's teeth and gums once warped onto it (half of it within GAME_TEETH_GAP of
+    them): the game's own teeth, which a mod kept."""
+    return game_landing(part, fit)[2] >= 0.5
+
+
+def tongue_like(part, share, fit):
+    """Whether a part inside the mouth, ``share`` times as much of its surface along the tongue bones as the game's
+    tongue has, is a tongue rather than a row of teeth (on 176 mod faces: 3 of 160 tongues missed, 2 of 428 rows of
+    teeth and gums taken): it has TONGUE_VOTE of that at least, and lands more on the game's tongue than on its teeth
+    once warped (no row of teeth does), or lies under the tongue bones (`under_tongue_line`) and lands on the game's
+    teeth no more than TONGUE_MARGIN more than on its tongue or has TONGUE_SURE of the share."""
+    if share < TONGUE_VOTE:
+        return False
+    on_tongue, on_teeth, _close = game_landing(part, fit)
+    if on_tongue > on_teeth:
+        return True
+    if under_tongue_line(part, fit) < TONGUE_UNDER:
+        return False
+    return on_teeth - on_tongue <= TONGUE_MARGIN or share >= TONGUE_SURE
+
+
+def encloses(part, center):
+    """Whether a part lies around ``center`` like a bag or box lining the mouth: rays from it up and down hit the part
+    within MOUTH_REACH, and MOUTH_HITS of five do (up, down, both sides and back; the front is open)."""
+    if not len(part.tris):
+        return False
+    origin = Vector(center)
+    hits = [part.bvh().ray_cast(origin, Vector(direction), MOUTH_REACH)[0] is not None
+            for direction in ((0.0, 0.0, 1.0), (0.0, 0.0, -1.0), (1.0, 0.0, 0.0), (-1.0, 0.0, 0.0), (0.0, 1.0, 0.0))]
+    return hits[0] and hits[1] and sum(hits) >= MOUTH_HITS
+
+
+def sort_mouth(candidates, fit, skin_index):
+    """What each part inside the mouth (``candidates``, FoundParts whose ``detail`` holds the kinds they may be: one
+    when their mesh was set as that part, PART_TEETH, PART_TONGUE and PART_MOUTH when it wasn't) is: a kind each, or
+    None for one of the skin's own loose parts that's none of them (it keeps the skin's weights).
+
+    The tongue is the part set as the tongue, else the one at least MOUTH_SIZE across with the most surface along the
+    tongue bones for its size (`tongue_area`: along² / area) that lies under them (`under_tongue_line`, TONGUE_UNDER)
+    and has at least TONGUE_VOTE as much of its surface along them as the game's tongue has (a mesh set as the tongue
+    and something else has one: the best of its parts under the bones, or of all). The mouth's inside is the part set as
+    that, else the biggest part around the tongue (or the other parts; `encloses`) that holds no teeth (none set in it)
+    and isn't the game's own teeth (`on_game_teeth`). The rest are teeth, but for the skin's own loose parts, which are
+    teeth only when they lie on the game's."""
+    kinds = [None] * len(candidates)
+    for k, f in enumerate(candidates):
+        if len(f.detail) == 1:
+            kinds[k] = next(iter(f.detail))
+    if PART_TONGUE not in kinds:
+        game = fit.reference.mouth()[3]
+        game_share = 0.0
+        if game is not None:
+            along, area = tongue_area(game[0], game[1], fit)
+            game_share = along / max(area, 1e-12)
+        best = None
+        for k, f in enumerate(candidates):
+            if kinds[k] is not None or PART_TONGUE not in f.detail or np.ptp(f.points, axis=0).max() < MOUTH_SIZE:
+                continue
+            along, area = tongue_area(f.points, f.tris, fit)
+            if along <= 0.0:
+                continue
+            share = along / max(area, 1e-12) / game_share if game_share > 0.0 else 1.0
+            like = tongue_like(f, share, fit)
+            # A mesh set as the tongue (and something else) has one: its most tongue-like part, else its best.
+            if not like and len(f.detail) == 3:
+                continue
+            score = (like, along * along / max(area, 1e-12))
+            if best is None or score > best[0]:
+                best = (score, k)
+        if best is not None:
+            kinds[best[1]] = PART_TONGUE
+    if PART_MOUTH not in kinds:
+        tongue = [candidates[k].points for k in range(len(candidates)) if kinds[k] == PART_TONGUE]
+        small = [k for k, f in enumerate(candidates)
+                 if kinds[k] != PART_TONGUE and np.ptp(f.points, axis=0).max() < RIGID_SIZE]
+        best = None
+        for k, f in enumerate(candidates):
+            if kinds[k] is not None or PART_MOUTH not in f.detail or k in small:
+                continue
+            others = tongue or [g.points for j, g in enumerate(candidates) if j != k]
+            if not others or not encloses(f, np.vstack(others).mean(0)):
+                continue
+            # Single teeth are set in their gums (their triangles cross them or touch them): a part holding a third
+            # of them is gums, however much of the mouth it surrounds.
+            held = sum(touching(candidates[j], f) for j in small)
+            if (small and held >= max(1.0, len(small) / 3.0)) or on_game_teeth(f, fit):
+                continue
+            size = float(np.prod(np.ptp(f.points, axis=0)))
+            if best is None or size > best[0]:
+                best = (size, k)
+        if best is not None:
+            kinds[best[1]] = PART_MOUTH
+    for k, f in enumerate(candidates):
+        if kinds[k] is None:
+            if f.mesh == skin_index and f.auto:
+                kinds[k] = PART_TEETH if on_game_teeth(f, fit) else None
+            else:
+                kinds[k] = next(kind for kind in (PART_TEETH, PART_MOUTH, PART_TONGUE) if kind in f.detail)
+    return kinds
+
+
+def row_share(points, teeth_points, teeth_up, lip=None):
+    """How much each of ``points`` goes with the upper row of teeth (``teeth_points``, ``teeth_up`` their upper share):
+    1 where it's ROW_BLEND closer to the upper teeth than to the lower ones, 0 the other way round, blending between.
+    Without both rows, by the side of the lip line ``lip`` (above it: upper), or all upper."""
+    upper = teeth_up > 0.5
+    if upper.any() and not upper.all():
+        distances = []
+        for row in (upper, ~upper):
+            tree = KDTree(int(row.sum()))
+            for k, p in enumerate(teeth_points[row]):
+                tree.insert(p, k)
+            tree.balance()
+            distances.append(np.array([tree.find(p)[2] for p in points]))
+        return smoothstep((distances[1] - distances[0]) / ROW_BLEND * 0.5 + 0.5)
+    if len(teeth_up):
+        return np.full(len(points), float(upper.all()))
+    if lip is None or len(lip) < 2:
+        return np.ones(len(points))
+    return smoothstep((points[:, 2] - polyline_z(lip, points[:, 0])) / ROW_BLEND * 0.5 + 0.5)
+
+
+def row_bones(names, skeleton):
+    """(the upper row's bone, the lower row's) among ``names``: the gum bones, or where the face skeleton has none,
+    the head and the jaw (or the head)."""
+    upper = UPPER_GUM if UPPER_GUM in names and skeleton.has(UPPER_GUM) else HEAD
+    lower = LOWER_GUM if LOWER_GUM in names and skeleton.has(LOWER_GUM) else (
+        JAW if JAW in names and skeleton.has(JAW) else HEAD)
+    return names.index(upper), names.index(lower)
+
+
+def fiedler_vector(count, edges, start):
+    """The Fiedler vector of a connected graph (``count`` nodes, ``edges``): per node, the eigenvector of the second
+    largest eigenvalue of D^-1/2 A D^-1/2, scaled by D^-1/2; its sign cuts the graph where it's thinnest (spectral
+    bisection). Up to ROWS_DENSE nodes by a dense eigensolver, more by Lanczos (fully reorthogonalized, at most
+    ROWS_LANCZOS steps) started from ``start`` (heights: the cut looked for shows up first)."""
+    a, b = edges[:, 0], edges[:, 1]
+    degree = np.bincount(a, minlength=count) + np.bincount(b, minlength=count)
+    degree = np.sqrt(np.maximum(degree, 1).astype(np.float64))
+    if count <= ROWS_DENSE:
+        matrix = np.zeros((count, count))
+        matrix[a, b] = matrix[b, a] = 1.0 / (degree[a] * degree[b])
+        return np.linalg.eigh(matrix)[1][:, -2] / degree
+    trivial = degree / np.linalg.norm(degree)
+    steps = min(ROWS_LANCZOS, count - 1)
+    q = np.asarray(start, dtype=np.float64) - np.mean(start)
+    q -= trivial * (trivial @ q)
+    if np.linalg.norm(q) < 1e-12:
+        q = np.cos(np.arange(count) * 0.7)
+        q -= trivial * (trivial @ q)
+    q /= np.linalg.norm(q)
+    basis = np.zeros((steps, count))
+    alpha = np.zeros(steps)
+    beta = np.zeros(steps)
+    used = steps
+    for j in range(steps):
+        basis[j] = q
+        y = q / degree
+        z = (np.bincount(a, y[b], count) + np.bincount(b, y[a], count)) / degree
+        alpha[j] = q @ z
+        for _ in range(2):
+            z -= basis[:j + 1].T @ (basis[:j + 1] @ z)
+            z -= trivial * (trivial @ z)
+        beta[j] = np.linalg.norm(z)
+        if beta[j] < 1e-10:
+            used = j + 1
+            break
+        q = z / beta[j]
+    tridiagonal = np.diag(alpha[:used]) + np.diag(beta[:used - 1], 1) + np.diag(beta[:used - 1], -1)
+    return (basis[:used].T @ np.linalg.eigh(tridiagonal)[1][:, -1]) / degree
+
+
+def _spread_distance(count, edges, length, distance, limit):
+    """Shortest distances along ``edges`` (of ``length``) from the nodes where ``distance`` is 0, followed no farther
+    than ``limit`` (beyond: infinite). Bellman-Ford, every edge at once."""
+    a = np.concatenate([edges[:, 0], edges[:, 1]])
+    b = np.concatenate([edges[:, 1], edges[:, 0]])
+    length = np.concatenate([length, length])
+    for _ in range(count):
+        candidate = distance[a] + length
+        better = (candidate < distance[b] - 1e-12) & (candidate <= limit)
+        if not better.any():
+            break
+        distance = distance.copy()
+        np.minimum.at(distance, b[better], candidate[better])
+    return distance
+
+
+def _best_threshold(heights, above):
+    """(threshold, mistakes): the cut of ``heights`` that best gives ``above`` (bool) as heights > threshold."""
+    order = np.argsort(heights, kind="stable")
+    wanted = above[order]
+    mistakes = np.concatenate([[0], np.cumsum(wanted)]) + (~wanted).sum() - np.concatenate([[0], np.cumsum(~wanted)])
+    k = int(np.argmin(mistakes))
+    sorted_heights = heights[order]
+    if k == 0:
+        return sorted_heights[0] - 1.0, int(mistakes[k])
+    if k == len(sorted_heights):
+        return sorted_heights[-1] + 1.0, int(mistakes[k])
+    return 0.5 * (sorted_heights[k - 1] + sorted_heights[k]), int(mistakes[k])
+
+
+def _split_rows(points, edges):
+    """Each node's share of the upper row for a big connected piece of teeth (``points`` of its welded nodes,
+    ``edges``), or None when it's one row. It's cut where it's thinnest (`fiedler_vector`): two rows when the halves
+    lie ROWS_APART apart, mostly above each other (within ROWS_LEAN of upright); halves side by side are the arms of
+    one U-shaped gum. The cut is fitted with a plane (the best of every pitch within ROWS_PITCH): where they differ,
+    stretches touching the cut go by the plane (the cut wanders over broad walls, like a throat), the others by the
+    cut (crowns meeting at the bite, which a plane can't follow, don't join the other row). Within ROWS_HANDOVER of
+    the cut, along the mesh, the share eases to a half."""
+    count = len(points)
+    above = fiedler_vector(count, edges, points[:, 2]) > 0.0
+    if above.all() or not above.any():
+        return None
+    offset = points[above].mean(0) - points[~above].mean(0)
+    if offset[2] < 0.0:
+        above, offset = ~above, -offset
+    if np.linalg.norm(offset) < ROWS_APART or offset[2] < math.cos(math.radians(ROWS_LEAN)) * np.linalg.norm(offset):
+        return None
+    best = None
+    for degrees in range(-ROWS_PITCH, ROWS_PITCH + 1):
+        turn = math.radians(degrees)
+        heights = points @ np.array((0.0, -math.sin(turn), math.cos(turn)))
+        threshold, mistakes = _best_threshold(heights, above)
+        if best is None or mistakes < best[0]:
+            best = (mistakes, heights > threshold)
+    plane = best[1]
+    disputed = above != plane
+    if disputed.any():
+        on_cut = np.zeros(count, dtype=bool)
+        on_cut[edges[above[edges[:, 0]] != above[edges[:, 1]]].ravel()] = True
+        stretch = hairing.components(count, edges[disputed[edges[:, 0]] & disputed[edges[:, 1]]])
+        touches = np.zeros(stretch.max() + 1, dtype=bool)
+        touches[stretch[disputed & on_cut]] = True
+        above = np.where(disputed & touches[stretch], plane, above)
+    length = np.linalg.norm(points[edges[:, 0]] - points[edges[:, 1]], axis=1)
+    share = above.astype(np.float64)
+    for row in (True, False):
+        distance = _spread_distance(count, edges, length, np.where(above != row, 0.0, np.inf), ROWS_HANDOVER)
+        near = (above == row) & np.isfinite(distance)
+        t = np.clip(distance[near] / ROWS_HANDOVER, 0.0, 1.0)
+        share[near] = 0.5 + (0.5 * t if row else -0.5 * t)
+    return share
+
+
+def _points_down(points):
+    """Whether teeth (``points``) point down, wider on top than below seen from above (an upper row), up (False), or
+    None when that's unclear."""
+    if len(points) < 6:
+        return None
+    z = points[:, 2]
+    middle = 0.5 * (z.min() + z.max())
+    top, bottom = points[z > middle], points[z <= middle]
+    if len(top) < 3 or len(bottom) < 3:
+        return None
+    spread_top = math.sqrt(np.prod(np.ptp(top[:, :2], axis=0) + 1e-6))
+    spread_bottom = math.sqrt(np.prod(np.ptp(bottom[:, :2], axis=0) + 1e-6))
+    if max(spread_top, spread_bottom) < 1.2 * min(spread_top, spread_bottom):
+        return None
+    return spread_top > spread_bottom
+
+
+def _rows_of_groups(points, group, count, bite):
+    """Whether each of ``count`` groups of teeth that move as one (``group``: each of ``points``'s; a gum with its
+    teeth, half a mouth, a loose fang) is in the upper row. They're cut into two rows where their middle heights are
+    best told apart (two-means, by the square root of their sizes); two rows when something stacks across the cut
+    (seen from above, ROWS_CELL cells holding both, the upper higher) or the rows lie ROWS_GAP apart. Else they're
+    one row: the side of the height ``bite`` they're on, or, within ROWS_SURE of it, the way their teeth point."""
+    sizes = np.bincount(group, minlength=count).astype(np.float64)
+    heights = np.bincount(group, points[:, 2], count) / sizes
+    middle = float(np.average(heights, weights=sizes))
+    down = None if abs(middle - bite) >= ROWS_SURE else _points_down(points)
+    one_row = np.full(count, middle > bite if down is None else down)
+    if count == 1:
+        return one_row
+    weights = np.sqrt(sizes)
+    order = np.argsort(heights, kind="stable")
+    z, w = heights[order], weights[order]
+    best = None
+    for k in range(1, count):
+        low, high = slice(0, k), slice(k, count)
+        spread = ((w[low] * (z[low] - np.average(z[low], weights=w[low])) ** 2).sum() +
+                  (w[high] * (z[high] - np.average(z[high], weights=w[high])) ** 2).sum())
+        if best is None or spread < best[0]:
+            best = (spread, k)
+    k = best[1]
+    upper = np.zeros(count, dtype=bool)
+    upper[order[k:]] = True
+    cells = np.floor(points[:, :2] / ROWS_CELL).astype(np.int64)
+    cells -= cells.min(0)
+    cell = cells[:, 0] * (cells[:, 1].max() + 1) + cells[:, 1]
+    row = upper[group]
+    middles = np.full((2, cell.max() + 1), np.nan)
+    for r in (0, 1):
+        mine = row == r
+        low = np.full(middles.shape[1], np.inf)
+        high = np.full(middles.shape[1], -np.inf)
+        np.minimum.at(low, cell[mine], points[mine, 2])
+        np.maximum.at(high, cell[mine], points[mine, 2])
+        there = np.isfinite(low)
+        middles[r, there] = 0.5 * (low[there] + high[there])
+    both = ~np.isnan(middles).any(0)
+    if int((middles[1, both] > middles[0, both]).sum()) < 2 and z[k] - z[k - 1] < ROWS_GAP:
+        return one_row
+    return upper
+
+
+def teeth_rows(points, tris, part, fit):
+    """Each teeth vertex's share of the upper row (1 upper, 0 lower), from the teeth's own shape: ``points``/``tris``
+    all the teeth (every mesh's together), ``part`` each vertex's loose part. Nothing depends on where the game's
+    teeth are, so teeth sitting lower, farther back, smaller or tilted are told apart the same.
+
+    Welded and connected, the teeth fall into blocks; a loose part under RIGID_SIZE across is one block whatever its
+    seams (a tooth never tears). A big block holding both rows (gums joined at the back, both rows in one mesh) is cut
+    into them (`_split_rows`). A block touching (within ROWS_TOUCH) one at least ROWS_RATIO times its size sits in it
+    (a tooth in its gum, never in the tooth it bites on): in a two-row block it takes the side of what it touches,
+    else it moves with it. What's left, groups moving as one, are sorted into rows (`_rows_of_groups`), the custom
+    face's lip line (else the mouth's middle) standing in for the bite's height when there's only one row."""
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    count = len(points)
+    if not count:
+        return np.zeros(0)
+    welded = Welded(points, tris)
+    node, nodes = welded.node, welded.count
+    node_points, node_edges = welded.points, welded.edges
+    connected = hairing.components(nodes, node_edges)[node]
+    part_ids, part_index = np.unique(np.asarray(part).ravel(), return_inverse=True)
+    part_index = part_index.ravel()
+    low = np.full((len(part_ids), 3), np.inf)
+    high = np.full((len(part_ids), 3), -np.inf)
+    np.minimum.at(low, part_index, points)
+    np.maximum.at(high, part_index, points)
+    small = (high - low).max(1) < RIGID_SIZE
+    block = np.unique(np.where(small[part_index], -1 - part_index, connected), return_inverse=True)[1].ravel()
+    blocks = int(block.max()) + 1
+    low = np.full((blocks, 3), np.inf)
+    high = np.full((blocks, 3), -np.inf)
+    np.minimum.at(low, block, points)
+    np.maximum.at(high, block, points)
+    size = (high - low).max(1)
+    node_block = np.zeros(nodes, dtype=np.int64)
+    node_block[node] = block
+    by_block = np.argsort(node_block, kind="stable")
+    starts = np.searchsorted(node_block[by_block], np.arange(blocks + 1))
+    up = np.full(count, np.nan)
+    node_up = np.zeros(nodes)
+    two_rows = np.zeros(blocks, dtype=bool)
+    # Big blocks holding both rows.
+    for b in np.flatnonzero(size >= RIGID_SIZE):
+        mine = by_block[starts[b]:starts[b + 1]]
+        if len(mine) < 8:
+            continue
+        local = np.full(nodes, -1, dtype=np.int64)
+        local[mine] = np.arange(len(mine))
+        edges = local[node_edges]
+        edges = edges[np.all(edges >= 0, axis=1)]
+        if not len(edges) or hairing.components(len(mine), edges).max() > 0:
+            continue
+        share = _split_rows(node_points[mine], edges)
+        if share is None:
+            continue
+        two_rows[b] = True
+        node_up[mine] = share
+        verts = block == b
+        up[verts] = share[local[node[verts]]]
+    # Blocks sitting in much bigger ones, smallest first (a stud joins its tooth before the tooth is placed).
+    group = np.arange(blocks)
+
+    def root(k):
+        while group[k] != k:
+            group[k] = group[group[k]]
+            k = group[k]
+        return k
+
+    placed = two_rows.copy()
+    for b in np.argsort(size, kind="stable"):
+        if two_rows[b]:
+            continue
+        mine = by_block[starts[b]:starts[b + 1]]
+        near = np.flatnonzero(np.all((node_points >= low[b] - ROWS_TOUCH) & (node_points <= high[b] + ROWS_TOUCH),
+                                     axis=1))
+        near = near[size[node_block[near]] >= ROWS_RATIO * size[b]]
+        if not len(mine) or not len(near):
+            continue
+        tree = KDTree(len(mine))
+        for k, p in enumerate(node_points[mine]):
+            tree.insert(p, k)
+        tree.balance()
+        hit = near[np.array([tree.find(p)[2] for p in node_points[near]]) < ROWS_TOUCH]
+        if not len(hit):
+            continue
+        targets, hits = np.unique(node_block[hit], return_counts=True)
+        target = targets[np.argmax(hits)]
+        if two_rows[target]:
+            up[block == b] = float(node_up[hit[node_block[hit] == target]].mean() > 0.5)
+            placed[b] = True
+        else:
+            group[root(b)] = root(target)
+    roots = np.array([root(b) for b in range(blocks)])
+    # A group with a member placed by a two-row block follows it (a stud on a tooth in a gum holding both rows).
+    for r in np.unique(roots[placed & ~two_rows]):
+        members = np.flatnonzero(roots == r)
+        if placed[members].all():
+            continue
+        known = np.isin(block, members[placed[members]])
+        up[np.isin(block, members[~placed[members]])] = float(up[known].mean() > 0.5)
+        placed[members] = True
+    # The groups left: two rows, or one.
+    open_ = np.isnan(up)
+    if open_.any():
+        lip = fit.features.lip
+        if lip is not None and len(lip):
+            bite = float(np.median(lip[:, 2]))
+        elif fit.features.mouth_center is not None:
+            bite = float(fit.features.mouth_center[2])
+        else:
+            bite = float(np.median(points[:, 2]))
+        ids, index = np.unique(roots[block[open_]], return_inverse=True)
+        rows = _rows_of_groups(points[open_], index.ravel(), len(ids), bite)
+        up[open_] = rows[index.ravel()].astype(np.float64)
+    return np.clip(up, 0.0, 1.0)
+
+
+# -----------------------------------------------------------------------------
 # Planning
 
 class Mesh:
@@ -3108,16 +3767,22 @@ class Mesh:
         self.parts, self.part_count = loose_parts(self.points, self.tris)
 
 
+def face_cover(mesh, reference):
+    """The share of the game's face ``reference`` (a sample of its skin) that ``mesh`` lies on (within 4 mm)."""
+    game = reference.points[::max(1, len(reference.points) // 400)]
+    if not len(mesh.tris):
+        return 0.0
+    _tri, _loc, dist = nearest_on(bvh_of(mesh.points, mesh.tris), game)
+    return float((dist < 0.004).mean())
+
+
 def find_skin(meshes, reference):
     """Index of the face skin among ``meshes``: the one with the game's neck ring (if several, the biggest of
     those covering SKIN_COVER of the game's face, else the one covering the most of it: a body in one piece has
     the neck opening too), else the one covering the most of the game's face (at least SKIN_COVER). None when
     none is it."""
-    game = reference.points[::max(1, len(reference.points) // 400)]
-
     def cover(mesh):
-        _tri, _loc, dist = nearest_on(bvh_of(mesh.points, mesh.tris), game)
-        return float((dist < 0.004).mean())
+        return face_cover(mesh, reference)
 
     ring = reference.ring()
     with_ring = []
@@ -3217,12 +3882,300 @@ class Plan:
 
 # Which kinds of parts each choice of ``parts`` of `plan_face` weights: always, and when near its region.
 PART_CHOICES = {
-    'ALL': ({PART_EYEBALL, PART_LASH, PART_FILM, PART_SHELL, PART_INSIDE, PART_EXTRA, PART_RIGID}, set()),
+    'ALL': ({PART_EYEBALL, PART_LASH, PART_FILM, PART_SHELL, PART_TEETH, PART_TONGUE, PART_MOUTH, PART_PIERCING,
+             PART_EXTRA, PART_RIGID}, set()),
     'EYES': ({PART_LASH, PART_FILM}, {PART_SHELL, PART_EXTRA, PART_RIGID}),
-    'MOUTH': ({PART_INSIDE}, {PART_SHELL, PART_EXTRA, PART_RIGID}),
+    'MOUTH': ({PART_TEETH, PART_TONGUE, PART_MOUTH, PART_PIERCING}, {PART_SHELL, PART_EXTRA, PART_RIGID}),
     'LASHES': ({PART_LASH}, set()),
     'NONE': (set(), set()),
 }
+# What a mesh can be set as on the Face panel (Face Weights' Meshes; see `part_kinds`), besides the face itself.
+ROLE_EYEBALLS, ROLE_LASHES, ROLE_MOUTH, ROLE_TEETH, ROLE_TONGUE, ROLE_PIERCING, ROLE_OTHER = (
+    "EYEBALLS", "LASHES", "MOUTH", "TEETH", "TONGUE", "TONGUE_PIERCING", "OTHER")
+ROLE_KINDS = {ROLE_MOUTH: PART_MOUTH, ROLE_TEETH: PART_TEETH, ROLE_TONGUE: PART_TONGUE}
+
+
+class FoundPart:
+    """A loose part (``verts`` of mesh ``mesh``, at ``points``, with its triangles ``tris`` over them) and what it is:
+    ``kind`` with its ``detail`` (the eye side of eyeballs, lashes and films; for a part inside the mouth not sorted
+    yet, the kinds it may be); ``auto`` when that was told by its place and shape rather than its mesh's role;
+    ``inside`` when it was found inside the mouth (a stud there attaches to the teeth and tongue too); ``pierce`` when
+    it may turn out a piercing on the tongue; ``extra``, the weights of the game's part where it is (PART_EXTRA);
+    ``used``, whether it gets weights."""
+
+    def __init__(self, mesh, verts, points, tris, kind, detail=None, auto=True, extra=None):
+        self.mesh = mesh
+        self.verts = verts
+        self.points = points
+        self.tris = tris
+        self.kind = kind
+        self.detail = detail
+        self.auto = auto
+        self.extra = extra
+        self.inside = kind == PART_INSIDE
+        self.pierce = auto
+        self.used = True
+        self._bvh = None
+
+    def bvh(self):
+        if self._bvh is None:
+            self._bvh = bvh_of(self.points, self.tris)
+        return self._bvh
+
+
+def _stacked(parts):
+    """(points, triangles over them, the first row of each part) of ``parts`` (FoundParts) stacked."""
+    if not parts:
+        return np.zeros((0, 3)), np.zeros((0, 3), dtype=np.int64), np.zeros(0, dtype=np.int64)
+    starts = np.cumsum([0] + [len(f.points) for f in parts[:-1]])
+    return (np.vstack([f.points for f in parts]), np.vstack([f.tris + start for f, start in zip(parts, starts)]),
+            starts)
+
+
+def nearest_eye(points, skeleton):
+    """The eye (side) whose eye bone is closest to the middle of ``points``."""
+    center = points.mean(0)
+    sides = [side for side in SIDES if skeleton.has(EYE_BONE.format(side))]
+    if not sides:
+        return 'l' if center[0] >= 0.0 else 'r'
+    return min(sides, key=lambda side: np.linalg.norm(skeleton.head(EYE_BONE.format(side)) - center))
+
+
+def part_kinds(meshes, skin_index, part_meshes, fit, roles, wanted, skin_mouth=False, focus=None):
+    """Every loose part of the meshes ``part_meshes`` (and with ``skin_mouth`` the skin's own loose parts inside the
+    mouth, besides its main part) as FoundParts. A mesh's ``roles`` (a set of ROLE_*) decide what its parts are:
+    EYEBALLS: eyeballs (with other roles: the parts shaped like one); LASHES: lashes or films over the eye (or brows and
+    makeup when they lie on the skin); MOUTH, TEETH, TONGUE: the inside of the mouth, teeth and gums, the tongue (a
+    mesh set as several is sorted among them); TONGUE_PIERCING: a piercing on the tongue (with mouth roles: its small
+    parts on the tongue). Other meshes' parts are told apart by their place and shape (`classify_part`). Parts inside
+    the mouth are then sorted into teeth, tongue and the mouth's inside (`sort_mouth`); small ones on the tongue, away
+    from the teeth, are piercings, and small ones that aren't one of a set of teeth (TEETH_SET) studs moving as one
+    piece. Kinds not ``wanted`` aren't sorted out. With ``focus`` (mesh indices), only those meshes are looked at in
+    full; of the others only the parts by the mouth, which parts inside it may attach to."""
+    skeleton = fit.reference.skeleton
+    features = fit.features
+    middle = features.mouth_center
+    found = []
+
+    def by_mouth(points):
+        if middle is None:
+            return True
+        center = 0.5 * (points.min(0) + points.max(0))
+        return bool(np.all(np.abs(center - middle) <= 2.0 * np.array((MOUTH_BOX[0], MOUTH_BOX[2] + 0.04,
+                                                                      MOUTH_BOX[1]))))
+
+    def make(i, verts, bvh, mine):
+        mesh = meshes[i]
+        pts = mesh.points[verts]
+        mouth = {ROLE_KINDS[role] for role in mine if role in ROLE_KINDS}
+        auto, extra, pierce = False, None, False
+        side = None
+        if ROLE_EYEBALLS in mine:
+            side = eyeball_side(pts, skeleton, mesh.names, mesh.weights[verts], mesh.label)
+            if side is None and mine == {ROLE_EYEBALLS}:
+                side = nearest_eye(pts, skeleton)
+        if side is not None:
+            kind, detail = PART_EYEBALL, side
+        elif mine & {ROLE_PIERCING} and not mouth:
+            kind, detail = PART_PIERCING, None
+        elif mouth:
+            kind, detail, pierce = PART_INSIDE, mouth, ROLE_PIERCING in mine
+            if mine & {ROLE_TONGUE, ROLE_PIERCING} and np.ptp(pts, axis=0).max() < PIERCING_SIZE:
+                # A small part of the tongue's mesh may be its piercing (the barbell joined into it): sorted out
+                # with the rest, then tested as one.
+                detail, pierce = mouth | {PART_TEETH}, True
+        else:
+            kind, detail = classify_part(pts, bvh, features, skeleton, mesh.names, mesh.weights[verts], mesh.label)
+            if ROLE_LASHES in mine:
+                if kind not in (PART_LASH, PART_FILM, PART_SHELL):
+                    margin = nearest_margin(features, pts)
+                    kind, detail = (PART_LASH, margin[0]) if margin is not None else (PART_SHELL, None)
+            else:
+                auto = pierce = True
+                if kind in (PART_INSIDE, PART_RIGID) and PART_EXTRA in wanted:
+                    # Where the game's face has a part of its own (ears, horns, beards), its weights.
+                    extra = extra_weights(pts, fit)
+                    if extra is not None:
+                        kind = PART_EXTRA
+                if kind == PART_INSIDE:
+                    detail = set(MOUTH_KINDS)
+        part = FoundPart(i, verts, pts, part_tris(mesh, verts), kind, detail, auto, extra)
+        part.pierce = pierce
+        return part
+
+    for i in part_meshes:
+        mesh = meshes[i]
+        for k in range(mesh.part_count):
+            verts = np.flatnonzero(mesh.parts == k)
+            if focus is None or i in focus or by_mouth(mesh.points[verts]):
+                found.append(make(i, verts, features.bvh, roles.get(i, set())))
+    if skin_mouth:
+        # The skin's loose parts besides its main one (the face) that lie inside the mouth, measured from the face.
+        mesh = meshes[skin_index]
+        sizes = np.bincount(mesh.parts, minlength=mesh.part_count)
+        main = int(np.argmax(sizes)) if len(sizes) else 0
+        face_bvh = bvh_of(mesh.points, mesh.tris[np.all(mesh.parts[mesh.tris] == main, axis=1)])
+        # The Face set as a mouth part too says what its parts inside the mouth are; its other loose parts stay skin.
+        mine = {ROLE_KINDS[role] for role in roles.get(skin_index, set()) if role in ROLE_KINDS}
+        for k in range(mesh.part_count):
+            if k != main:
+                part = make(skin_index, np.flatnonzero(mesh.parts == k), face_bvh, set())
+                if part.kind == PART_INSIDE:
+                    if mine:
+                        part.detail, part.auto, part.pierce = mine, False, False
+                    found.append(part)
+    if not set(MOUTH_KINDS) & wanted:
+        return [f for f in found if f.kind != PART_INSIDE]
+    inside = [f for f in found if f.kind == PART_INSIDE]
+    for f, kind in zip(inside, sort_mouth(inside, fit, skin_index)):
+        f.kind = kind
+    found = [f for f in found if f.kind is not None]
+    # Parts lying on the skin but closer to the teeth or tongue than to it (front teeth right behind the lips, gems on
+    # them) are parts of the teeth, not of the lips: as teeth they take the row they sit in (or move as one piece with
+    # what they're on, see TEETH_SET).
+    mouth = [f for f in found if f.kind in (PART_TEETH, PART_TONGUE)]
+    shells = [f for f in found if f.kind == PART_SHELL and f.auto and middle is not None and
+              np.all(np.abs(f.points.mean(0) - middle)[[0, 2]] <= MOUTH_BOX[:2])]
+    if mouth and shells:
+        mouth_bvh = bvh_of(*_stacked(mouth)[:2])
+        for f in shells:
+            if np.median(nearest_on(mouth_bvh, f.points)[2]) < np.median(nearest_on(features.bvh, f.points)[2]):
+                f.kind, f.inside, f.pierce = PART_TEETH, True, True
+        # ...and so are those of a mesh of teeth (at least half of its parts teeth, the rest such parts).
+        for i in sorted({f.mesh for f in shells if f.kind == PART_SHELL}):
+            mine = [f for f in found if f.mesh == i]
+            rest = [f for f in mine if f.kind == PART_SHELL]
+            if all(f.kind == PART_TEETH or any(f is s for s in shells) for f in mine) and len(rest) <= len(mine) / 2:
+                for f in rest:
+                    f.kind, f.inside, f.pierce = PART_TEETH, True, True
+    # Small parts found inside the mouth that pass into the tongue or touch it, closer to it than to any teeth, are
+    # piercings on the tongue (a barbell's balls and bar together), not teeth.
+    tongue = [f for f in found if f.kind == PART_TONGUE]
+    small = [f for f in found if f.kind == PART_TEETH and f.pierce and np.ptp(f.points, axis=0).max() < PIERCING_SIZE]
+    if tongue and small:
+        tongue_bvh = bvh_of(*_stacked(tongue)[:2])
+        teeth = [f for f in found if f.kind == PART_TEETH]
+        for i in sorted({f.mesh for f in small}):
+            mine = [f for f in small if f.mesh == i]
+            for piece in pieces(mine):
+                members = [mine[k] for k in piece]
+                pts, tris, _starts = _stacked(members)
+                if np.ptp(pts, axis=0).max() >= PIERCING_SIZE:
+                    continue
+                distance = nearest_on(tongue_bvh, pts)[2]
+                through = bool(bvh_of(pts, tris).overlap(tongue_bvh)) if len(tris) else False
+                if not through and (distance <= ATTACH_RANGE).mean() < PIERCING_SHARE:
+                    continue
+                rest = [f for f in teeth if not any(f is m for m in members)]
+                to_teeth = float(nearest_on(bvh_of(*_stacked(rest)[:2]), pts)[2].min()) if rest else np.inf
+                if distance.min() < to_teeth:
+                    for f in members:
+                        f.kind = PART_PIERCING
+    # Small parts found inside the mouth that aren't one of a set of teeth (TEETH_SET of them in their mesh, or set in
+    # a bigger part of the teeth) are piercings or studs: they move as one piece with what they're on.
+    teeth = [f for f in found if f.kind == PART_TEETH]
+    small = [f for f in teeth if f.auto and np.ptp(f.points, axis=0).max() < RIGID_SIZE]
+    if small:
+        counts = {}
+        for f in small:
+            counts[f.mesh] = counts.get(f.mesh, 0) + 1
+        big = [f for f in teeth if np.ptp(f.points, axis=0).max() >= RIGID_SIZE]
+        big_bvh = bvh_of(*_stacked(big)[:2]) if big else None
+        for f in small:
+            if counts[f.mesh] < TEETH_SET and (big_bvh is None or nearest_on(big_bvh, f.points)[2].min() >= ROWS_TOUCH):
+                f.kind = PART_RIGID
+    return found
+
+
+def mouth_weights(found, fit, names, skin_w, face_tris, report):
+    """{id(FoundPart): weights over ``names``} of the parts inside the mouth: teeth and gums all on the upper or the
+    lower gum bone (`teeth_rows` tells them apart, every mesh's teeth together), the tongue the game's tongue's
+    (`tongue_weights`, every tongue part together) and the inside of the mouth the weights of what's around it on its
+    side (`row_share`): the face (its new weights ``skin_w``, over ``face_tris``) and the teeth, never the tongue, so
+    neither the teeth nor the face pass through it. Counts go into ``report['mouth']``."""
+    out = {}
+    teeth = [f for f in found if f.kind == PART_TEETH]
+    tongue = [f for f in found if f.kind == PART_TONGUE]
+    linings = [f for f in found if f.kind == PART_MOUTH]
+    if not (teeth or tongue or linings):
+        return out
+    tongue_points, _tongue_tris, tongue_starts = _stacked(tongue)
+    teeth_points, teeth_tris, starts = _stacked(teeth)
+    teeth_up = np.zeros(0)
+    teeth_w = np.zeros((0, len(names)))
+    if teeth:
+        part = np.concatenate([np.full(len(f.verts), k) for k, f in enumerate(teeth)])
+        teeth_up = teeth_rows(teeth_points, teeth_tris, part, fit)
+        upper, lower = row_bones(names, fit.reference.skeleton)
+        teeth_w = np.zeros((len(teeth_points), len(names)))
+        teeth_w[:, upper] += teeth_up
+        teeth_w[:, lower] += 1.0 - teeth_up
+        for f, start in zip(teeth, starts):
+            out[id(f)] = teeth_w[start:start + len(f.verts)]
+    if tongue:
+        weights = over(fit.reference.names, tongue_weights(tongue_points, fit), names)
+        for f, start in zip(tongue, tongue_starts):
+            out[id(f)] = weights[start:start + len(f.verts)]
+    if linings:
+        # The face and the teeth, each side labelled: the inside of the mouth takes the upper side's weights where it
+        # goes with the upper teeth, the lower side's where it goes with the lower teeth.
+        labels = np.concatenate([fit.labels, np.where(teeth_up > 0.5, MOUTH_UPPER, MOUTH_LOWER)])
+        transfer = SidedTransfer(np.vstack([fit.points, teeth_points]),
+                                 np.vstack([face_tris, teeth_tris + len(fit.points)]),
+                                 np.vstack([skin_w, teeth_w]), labels)
+        for f in linings:
+            share = row_share(f.points, teeth_points, teeth_up, fit.features.lip)[:, None]
+            up = transfer.weights_at(f.points, np.full(len(f.points), MOUTH_UPPER))
+            down = transfer.weights_at(f.points, np.full(len(f.points), MOUTH_LOWER))
+            out[id(f)] = share * up + (1.0 - share) * down
+    rows = [teeth_up[start:start + len(f.verts)] for f, start in zip(teeth, starts)]
+    report["mouth"] = {
+        "upper": sum(1 for r in rows if r.min() >= 0.5), "lower": sum(1 for r in rows if r.max() < 0.5),
+        "both": sum(1 for r in rows if r.min() < 0.5 <= r.max()), "tongue": len(tongue), "inside": len(linings),
+        "piercings": sum(1 for f in found if f.kind == PART_PIERCING)}
+    return out
+
+
+def attach_surfaces(found, mouth, fit, skin_w, face_tris):
+    """What rigid parts attach to, as (BVHTree, points, triangles, weights) for `rigid_weights`: the face (its new
+    weights ``skin_w``, over ``face_tris``); the face with its parts inside the mouth (``mouth``: their new weights, by
+    id), for studs found inside it; and the tongue alone, for piercings on it (or None, without a tongue)."""
+    face = (bvh_of(fit.points, face_tris), fit.points, face_tris, skin_w)
+    inside = [f for f in found if f.kind in MOUTH_KINDS and id(f) in mouth]
+    if not inside:
+        return face, face, None
+    points, tris, _starts = _stacked(inside)
+    all_points = np.vstack([fit.points, points])
+    all_tris = np.vstack([face_tris, tris + len(fit.points)])
+    with_mouth = (bvh_of(all_points, all_tris), all_points, all_tris,
+                  np.vstack([skin_w] + [mouth[id(f)] for f in inside]))
+    tongue = [f for f in inside if f.kind == PART_TONGUE]
+    on_tongue = None
+    if tongue:
+        tongue_points, tongue_tris, _starts = _stacked(tongue)
+        on_tongue = (bvh_of(tongue_points, tongue_tris), tongue_points, tongue_tris,
+                     np.vstack([mouth[id(f)] for f in tongue]))
+    return face, with_mouth, on_tongue
+
+
+def piece_weights(members, surface, whole=False):
+    """Weights for a piece of touching rigid parts (``members``, FoundParts) on ``surface`` ((BVHTree, points,
+    triangles, weights)), {id: weights}: each part touching the surface (within ATTACH_RANGE) its own (`rigid_weights`),
+    the others the average of those (a barbell's balls take its bar's), so a chain lying along the skin follows it link
+    by link; when none touches it (a chain hanging off the skin), each part its own. With ``whole`` (a piercing), the
+    whole piece as one."""
+    bvh = surface[0]
+    if not whole:
+        near = [f for f in members if nearest_on(bvh, f.points)[2].min() <= ATTACH_RANGE] or members
+        out = {id(f): rigid_weights(f.points, *surface) for f in near}
+        shared = np.mean([out[id(f)][0] for f in near], axis=0)
+        for f in members:
+            if id(f) not in out:
+                out[id(f)] = np.repeat(shared[None], len(f.points), axis=0)
+        return out
+    points = np.vstack([f.points for f in members])
+    weights = rigid_weights(points, *surface)[0]
+    return {id(f): np.repeat(weights[None], len(f.points), axis=0) for f in members}
 
 
 def near_region(points, features, region):
@@ -3246,19 +4199,23 @@ def part_tris(mesh, verts):
 
 
 def plan_face(meshes, skin_index, reference, *, skin='ALL', parts='ALL', targets=None, close=True, neck=False,
-              snap_lashes=False, lash_lift=0.0, max_groups=DEFAULT_MAX_GROUPS):
+              snap_lashes=False, lash_lift=0.0, max_groups=DEFAULT_MAX_GROUPS, roles=None, part_meshes=None):
     """Plan the face tools on ``meshes`` (Mesh), the skin being ``meshes[skin_index]``, from the game's face
     ``reference``.
 
     ``skin``: how the skin's weights change: 'ALL' (all of them from the game's face), 'EYES' or 'MOUTH'
     (only around the eyes or the mouth, blended into its own), 'NECK' (only the neck), 'NONE'.
-    ``parts``: which loose parts of the other meshes (``targets``, indices; None for all) get weights, by
-    what they are (see PART_CHOICES): 'ALL', 'EYES' (lashes, films, and what's around the eyes), 'MOUTH'
+    ``parts``: which loose parts of the other meshes (``targets``, indices; None for all of ``part_meshes``) get
+    weights, by what they are (see PART_CHOICES): 'ALL', 'EYES' (lashes, films, and what's around the eyes), 'MOUTH'
     (what's inside the mouth or around it), 'LASHES' or 'NONE'.
     ``close``: fit the lid weights so the eyes are shut in the Shut Eyes expression (with 'ALL' and 'EYES').
     ``neck``: plan making the neck ring the game's (positions, normals, weights).
     ``snap_lashes``: plan sitting the lashes on the lids where they float off them or sink in (see `lash_offsets`),
     ``lash_lift`` farther out.
+    ``roles``: what meshes were set as on the Face panel ({mesh index: set of ROLE_*}; see `part_kinds`): their loose
+    parts are taken for that instead of being told apart by their place and shape.
+    ``part_meshes``: the meshes that are parts of the face (indices; None for all but the skin): what the parts
+    getting weights are sorted among and may attach to (a piercing to the tongue).
     Raises FaceError when 'EYES' or 'MOUTH' can't find what they fit to: the eye openings, the lip line.
     """
     plan = Plan()
@@ -3272,8 +4229,9 @@ def plan_face(meshes, skin_index, reference, *, skin='ALL', parts='ALL', targets
     if eyes and not plan.report["eyeballs"] and (skin in ('ALL', 'EYES') or parts in ('ALL', 'EYES', 'LASHES')):
         # Without them the openings are found against spheres of the game's eyeballs, which fit custom eyes
         # loosely: lids and lash lines are found less well (a lash part may pass for a film over the eye).
-        plan.report["warnings"].append("the eyeballs weren't selected, so the eyes were measured against spheres of "
-                                       "the game's eyeballs: select them too for a closer fit")
+        plan.report["warnings"].append("no eyeballs were among the meshes, so the eyes were measured against spheres "
+                                       "of the game's eyeballs: add them (under Meshes, or with no Face set there, to "
+                                       "the selection) for a closer fit")
     # Every goal is over the game face's bones, the eyeballs' and the skin's own.
     names = list(reference.names)
     names += [bone for bone in dict.fromkeys(eyeball_bone(skeleton, side) for side in SIDES) if bone not in names]
@@ -3332,69 +4290,99 @@ def plan_face(meshes, skin_index, reference, *, skin='ALL', parts='ALL', targets
     if skin != 'NONE':
         plan.goals[skin_index] = skin_w
         plan.masks[skin_index] = np.ones(len(skin_mesh.points), dtype=bool)
-    # The other meshes, by what their loose parts are, attached to the skin with its new weights.
+    # The other meshes, by what their loose parts are; and the skin's own loose parts inside the mouth (a bag lining
+    # it, teeth or a tongue in the face's mesh) when its weights change there.
     always, nearby = PART_CHOICES[parts]
-    others = [i for i in (range(len(meshes)) if targets is None else targets) if i != skin_index]
-    if not always and not nearby:
-        others = []
-    surface = SidedTransfer(fit.points, fit.tris, skin_w, fit.labels) if others else None
-    skin_bvh = fit.features.bvh
+    wanted = always | nearby
+    part_meshes = [i for i in (range(len(meshes)) if part_meshes is None else part_meshes) if i != skin_index]
+    targets = set(part_meshes if targets is None else targets) - {skin_index}
+    roles = roles or {}
+    # The brush weights one mesh: the others are looked at only where its parts may attach to them.
+    focus = None if targets >= set(part_meshes) else targets
+    found = part_kinds(meshes, skin_index, part_meshes if wanted else [], fit, roles, wanted,
+                       skin_mouth=skin in ('ALL', 'MOUTH') and PART_TEETH in wanted, focus=focus)
+    for f in found:
+        f.used = (f.mesh in targets or f.mesh == skin_index) and (
+            f.kind in always or (f.kind in nearby and near_region(f.points, fit.features, parts)))
+    # The face without its parts inside the mouth, with its new weights, for the parts to follow.
+    face_tris = fit.tris
+    in_mouth = [f.verts for f in found if f.mesh == skin_index]
+    if in_mouth:
+        keep = np.ones(len(fit.points), dtype=bool)
+        keep[np.concatenate(in_mouth)] = False
+        face_tris = fit.tris[np.all(keep[fit.tris], axis=1)]
+    surface = SidedTransfer(fit.points, face_tris, skin_w, fit.labels) if found else None
+    mouth = mouth_weights(found, fit, names, skin_w, face_tris, plan.report)
+    surfaces = attach_surfaces(found, mouth, fit, skin_w, face_tris) if any(
+        f.kind in (PART_RIGID, PART_PIERCING) and f.used for f in found) else None
     snap_skins = None
-    for i in others:
-        mesh = meshes[i]
-        goal = np.zeros((len(mesh.points), len(names)))
-        mask = np.zeros(len(mesh.points), dtype=bool)
-        counts = {}
-        offsets = np.zeros((len(mesh.points), 3))
-        for part in range(mesh.part_count):
-            verts = np.flatnonzero(mesh.parts == part)
-            pts = mesh.points[verts]
-            kind, detail = classify_part(pts, skin_bvh, fit.features, skeleton, mesh.names, mesh.weights[verts],
-                                         mesh.label)
-            extra = None
-            if kind in (PART_INSIDE, PART_RIGID) and (PART_EXTRA in always or PART_EXTRA in nearby):
-                # Where the game's face has a part of its own (ears, horns, beards), its weights.
-                extra = extra_weights(pts, fit)
-                if extra is not None:
-                    kind = PART_EXTRA
-            if kind not in always and not (kind in nearby and near_region(pts, fit.features, parts)):
-                continue
-            mask[verts] = True
-            counts[kind] = counts.get(kind, 0) + 1
-            if kind == PART_EYEBALL:
-                goal[verts, names.index(eyeball_bone(skeleton, detail))] = 1.0
-            elif kind == PART_LASH:
-                tris = part_tris(mesh, verts)
-                roots = LashRoots(pts, tris, fit.features, detail)
-                # Their roots take the skin's weights where they sit.
-                goal[verts] = lash_weights(pts, tris, roots, fit.features, surface, names)
-                if snap_lashes:
-                    # Snapped lashes are kept out of the skin in the poses that close the eyes too, moved by the
-                    # weights they get; then weighted where they are.
-                    if snap_skins is None:
-                        snap_skins = posed_skins(fit.points, fit.tris, names, skin_w, skeleton)
-                    weights = limit_weights(goal[verts], max_groups)
-                    offsets[verts] = lash_offsets(pts, roots, fit.features, lash_lift,
-                                                  [(bvh, deform, names, weights) for bvh, deform in snap_skins])
-                    goal[verts] = lash_weights(pts + offsets[verts], tris, roots, fit.features, surface, names)
-            elif kind == PART_FILM:
-                goal[verts] = film_weights(pts, fit.features, detail, fit.points, fit.tris, skin_w)
-            elif kind == PART_SHELL:
-                goal[verts] = surface.weights_at(pts, point_labels(pts, fit.features), None)
-            elif kind == PART_INSIDE:
-                goal[verts] = one_piece(over(reference.names, fit.reference_weights(pts), names), pts)
-            elif kind == PART_EXTRA:
-                goal[verts] = one_piece(over(reference.names, extra, names), pts)
-            else:
-                goal[verts] = rigid_weights(pts, skin_bvh, fit.points, fit.tris, skin_w)
-        if not mask.any():
+    goals, masks, counts, offsets = {}, {}, {}, {}
+    for f in found:
+        if not f.used:
+            continue
+        mesh = meshes[f.mesh]
+        if f.mesh not in goals:
+            goals[f.mesh] = np.zeros((len(mesh.points), len(names)))
+            masks[f.mesh] = np.zeros(len(mesh.points), dtype=bool)
+            counts[f.mesh] = {}
+            offsets[f.mesh] = np.zeros((len(mesh.points), 3))
+        goal, verts, pts, kind, detail = goals[f.mesh], f.verts, f.points, f.kind, f.detail
+        masks[f.mesh][verts] = True
+        counts[f.mesh][kind] = counts[f.mesh].get(kind, 0) + 1
+        if kind == PART_EYEBALL:
+            goal[verts, names.index(eyeball_bone(skeleton, detail))] = 1.0
+        elif kind == PART_LASH:
+            tris = part_tris(mesh, verts)
+            roots = LashRoots(pts, tris, fit.features, detail)
+            # Their roots take the skin's weights where they sit.
+            goal[verts] = lash_weights(pts, tris, roots, fit.features, surface, names)
+            if snap_lashes:
+                # Snapped lashes are kept out of the skin in the poses that close the eyes too, moved by the
+                # weights they get; then weighted where they are.
+                if snap_skins is None:
+                    snap_skins = posed_skins(fit.points, fit.tris, names, skin_w, skeleton)
+                weights = limit_weights(goal[verts], max_groups)
+                offsets[f.mesh][verts] = lash_offsets(pts, roots, fit.features, lash_lift,
+                                                      [(bvh, deform, names, weights) for bvh, deform in snap_skins])
+                goal[verts] = lash_weights(pts + offsets[f.mesh][verts], tris, roots, fit.features, surface, names)
+        elif kind == PART_FILM:
+            goal[verts] = film_weights(pts, fit.features, detail, fit.points, fit.tris, skin_w)
+        elif kind == PART_SHELL:
+            goal[verts] = surface.weights_at(pts, point_labels(pts, fit.features), None)
+        elif kind in MOUTH_KINDS:
+            goal[verts] = mouth[id(f)]
+        elif kind == PART_EXTRA:
+            goal[verts] = one_piece(over(reference.names, f.extra, names), pts)
+    # Piercings and other parts that move as one piece with what they're on (see `piece_weights`): the parts of a mesh
+    # touching each other together (a barbell's balls and bar), on the face, or for studs found inside the mouth the
+    # face, teeth and tongue; a piercing on the tongue, as one, on the tongue.
+    face, with_mouth, on_tongue = surfaces if surfaces is not None else (None, None, None)
+    for kind in (PART_RIGID, PART_PIERCING):
+        for i in sorted({f.mesh for f in found if f.kind == kind and f.used}):
+            mine = [f for f in found if f.mesh == i and f.kind == kind and f.used]
+            for piece in pieces(mine):
+                members = [mine[k] for k in piece]
+                if kind == PART_PIERCING:
+                    onto = on_tongue or with_mouth
+                else:
+                    onto = with_mouth if any(f.inside for f in members) else face
+                for f in members:
+                    goals[i][f.verts] = piece_weights(members, onto, whole=kind == PART_PIERCING)[id(f)]
+    for i, goal in goals.items():
+        if i == skin_index:
+            if skin_index in plan.goals:
+                inside = masks[i]
+                plan.goals[skin_index][inside] = limit_weights(goal[inside], max_groups)
+                plan.kinds[skin_index] = counts[i]
+            continue
+        if i not in targets:
             continue
         plan.goals[i] = limit_weights(goal, max_groups)
-        plan.masks[i] = mask
-        plan.kinds[i] = counts
-        if snap_lashes and np.abs(offsets).max() > 0.0:
-            moved = np.flatnonzero(np.abs(offsets).max(1) > 0.0)
-            plan.lashes[i] = (moved, offsets[moved])
+        plan.masks[i] = masks[i]
+        plan.kinds[i] = counts[i]
+        if snap_lashes and np.abs(offsets[i]).max() > 0.0:
+            moved = np.flatnonzero(np.abs(offsets[i]).max(1) > 0.0)
+            plan.lashes[i] = (moved, offsets[i][moved])
     plan.names = names
     if neck:
         plan.neck = match_neck(fit.points, fit.tris, reference)
@@ -3699,10 +4687,11 @@ def face_armature(objects):
 class FaceSetup:
     """What the face tools work on: ``objects`` and their ``meshes`` (Mesh, in the reference's model space),
     the game's ``face`` (FaceModel) found ``how`` ('NAME', 'SHAPE' or 'PICK'), which mesh is the ``skin``,
-    the ``armature`` object and its ``offset``, and the meshes ``left_out`` (indices) because their weights
-    are on bones the face doesn't use (hair, Viera ears, the body)."""
+    the ``armature`` object and its ``offset``, the meshes ``left_out`` (indices) because their weights
+    are on bones the face doesn't use (hair, Viera ears, the body), and what meshes were set as on the Face panel
+    (``roles``: {index: set of ROLE_*})."""
 
-    def __init__(self, objects, meshes, face, how, skin, armature, offset, left_out):
+    def __init__(self, objects, meshes, face, how, skin, armature, offset, left_out, roles=None):
         self.objects = objects
         self.meshes = meshes
         self.face = face
@@ -3711,6 +4700,7 @@ class FaceSetup:
         self.armature = armature
         self.offset = offset
         self.left_out = left_out
+        self.roles = roles or {}
 
     @property
     def parts(self):
@@ -3740,8 +4730,10 @@ def detect(objects, reference=None, world=None):
     return detect_face(world, reference, offsets)
 
 
-def setup(objects, settings, reference=None):
-    """FaceSetup of ``objects`` with the settings' Game Face (Scene.magic_fit). Raises FaceError."""
+def setup(objects, settings, reference=None, roles=None, skin=None):
+    """FaceSetup of ``objects`` with the settings' Game Face (Scene.magic_fit): the face is ``objects[skin]`` when
+    given (set on the Face panel), else the one where the game's face is (`find_skin`); ``roles``, what the others
+    were set as ({index: set of ROLE_*}). Raises FaceError."""
     reference = Reference.get() if reference is None else reference
     armature = face_armature(objects)
     world = [object_mesh(obj) for obj in objects]
@@ -3759,15 +4751,21 @@ def setup(objects, settings, reference=None):
     face = reference.face(race, number)
     offset = armature_offset(armature, face.skeleton)
     meshes = [Mesh(mesh.name, mesh.points - offset, mesh.tris, mesh.names, mesh.weights, mesh.label) for mesh in world]
-    skin = find_skin(meshes, face)
+    roles = roles or {}
     if skin is None:
-        raise FaceError("None of the selected meshes is where the face of {:s} is: select the face (and its "
-                        "parts){:s}".format(face_title(race, number),
-                                            "" if how == 'PICK' else ", or pick the game's face"))
+        skin = find_skin(meshes, face)
+        if skin is None:
+            raise FaceError("None of the selected meshes is where the face of {:s} is: select the face (and its "
+                            "parts){:s}".format(face_title(race, number),
+                                                "" if how == 'PICK' else ", or pick the game's face"))
+    elif face_cover(meshes[skin], face) < PICKED_COVER:
+        raise FaceError("'{:s}' isn't where the face of {:s} is: set the face's mesh as the Face{:s}".format(
+            objects[skin].name, face_title(race, number), "" if how == 'PICK' else ", or pick the game's face"))
     known = known_bones(face)
     left_out = []
     for i, (obj, mesh) in enumerate(zip(objects, meshes)):
-        if i != skin:
+        # Meshes set as a part on the Face panel are that part, whatever their weights now.
+        if i != skin and not roles.get(i, set()) - {ROLE_OTHER}:
             bones = painting.deform_bone_names(obj) or None
             if foreign_share(mesh, known, bones) > FOREIGN_SHARE:
                 left_out.append(i)
@@ -3780,7 +4778,57 @@ def setup(objects, settings, reference=None):
     columns = [j for j, name in enumerate(skin_mesh.names) if name in bones]
     skin_mesh.names = [skin_mesh.names[j] for j in columns]
     skin_mesh.weights = skin_mesh.weights[:, columns]
-    return FaceSetup(objects, meshes, face, how, skin, armature, offset, left_out)
+    return FaceSetup(objects, meshes, face, how, skin, armature, offset, left_out, roles)
+
+
+def find_parts(job):
+    """What each part of ``job`` (FaceSetup) is, without weighting anything: {mesh index: {kind: loose parts}} (see
+    `part_kinds`), the skin's own loose parts inside the mouth under the skin's index."""
+    skeleton = job.face.skeleton
+    skin_mesh = job.meshes[job.skin]
+    eyes = find_eyes(job.meshes, skeleton, job.face.radius, skip=job.skin)
+    fit = FaceFit(skin_mesh.points, skin_mesh.tris, job.face, eyes)
+    found = part_kinds(job.meshes, job.skin, job.parts, fit, job.roles, PART_CHOICES['ALL'][0], skin_mouth=True)
+    kinds = {}
+    for f in found:
+        mine = kinds.setdefault(f.mesh, {})
+        mine[f.kind] = mine.get(f.kind, 0) + 1
+    return kinds
+
+
+# The Face panel's pickers (Face Weights' Meshes): (setting, what its mesh is); and its lists.
+PICKERS = (("face_eyeballs", ROLE_EYEBALLS), ("face_teeth", ROLE_TEETH), ("face_tongue", ROLE_TONGUE),
+           ("face_mouth", ROLE_MOUTH), ("face_tongue_piercing", ROLE_PIERCING))
+LISTS = (("face_lashes", ROLE_LASHES), ("face_others", ROLE_OTHER))
+
+
+def picked_meshes(settings):
+    """(objects, roles) of the meshes set on the Face panel (Scene.magic_fit): the Face first, then its parts, each mesh
+    once ({index: set of ROLE_*}, a mesh set as several parts having several); None when no Face is set."""
+    face = settings.face_skin
+    if face is None:
+        return None
+    objects, roles = [], {}
+
+    def add(obj, role):
+        if obj is None or obj.type != 'MESH':
+            return
+        for k, other in enumerate(objects):
+            if other == obj or other.data == obj.data:
+                if role is not None:
+                    roles.setdefault(k, set()).add(role)
+                return
+        objects.append(obj)
+        if role is not None:
+            roles[len(objects) - 1] = {role}
+
+    add(face, None)
+    for prop, role in PICKERS:
+        add(getattr(settings, prop), role)
+    for prop, role in LISTS:
+        for item in getattr(settings, prop):
+            add(item.object, role)
+    return objects, roles
 
 
 def _fingerprint(objects):
@@ -3795,26 +4843,55 @@ def clear_cache():
     _goal_cache.clear()
 
 
+def brush_meshes(context, obj, settings):
+    """(objects, roles, skin) the brush on ``obj`` works with: ``obj`` first, then the meshes set on the Face panel
+    (``skin``: the Face's index) or, without a Face set there, the selected meshes (``skin`` None: found)."""
+    picked = picked_meshes(settings)
+    if picked is None:
+        return [obj] + [other for other in context.selected_objects
+                        if other is not obj and other.type == 'MESH' and other.data is not obj.data], {}, None
+    picked_objects, picked_roles = picked
+    for other in picked_objects:
+        if context.view_layer.objects.get(other.name) is not other:
+            raise FaceError("'{:s}' (under Meshes) isn't in this scene: set another mesh there or clear it".format(
+                other.name))
+    if not any(other == obj or other.data == obj.data for other in picked_objects):
+        raise FaceError("'{:s}' isn't under Meshes on the Face panel: set it there, or clear the Meshes to paint with "
+                        "the selected meshes".format(obj.name))
+    objects, roles = [obj], {}
+    skin = None
+    for k, other in enumerate(picked_objects):
+        index = 0 if (other == obj or other.data == obj.data) else len(objects)
+        if index:
+            objects.append(other)
+        if k in picked_roles:
+            roles.setdefault(index, set()).update(picked_roles[k])
+        if k == 0:
+            skin = index
+    return objects, roles, skin
+
+
 def build_stroke(context, obj, settings):
     """A FaceStroke for the brush on ``obj``: toward the weights Face Weights gives it (the face's, or those
-    of the part of the face it is, with the other selected meshes). Raises FaceError."""
+    of the part of the face it is, with the meshes set on the Face panel or else selected). Raises FaceError."""
     modifier = straighten.deforming_armature(obj)
     if modifier is None:
         raise FaceError("The face needs an Armature modifier: give it Face Weights first")
-    objects = [obj] + [other for other in context.selected_objects
-                       if other is not obj and other.type == 'MESH' and other.data is not obj.data]
-    key = (_fingerprint(objects), settings.face_source, settings.face_race, settings.face_number,
-           settings.face_close_eyes, settings.face_max_groups)
+    objects, roles, skin = brush_meshes(context, obj, settings)
+    key = (_fingerprint(objects), tuple(sorted((k, tuple(sorted(v))) for k, v in roles.items())), skin,
+           settings.face_source, settings.face_race, settings.face_number, settings.face_close_eyes,
+           settings.face_max_groups)
     cached = _goal_cache.get(key)
     if cached is None:
-        job = setup(objects, settings)
+        job = setup(objects, settings, roles=roles, skin=skin)
         if 0 in job.left_out:
             raise FaceError("'{:s}' is weighted to bones the face doesn't use (hair, the body): the brush "
                             "paints faces and their parts".format(obj.name))
-        plan = plan_face(job.meshes, job.skin, job.face, skin='ALL', parts='ALL', targets=[0],
-                         close=settings.face_close_eyes, max_groups=settings.face_max_groups)
+        plan = plan_face(job.meshes, job.skin, job.face, skin='ALL', parts='ALL', targets=[0], part_meshes=job.parts,
+                         roles=job.roles, close=settings.face_close_eyes, max_groups=settings.face_max_groups)
         if 0 not in plan.goals:
-            raise FaceError("Select the face too: the brush weights parts of a face from it")
+            raise FaceError("Select the face too (or set it on the Face panel): the brush weights parts of a face from "
+                            "it")
         cached = (plan.names, plan.goals[0], job.meshes[0].points + job.offset)
         _goal_cache.clear()
         _goal_cache[key] = cached
