@@ -40,6 +40,8 @@ The sidebar tab has five tabs: **Weights**, **Body Fit**, **Line Up**, **Texture
 - It keeps to FFXIV's limit of 8 bones per vertex.
 - Hard parts like buckles can be set to **Rigid**, so they never bend.
 
+**[Connect Parts](docs/guide.md#connect-parts)** gives loose parts that lie on bigger ones (belts, belt loops, flaps, buckles) the weights of what they lie on. Then they move together instead of sinking in or lifting off when the legs bend or Customize+ scales them.
+
 The **[Weight Brushes](docs/guide.md#weight-brushes)** fix weights where you paint, in Weight Paint mode. Each mode also has a button that does whole meshes:
 
 - **Copy** paints the body's weights onto the mesh, bit by bit.

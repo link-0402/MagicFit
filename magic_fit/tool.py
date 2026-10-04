@@ -12,6 +12,7 @@ from . import clipping, facing, hairing, tabs
 from .operators import (
     FACE_REPAIRS,
     MAGIC_FIT_OT_body_fit,
+    MAGIC_FIT_OT_connect_parts,
     MAGIC_FIT_OT_detect_face,
     MAGIC_FIT_OT_face_pose,
     MAGIC_FIT_OT_face_repair,
@@ -27,6 +28,7 @@ from .operators import (
     MAGIC_FIT_OT_skirt_weights,
     MAGIC_FIT_OT_texture_relax,
     MAGIC_FIT_OT_use_tool,
+    check_connect_ready,
     check_face_pose_ready,
     check_face_tools_ready,
     check_fit_ready,
@@ -713,10 +715,33 @@ class _WeightBrushPanel(tabs.TabPanel):
         """The settings only the brush has, above the rest."""
 
 
+class VIEW3D_PT_connect_parts_sidebar(tabs.TabPanel, bpy.types.Panel):
+    """Make loose parts that lie on each other (belts, loops, flaps, buckles) move together"""
+    bl_label = "Connect Parts"
+    bl_order = 2
+    weights_tabs = {'GENERAL'}
+
+    def draw(self, context):
+        layout = _panel_layout(self.layout)
+        settings = context.scene.magic_fit
+        col = layout.column()
+        sub = col.column(align=True)
+        sub.prop(settings, "connect_distance")
+        sub.prop(settings, "connect_blend")
+        col.prop(settings, "connect_max_groups")
+        problem = check_connect_ready(context)
+        if problem is not None:
+            col.box().label(text=problem, icon='ERROR')
+        col.separator()
+        row = col.row()
+        row.scale_y = 1.4
+        row.operator(MAGIC_FIT_OT_connect_parts.bl_idname, icon='LINKED')
+
+
 class VIEW3D_PT_magic_fit_sidebar(_WeightBrushPanel, bpy.types.Panel):
     """Paint to copy the body's weights, straighten creases in the pose, or smooth weights"""
     bl_label = "Weight Brushes"
-    bl_order = 2
+    bl_order = 3
     weights_tabs = {'GENERAL'}
 
     @staticmethod
@@ -1313,6 +1338,7 @@ classes = (
     VIEW3D_PT_texture_relax_options,
     VIEW3D_MT_magic_fit_links,
     VIEW3D_PT_magic_fit_tabs,
+    VIEW3D_PT_connect_parts_sidebar,
     VIEW3D_PT_magic_fit_sidebar,
     VIEW3D_PT_skirt_weights_sidebar,
     VIEW3D_PT_skirt_brush_sidebar,

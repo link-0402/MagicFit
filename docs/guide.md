@@ -8,7 +8,7 @@ In the 3D Viewport, press **N** and open the **Magic Fit** tab. It's there in ev
 
 | Tab | What's on it |
 | --- | --- |
-| **Weights** | [Weight Transfer](#weight-transfer) and the [Weight Brushes](#weight-brushes), sorted into sub-tabs: **General** (Copy, Straighten, Smooth), **Skirt**, **Heels**, **Hair** and **Face**. Each sub-tab has a button for whole meshes first, then its brush. |
+| **Weights** | [Weight Transfer](#weight-transfer), [Connect Parts](#connect-parts) and the [Weight Brushes](#weight-brushes), sorted into sub-tabs: **General** (Copy, Straighten, Smooth), **Skirt**, **Heels**, **Hair** and **Face**. Each sub-tab has a button for whole meshes first, then its brush. |
 | **Body Fit** | The [Body Fit](#body-fit) brush, the [Fit Move](#fit-move) tool, [Resize](#resize) and the [Clipping](#clipping-marks) marks. |
 | **Line Up** | [Line Up](#line-up), for models from other games. |
 | **Texture Relax** | The [Texture Relax](#texture-relax) brush. |
@@ -117,6 +117,33 @@ Weight Transfer started as [Robust Weight Transfer](https://jinxxy.com/SentFromS
 - There's no Install Dependencies button, since Blender installs SciPy with the add-on.
 - Balance L/R, Smoothed Limit Vertex Groups and Visualize Rejected Weights are gone. The transfer limits groups by itself.
 - New: the **Combined** Inpaint Mode (the default) and **Rigid** meshes.
+
+## Connect Parts
+
+Clothing is full of loose parts lying on others: belts and belt loops on a skirt, a flap over a panel, a buckle, pockets, trims. Each part gets its weights on its own, so where one lies on another their weights differ a little. Then they move a little differently: a belt weighted to the hips sinks into the skirt under it or lifts off it as the thighs bend or Customize+ scales them.
+
+**Connect Parts** gives each part the weights of the bigger part it lies on, so they move together. Run it after [Weight Transfer](#weight-transfer) or whenever you've changed the weights.
+
+1. In the **Weights** tab, on the **General** sub-tab, select the meshes whose parts belong together. A belt can be a mesh of its own.
+2. Click **Connect Parts**, in Object or Weight Paint mode.
+
+| Option | What it does |
+| --- | --- |
+| Distance | Vertices this close to a bigger part take its weights at their closest point (5 mm). A part that comes no closer to a bigger one isn't connected. |
+| Blend | Farther than Distance, the weights blend back to the part's own over this much more (2 cm). Past that, the part keeps its own weights. |
+| Max Groups | At most this many bone weights per vertex (8). |
+
+- Parts go from the biggest down, by area. The biggest part keeps its weights, and a loop on a belt on a skirt ends up with the skirt's weights through the belt.
+- A part that lies within Distance plus Blend all over follows what it lies on entirely, even where it stands off (a buckle, a flap's free edge). A part that only touches somewhere, like a strap sewn to a dress, follows it there and keeps its own weights farther along. In between, the weights blend smoothly along the part.
+- Vertices without weights are filled in from the rest of their part.
+- Clicking again changes nothing. Change the weights of the bigger part, then connect again.
+- Meshes are matched by vertex group names, and a mesh gets the bone groups it's missing.
+- The body is never changed, even when it's selected. Hidden vertices and locked groups aren't changed either, and in Weight Paint mode with selection masking, only the selected vertices change.
+- Distances are measured in the rest pose. Split seams count as joined.
+
+What's left is the gap itself. Bone scaling scales it too, so a loop 4 mm off a skirt scaled by 15 % ends up about 0.6 mm farther off.
+
+If a part isn't connected, it lies farther than Distance from the parts around it: raise Distance a little. Keep it below the gap between separate layers that should move on their own, like a jacket over a shirt. Only select meshes whose parts belong together.
 
 ## Weight Brushes
 

@@ -32,7 +32,7 @@ DRAW_ERRORS = []
 TABS_PANEL = "Magic Fit"  # the tabs, the Weights sub-tabs and the Body row
 # The panels on each tab (and sub-tab of the Weights tab), top to bottom, besides the tabs.
 EXPECTED = (
-    ('WEIGHTS', 'GENERAL', ["Weight Transfer", "Weight Brushes"]),
+    ('WEIGHTS', 'GENERAL', ["Weight Transfer", "Connect Parts", "Weight Brushes"]),
     ('WEIGHTS', 'SKIRT', ["Skirt Weights", "Skirt Brush"]),
     ('WEIGHTS', 'HEELS', ["Heel Weights", "Heels Brush"]),
     ('WEIGHTS', 'HAIR', ["Hair Weights", "Hair Brush"]),

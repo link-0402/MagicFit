@@ -584,6 +584,38 @@ class MagicFitSettings(bpy.types.PropertyGroup):
         max=32,
         soft_max=8,
     )
+    connect_distance: FloatProperty(
+        name="Distance",
+        description=(
+            "Vertices this close to a bigger part take its weights. A part that comes no closer to a bigger one "
+            "isn't connected"
+        ),
+        subtype='DISTANCE',
+        default=0.005,
+        min=0.0,
+        soft_max=0.05,
+        precision=4,
+    )
+    connect_blend: FloatProperty(
+        name="Blend",
+        description=(
+            "Farther than Distance, vertices blend back to their own weights over this much more. Larger: more "
+            "of a part that stands off (a flap, a buckle) moves with what it lies on"
+        ),
+        subtype='DISTANCE',
+        default=0.02,
+        min=0.0,
+        soft_max=0.1,
+        precision=3,
+    )
+    connect_max_groups: IntProperty(
+        name="Max Groups",
+        description="Most bones a vertex can follow; the smallest weights are dropped. FFXIV allows 8",
+        default=8,
+        min=1,
+        max=32,
+        soft_max=8,
+    )
     use_fade_unmatched: BoolProperty(
         name="Fade Unmatched Groups",
         description=(
