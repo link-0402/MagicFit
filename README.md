@@ -46,7 +46,7 @@ The **[Weight Brushes](docs/guide.md#weight-brushes)** fix weights where you pai
 
 - **Copy** paints the body's weights onto the mesh, bit by bit.
 - **Straighten** fixes fabric that sags into the cleavage or under the breasts once a template makes them bigger. Click where it sags.
-- **Smooth** evens out all bone weights at once, even across the gaps between separate parts, so seams stay closed. It needs no body.
+- **Smooth** evens out all bone weights at once and holds together parts and folded layers that touch, even across a small gap, so they don't drift apart when bones are scaled. It needs no body.
 - **Skirt** gives skirts and long dresses the weights of FFXIV's skirt bones, so they swing with the game's cloth physics.
 - **Heels** makes high heels and boots rigid below the ankle, so heels and soles don't bend.
 - **Hair** weights new hair to FFXIV's hair bones. It picks the hair skeleton that fits best and tells you which EST entry to set in Penumbra. When exporting the hair with Instant Edit, this EST setting is automatically written into the mod for you.
