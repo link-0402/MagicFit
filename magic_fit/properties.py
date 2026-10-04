@@ -567,14 +567,22 @@ class MagicFitSettings(bpy.types.PropertyGroup):
     smooth_merge_range: FloatProperty(
         name="Merge Range",
         description=(
-            "Separate parts closer than this count as connected, so the brush smooths across the gap "
-            "(sleeves, layers, body parts). 0: only vertices at the exact same spot"
+            "Surfaces closer than this are held together across the gap, as if merged, so they move together "
+            "(sleeves, layers, belt loops). 0: only vertices at the exact same spot"
         ),
         subtype='DISTANCE',
         default=0.002,
         min=0.0,
         soft_max=0.02,
         precision=4,
+    )
+    smooth_use_folds: BoolProperty(
+        name="Join Folds",
+        description=(
+            "Also hold together the layers of one part that lie on each other: a hem or cuff folded back, a "
+            "lining. Off: only separate parts are held together, so lips and eyelids that touch can open"
+        ),
+        default=True,
     )
     smooth_max_groups: IntProperty(
         name="Max Groups",

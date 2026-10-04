@@ -215,7 +215,7 @@ If nothing changes, either the mesh is in its rest pose, or nothing there sags. 
 
 Blender's Smooth brush does one group at a time and stops at the edge of each loose part. FFXIV clothing is full of loose parts and split seams, so smoothing one side opens up the seam.
 
-**Smooth** evens out all bone weights at once and reaches across the gaps between parts that touch. It needs no body.
+**Smooth** evens out all bone weights at once and holds together the parts and layers that touch, even across a small gap, so they move together however the bones are scaled. It needs no body.
 
 1. In **Weight Paint** mode, pick **Weight Brushes** or click **Paint Weights**.
 2. Set the mode to **Smooth**.
@@ -224,18 +224,21 @@ Blender's Smooth brush does one group at a time and stops at the edge of each lo
 | Option | What it does |
 | --- | --- |
 | Reach | How far the weights blend, measured over the surface (2 cm). Small values smooth gently, large ones average a wide area but are slower. |
-| Merge Range | Loose parts this close together (2 mm) count as connected, so the brush smooths across the gap. 0 only joins vertices at the same spot. |
+| Merge Range | Surfaces this close together (2 mm) are held together across the gap, as if merged: they end up with the same weights. A little farther, they're held more loosely. 0 only joins vertices at the same spot. |
+| Join Folds | On: the layers of one part that lie on each other are held together too, like a hem or cuff folded back or a lining. Off: only separate parts are, so lips and eyelids that touch can still open. |
 | Max Groups | At most this many bone weights per vertex (8). |
 | Groups | **All Groups** or only the **Current Group**. |
 | Accumulate | Off: each stroke moves weights at most Strength of the way. On: the longer you paint, the smoother it gets. |
 
 - The result doesn't depend on how dense the mesh is or how you paint.
 - Each vertex keeps its total weight. Vertices with no weights fill in from their neighbours.
-- Layers folded within one part stay apart. Only separate loose parts are joined.
+- Parts and layers within Merge Range get the same weights whatever Reach is. To hold them together without evening out anything else, paint over the gap with a small Reach, like 2 mm.
+- A layer holds on to the surface under it everywhere, even where the two meshes' vertices don't line up (a dense belt loop on a coarse waistband).
+- One smooth surface that comes close to itself, like trouser legs at the crotch or fingers, isn't held together: it can still move apart.
 - Distances are measured in the rest pose. Locked groups are never changed.
 - SciPy (installed with Weight Transfer) makes it fast. Without it, large Reach values get slow.
 
-If nothing changes, the groups may be locked (the devkit Mannequin's are, on purpose) or not match the armature's bones. If a seam stays visible, the gap is wider than Merge Range: raise it a little, but not so far that it joins separate layers like a jacket over a shirt.
+If nothing changes, the groups may be locked (the devkit Mannequin's are, on purpose) or not match the armature's bones. If parts still drift apart when the bones are scaled, the gap is wider than Merge Range: raise it a little, but not so far that it joins separate layers like a jacket over a shirt.
 
 ### Skirt
 

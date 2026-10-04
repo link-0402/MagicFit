@@ -4,7 +4,8 @@ Rig: three bones, j_a, j_b and j_c, standing side by side.
 
 Sheet: a row of rectangular parts of cloth, each a grid of quads, `EDGE` apart from its neighbour's edge
 by a gap (or, with a gap of 0, sharing its seam with split vertices at the same spot). By default the first
-part is weighted 100 % to j_a and the second 100 % to j_b, so where they meet is a hard step.
+part is weighted 100 % to j_a and the second 100 % to j_b, so where they meet is a hard step. Other
+parts can be given instead, such as strips folded or bent over themselves (see `strip`) or layers.
 """
 
 import bpy
@@ -43,19 +44,32 @@ def grid(x0, x1, height, edge):
     return co, quads
 
 
+def strip(profile, height=HEIGHT, edge=EDGE):
+    """(co, quads) of a strip that runs across through ``profile`` ((x, z) points) and from 0 to ``height``
+    in y, in rows of about ``edge``: folds and bends seen from the side."""
+    ny = max(1, round(height / edge))
+    width = len(profile)
+    co = np.array([(x, y, z) for y in np.linspace(0.0, height, ny + 1) for x, z in profile])
+    quads = [(j * width + i, j * width + i + 1, (j + 1) * width + i + 1, (j + 1) * width + i)
+             for j in range(ny) for i in range(width - 1)]
+    return co, quads
+
+
 def build(parts=((0.0, 0.1), (0.1005, 0.2005)), edge=EDGE, height=HEIGHT, weights=None, armature=True,
-          groups=BONES, name="Sheet"):
+          groups=BONES, name="Sheet", pieces=None):
     """Build the scene (replacing everything): the rig and a sheet with a part for each (x0, x1) of
-    ``parts``. ``weights(part, co)`` gives the weights of a part's vertices as {group name: (n,) array};
-    the default is j_a on the first part, j_b on the others. Returns (rig, sheet, part of each vertex)."""
+    ``parts``, or for each (co, quads) of ``pieces``. ``weights(part, co)`` gives the weights of a part's
+    vertices as {group name: (n,) array}; the default is j_a on the first part, j_b on the others.
+    Returns (rig, sheet, part of each vertex)."""
     if bpy.context.object is not None and bpy.context.object.mode != 'OBJECT':
         bpy.ops.object.mode_set(mode='OBJECT')
     for obj in list(bpy.data.objects):
         bpy.data.objects.remove(obj)
     rig = build_rig()
+    if pieces is None:
+        pieces = [grid(x0, x1, height, edge) for x0, x1 in parts]
     co, faces, owner = [], [], []
-    for number, (x0, x1) in enumerate(parts):
-        part_co, quads = grid(x0, x1, height, edge)
+    for number, (part_co, quads) in enumerate(pieces):
         offset = sum(len(c) for c in co)
         faces += [tuple(k + offset for k in quad) for quad in quads]
         co.append(part_co)
@@ -73,7 +87,7 @@ def build(parts=((0.0, 0.1), (0.1005, 0.2005)), edge=EDGE, height=HEIGHT, weight
     if weights is None:
         def weights(part, part_co):
             return {"j_a" if part == 0 else "j_b": np.ones(len(part_co))}
-    for number in range(len(parts)):
+    for number in range(len(pieces)):
         rows = np.flatnonzero(owner == number)
         for group, values in weights(number, co[rows]).items():
             vertex_group = sheet.vertex_groups[group]

@@ -8,15 +8,24 @@ collars, layers), its seams are split, and a smoothed bone leaves the others as 
 smooths the whole bone weight of a vertex, and treats parts that touch as one mesh.
 
 The mesh becomes a graph of nodes (vertices at the same spot, the two sides of a split seam, are one
-node). Its links are the mesh's edges, with the cotangent weights of a Laplacian so that irregular
-triangles don't bias the average, and links between loose parts wherever their vertices lie within the
-Merge Range of each other, like the vertices Merge by Distance would join (the closer, the stronger the
-link, so parts that touch are smoothed as if they were merged). Weights are averaged by letting
-them diffuse over that graph for a time of Reach squared, with the area around each node as its mass, so
-Reach is a distance over the surface and works the same on dense and coarse meshes: what counts for a
-vertex is the weights within about Reach of it, the nearer the more. That is a single implicit heat step,
-solved for the region around the dab with a sparse factorization (SciPy, which Weight Transfer needs too)
-or, where SciPy isn't there, with conjugate gradients, which slow down as Reach grows over the mesh's edges.
+node). Its edges are the mesh's edges, with the cotangent weights of a Laplacian so that irregular
+triangles don't bias the average. Weights are averaged by letting them diffuse over that graph for a time
+of Reach squared, with the area around each node as its mass, so Reach is a distance over the surface and
+works the same on dense and coarse meshes: what counts for a vertex is the weights within about Reach of
+it, the nearer the more. That is a single implicit heat step, solved for the region around the dab with a
+sparse factorization (SciPy, which Weight Transfer needs too) or, where SciPy isn't there, with conjugate
+gradients, which slow down as Reach grows over the mesh's edges.
+
+Across gaps, links hold the mesh together wherever surfaces lie within the Merge Range of each other:
+each node links to the closest point of every other sheet near it (see `fitting.mesh_sheets`), shared out
+among the corners of the triangle there, so a dense layer over a coarse one holds on everywhere, not only
+where vertices happen to meet. Sheets of other loose parts count (a sleeve against a torso, a belt loop on a
+waistband), and so do the folds of a node's own part (a hem folded back, a cuff, a lining), unless
+`join_folds` is off: then lips and eyelids that touch can still open. Where one smooth sheet comes close to
+itself (trouser legs at the crotch, fingers), nothing links, so it still moves apart. A link holds as hard
+as `BIND` times the node's area, whatever Reach is: layers in contact end up with the same weights, as if
+merged, so they move together however the bones scale, even when Reach is too small to even out anything
+else.
 
 What diffuses is each vertex's share of every group (its bone weights, as fractions of their sum) times how
 much it has, so vertices without weights add nothing to their neighbours and take on the weights around
@@ -32,10 +41,12 @@ Like `painting`, nothing here depends on the 3D view.
 """
 
 import numpy as np
+from mathutils.bvhtree import BVHTree
 
-from . import goals, hairing, straighten
+from . import fitting, goals, hairing, straighten
 from .goals import DEFAULT_MAX_GROUPS
 from .painting import MIN_CHANGE, deform_bone_names
+from .relaxing import _closest_on_triangles
 
 # The weights around a vertex count out to this many times Reach; beyond that, the region a dab looks at
 # ends (the influence of weights farther away is small, and the farther the region goes, the slower a dab).
@@ -45,12 +56,13 @@ MARGIN_ACCUMULATING = 2.0
 # Shares of a smoothed vertex below this are dropped: FFXIV stores weights in bytes, and smaller ones
 # only take up one of the eight slots.
 CUTOFF = 0.002
-# A vertex links to at most this many vertices of other loose parts.
+# A node links across gaps to at most this many sheets (or, without triangles, nodes of other parts).
 MAX_LINKS = 4
-# A link between parts is as strong as an edge of the mesh when they are an edge length apart, and stronger
-# the closer they are (a stitch across a gap conducts in proportion to the gap's narrowness), up to this
-# many times, which is as good as merged.
-MAX_STITCH = 20.0
+# A link holds a node to the surface across the gap with this many times the node's area, whatever Reach
+# is: two layers linked all over end up within about 1 / (1 + 2 * BIND) of each other's weights.
+BIND = 50.0
+# Past the Merge Range, links fade out over this share of it, so a surface drifting away lets go gradually.
+FADE = 0.25
 # Cotangent weights are kept between these multiples of their mean: a skinny triangle would make the
 # system stiff, and an obtuse one would make it negative (weights would leave the range of their neighbours).
 MIN_CONDUCTANCE = 1e-3
@@ -170,21 +182,37 @@ def _read_triangles(mesh):
 # -----------------------------------------------------------------------------
 # The graph
 
+def _fade(distance, merge_range):
+    """How hard links across gaps of ``distance`` hold (0..1): fully up to ``merge_range``, then less and
+    less, not at all `FADE` of it farther."""
+    return goals.smoothstep((merge_range * (1.0 + FADE) - distance) / (FADE * merge_range))
+
+
+def _ranks(keys, distance):
+    """Each entry's place (0, 1...) among the entries with the same key, nearest first."""
+    order = np.lexsort((distance, keys))
+    starts = np.flatnonzero(np.diff(keys[order], prepend=-1))
+    rank = np.empty(len(keys), dtype=np.int64)
+    rank[order] = np.arange(len(keys)) - np.repeat(starts, np.diff(starts, append=len(keys)))
+    return rank
+
+
 class SmoothGraph:
-    """The nodes of a mesh, the links between them and the area around each.
+    """The nodes of a mesh, the edges and links between them and the area around each.
 
     ``rest`` are the node positions (n, 3), ``edges`` (m, 2) and ``tris`` (t, 3) hold node indices.
-    Nodes of different loose parts (parts are what the edges and triangles connect) within
-    ``merge_range`` of each other are linked too, each to at most `MAX_LINKS` others: as strongly as an
-    edge is on average (shared out among a node's links) for parts an edge length apart, and up to
-    `MAX_STITCH` times as strongly when they touch, so touching parts behave as if merged.
+    Surfaces within ``merge_range`` of each other are linked across the gap (see the module docs and
+    `_surfaces`): other loose parts (parts are what the edges and triangles connect), and with
+    ``join_folds`` the folds of a node's own part. Nodes without triangles link to the nearest of
+    them in other parts.
 
-    ``pointers`` / ``neighbours`` / ``conductance`` / ``length`` are the links in compressed rows, both
-    ways round; ``mass`` the area around each node; ``parts`` the loose part of each node; ``links`` the
-    number of links between parts.
+    ``pointers`` / ``neighbours`` / ``length`` are the edges and links in compressed rows, both ways round;
+    ``conductance`` how much an edge passes on per time (0 for links) and ``binding`` how hard a link
+    holds (0 for edges); ``mass`` the area around each node; ``parts`` the loose part of each node;
+    ``links`` the number of links across gaps (a node's link to the closest point of a sheet counts once).
     """
 
-    def __init__(self, rest, edges, tris, merge_range):
+    def __init__(self, rest, edges, tris, merge_range, join_folds=True):
         count = len(rest)
         self.count = count
         edges = np.sort(np.asarray(edges, dtype=np.int64).reshape(-1, 2), axis=1)
@@ -206,52 +234,99 @@ class SmoothGraph:
         area = hairing.vertex_areas(rest, tris)
         self.mass = np.maximum(area, MIN_MASS * (float(np.median(area[area > 0.0])) if (area > 0.0).any() else 1e-6))
 
-        (link_a, link_b), link_weight = self._links(rest, pairs, conductance, merge_range)
-        self.links = len(link_a)
+        link_a, link_b, binding = self._links(rest, tris, merge_range, join_folds)
         pair_a = np.concatenate((pairs[:, 0], link_a))
         pair_b = np.concatenate((pairs[:, 1], link_b))
-        pair_weight = np.concatenate((conductance, link_weight))
+        pair_conductance = np.concatenate((conductance, np.zeros(len(link_a))))
+        pair_binding = np.concatenate((np.zeros(len(pairs)), binding))
         length = np.linalg.norm(rest[pair_a] - rest[pair_b], axis=1)
         rows = np.concatenate((pair_a, pair_b))
         self.pointers, order = _rows(rows, count)
         self.neighbours = np.concatenate((pair_b, pair_a))[order]
-        self.conductance = np.concatenate((pair_weight, pair_weight))[order]
+        self.conductance = np.concatenate((pair_conductance, pair_conductance))[order]
+        self.binding = np.concatenate((pair_binding, pair_binding))[order]
         self.length = np.concatenate((length, length))[order]
 
-    def _links(self, rest, pairs, conductance, merge_range):
-        """The links between loose parts: ((first nodes, second nodes), conductances)."""
+    def _links(self, rest, tris, merge_range, join_folds):
+        """The links across gaps: (first nodes, second nodes, how hard each holds)."""
         empty = np.zeros(0, dtype=np.int64)
-        a, b = close_pairs(rest, merge_range)
-        different = self.parts[a] != self.parts[b]
-        a, b = a[different], b[different]
-        if not len(a):
-            return (empty, empty), np.zeros(0)
-        # Each node keeps the links to its nearest MAX_LINKS.
-        distance = np.linalg.norm(rest[a] - rest[b], axis=1)
-        ends = np.concatenate((a, b))
-        both = np.concatenate((distance, distance))
-        order = np.lexsort((both, ends))
-        sorted_ends = ends[order]
-        starts = np.flatnonzero(np.diff(sorted_ends, prepend=-1))
-        block_start = np.repeat(starts, np.diff(starts, append=len(sorted_ends)))
-        rank = np.empty(len(ends), dtype=np.int64)
-        rank[order] = np.arange(len(ends)) - block_start
-        keep = (rank[:len(a)] < MAX_LINKS) & (rank[len(a):] < MAX_LINKS)
-        a, b = a[keep], b[keep]
-        # As strong as the edges around and shared out among a node's links, and stronger the nearer the parts.
-        degree = np.bincount(pairs.reshape(-1), minlength=self.count)
-        lengths = np.repeat(np.linalg.norm(rest[pairs[:, 0]] - rest[pairs[:, 1]], axis=1), 2)
-        ends_flat = pairs.reshape(-1)
-        typical = np.where(degree > 0, np.bincount(ends_flat, weights=np.repeat(conductance, 2), minlength=self.count)
-                           / np.maximum(degree, 1), conductance.mean() if len(conductance) else 1.0)
-        edge = np.where(degree > 0,
-                        np.bincount(ends_flat, weights=lengths, minlength=self.count) / np.maximum(degree, 1),
-                        lengths.mean() if len(lengths) else 1.0)
-        shared = np.bincount(np.concatenate((a, b)), minlength=self.count)
-        size = 0.5 * (edge[a] + edge[b])
-        stitch = np.clip(size / np.maximum(distance[keep], size / MAX_STITCH), 1.0, MAX_STITCH)
-        weight = 0.5 * (typical[a] + typical[b]) / np.maximum(shared[a], shared[b]) * stitch
-        return (a, b), weight
+        self.links = 0
+        if merge_range <= 0.0 or not self.count:
+            return empty, empty, np.zeros(0)
+        reach = merge_range * (1.0 + FADE)
+        firsts, seconds, holds = [], [], []
+        if len(tris):
+            # Each node to the closest point of each sheet across a gap, shared out among its corners.
+            nodes, corners, bary, distance = self._surfaces(rest, tris, reach, join_folds)
+            hold = BIND * self.mass[nodes] * _fade(distance, merge_range)
+            for k in range(3):
+                use = (bary[:, k] > 0.0) & (hold > 0.0)
+                firsts.append(nodes[use])
+                seconds.append(corners[use, k])
+                holds.append(hold[use] * bary[use, k])
+            self.links += int((hold > 0.0).sum())
+        # Nodes without triangles (points, wires) have no surface: they link to the nearest such nodes of
+        # other parts, as hard as the smaller of them, shared out among their links.
+        bare = np.ones(self.count, dtype=bool)
+        bare[tris.reshape(-1)] = False
+        if bare.sum() > 1:
+            a, b = close_pairs(rest, reach)
+            use = bare[a] & bare[b] & (self.parts[a] != self.parts[b])
+            a, b = a[use], b[use]
+            distance = np.linalg.norm(rest[a] - rest[b], axis=1)
+            rank = _ranks(np.concatenate((a, b)), np.concatenate((distance, distance)))
+            keep = (rank[:len(a)] < MAX_LINKS) & (rank[len(a):] < MAX_LINKS)
+            a, b, distance = a[keep], b[keep], distance[keep]
+            shared = np.bincount(np.concatenate((a, b)), minlength=self.count)
+            hold = (BIND * np.minimum(self.mass[a], self.mass[b]) * _fade(distance, merge_range)
+                    / np.maximum(np.maximum(shared[a], shared[b]), 1))
+            use = hold > 0.0
+            firsts.append(a[use])
+            seconds.append(b[use])
+            holds.append(hold[use])
+            self.links += int(use.sum())
+        if not firsts:
+            return empty, empty, np.zeros(0)
+        return np.concatenate(firsts), np.concatenate(seconds), np.concatenate(holds)
+
+    def _surfaces(self, rest, tris, reach, join_folds):
+        """For each node, the closest points within ``reach`` of up to `MAX_LINKS` sheets across gaps from
+        it, nearest first: (nodes, their triangles' corners (k, 3), barycentric coordinates there (k, 3),
+        distances).
+
+        Sheets are the mesh's surfaces as `fitting.mesh_sheets` tells them apart: a fold tighter than
+        ``fitting.FOLD_RADIUS`` or sharper than 90 degrees (a hem, a cuff, the rim of a lining) ends one, so
+        the layers it joins are sheets of their own, while one smooth surface stays one sheet wherever it
+        comes close to itself. The sheets a node lies on are never across a gap from it, other sheets of its
+        own part only with ``join_folds``.
+        """
+        count = self.count
+        sheet, sheets = fitting.mesh_sheets(rest, tris)
+        tree = BVHTree.FromPolygons(rest.tolist(), tris.tolist(), all_triangles=True)
+        found, hits = [], []
+        for point in rest.tolist():
+            near = tree.find_nearest_range(point, reach)
+            found.append(len(near))
+            hits.extend([hit[2] for hit in near])
+        node = np.repeat(np.arange(count), found)
+        tri = np.array(hits, dtype=np.int64)
+        lying_on = np.unique(tris.T.reshape(-1) * sheets + np.tile(sheet, 3))
+        key = node * sheets + sheet[tri]
+        keep = lying_on[np.minimum(np.searchsorted(lying_on, key), len(lying_on) - 1)] != key
+        node, tri = node[keep], tri[keep]
+        corners = tris[tri]
+        point, bary, _plane, _flat = _closest_on_triangles(
+            rest[node], rest[corners[:, 0]], rest[corners[:, 1]], rest[corners[:, 2]])
+        distance = np.linalg.norm(point - rest[node], axis=1)
+        keep = distance <= reach
+        if not join_folds:
+            keep &= self.parts[corners[:, 0]] != self.parts[node]
+        node, tri, corners, bary, distance = node[keep], tri[keep], corners[keep], bary[keep], distance[keep]
+        # The closest point of each sheet, of the nearest sheets.
+        first = _ranks(node * sheets + sheet[tri], distance) == 0
+        node, corners, bary, distance = node[first], corners[first], bary[first], distance[first]
+        first = _ranks(node, distance) < MAX_LINKS
+        return node[first], corners[first], bary[first], distance[first]
 
     def region(self, nodes, radius):
         """The nodes within ``radius`` (along the links) of ``nodes``, in order."""
@@ -270,9 +345,10 @@ class SmoothGraph:
         return np.flatnonzero(np.isfinite(reached))
 
     def smooth(self, region, values, reach):
-        """``values`` (a row per node of ``region``, sorted) after diffusing over the links for a time of
+        """``values`` (a row per node of ``region``, sorted) after diffusing over the edges for a time of
         ``reach`` squared: every row becomes an average of the rows around it, with weights that fall off
-        over about ``reach``. Nodes outside ``region`` don't take part."""
+        over about ``reach``, and rows linked across gaps end up alike whatever ``reach`` is. Nodes outside
+        ``region`` don't take part."""
         size = len(region)
         local = np.full(self.count, -1, dtype=np.int64)
         local[region] = np.arange(size)
@@ -280,17 +356,16 @@ class SmoothGraph:
         inside = local[self.neighbours[positions]] >= 0
         positions, owner = positions[inside], owner[inside]
         columns = local[self.neighbours[positions]]
-        weight = self.conductance[positions]
-        time = reach * reach
+        weight = reach * reach * self.conductance[positions] + self.binding[positions]
         mass = self.mass[region]
-        diagonal = mass + time * np.bincount(owner, weights=weight, minlength=size)
+        diagonal = mass + np.bincount(owner, weights=weight, minlength=size)
         rhs = mass[:, None] * values
         solver = _direct_solver()
         if solver is not None:
             sparse, splu = solver
             diagonal_index = np.arange(size)
             matrix = sparse.csc_matrix(
-                (np.concatenate((diagonal, -time * weight)),
+                (np.concatenate((diagonal, -weight)),
                  (np.concatenate((diagonal_index, owner)), np.concatenate((diagonal_index, columns)))),
                 shape=(size, size),
             )
@@ -305,7 +380,7 @@ class SmoothGraph:
         def multiply(x):
             result = diagonal[:, None] * x
             if len(columns):
-                result[linked] -= time * np.add.reduceat(x[columns] * weight[:, None], starts, axis=0)
+                result[linked] -= np.add.reduceat(x[columns] * weight[:, None], starts, axis=0)
             return result
 
         return straighten._conjugate_gradient(
@@ -317,14 +392,14 @@ class SmoothGraph:
 _graph_cache = None
 
 
-def _cached_graph(key, rest, edges, tris, merge_range):
+def _cached_graph(key, rest, edges, tris, merge_range, join_folds):
     global _graph_cache
     entry = _graph_cache
-    if (entry is not None and entry[0] == (key, merge_range) and np.array_equal(entry[1], rest) and
+    if (entry is not None and entry[0] == (key, merge_range, join_folds) and np.array_equal(entry[1], rest) and
             np.array_equal(entry[2], edges) and np.array_equal(entry[3], tris)):
         return entry[4]
-    graph = SmoothGraph(rest, edges, tris, merge_range)
-    _graph_cache = ((key, merge_range), rest, edges, tris, graph)
+    graph = SmoothGraph(rest, edges, tris, merge_range, join_folds)
+    _graph_cache = ((key, merge_range, join_folds), rest, edges, tris, graph)
     return graph
 
 
@@ -340,13 +415,15 @@ class SmoothStroke(goals.GoalStroke):
     """Blends a mesh's weights toward the same weights smoothed over the mesh, dab by dab.
 
     ``rest_co`` are the world space vertex positions in the rest pose; ``reach`` and ``merge_range``
-    are distances, see the module docs. See `goals.GoalStroke` for how weights change toward the goals.
+    are distances, and ``join_folds`` whether folds of a part hold together like separate parts, see the
+    module docs. See `goals.GoalStroke` for how weights change toward the goals.
     """
 
     def __init__(
             self, obj, rest_co, *,
             reach=0.02,
             merge_range=0.002,
+            join_folds=True,
             accumulate=False,
             max_groups=DEFAULT_MAX_GROUPS,
             group_mode='ALL',
@@ -368,6 +445,7 @@ class SmoothStroke(goals.GoalStroke):
         edges, tris = _read_edges(mesh), _read_triangles(mesh)
         self.graph = _cached_graph(
             obj.as_pointer(), self.rest, self.weld[edges], self.weld[tris], max(float(merge_range), 0.0),
+            bool(join_folds),
         )
         self.member_pointers, self.members = _rows(self.weld, self.weld_count)
         # What is smoothed, per node, filled in as the stroke reaches it: its bone weights as shares of
@@ -494,6 +572,7 @@ def stroke_params(settings):
     return dict(
         reach=settings.smooth_reach,
         merge_range=settings.smooth_merge_range,
+        join_folds=settings.smooth_use_folds,
         accumulate=settings.use_accumulate,
         max_groups=settings.smooth_max_groups,
         group_mode=settings.group_mode,

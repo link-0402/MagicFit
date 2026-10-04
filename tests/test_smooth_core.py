@@ -43,7 +43,8 @@ def difference(a, b):
 
 def use_settings(**values):
     settings = bpy.context.scene.magic_fit
-    for prop in ("smooth_reach", "smooth_merge_range", "smooth_max_groups", "use_accumulate", "group_mode"):
+    for prop in ("smooth_reach", "smooth_merge_range", "smooth_use_folds", "smooth_max_groups", "use_accumulate",
+                 "group_mode"):
         settings.property_unset(prop)
     settings.target = None
     settings.mode = 'SMOOTH'
@@ -74,22 +75,46 @@ def test_graph():
     stroke = new_stroke(sheet, merge_range=0.002)
     graph = stroke.graph
     check(graph.count == len(sheet.data.vertices) and int(graph.parts.max()) + 1 == 2, "graph: two loose parts")
-    check(graph.links == 11, "graph: one link per row of the seam, {:d}".format(graph.links))
+    check(graph.links == 22, "graph: each node of the seam links to the other part, both ways ({:d})".format(graph.links))
     rows = np.repeat(np.arange(graph.count), np.diff(graph.pointers))
     across = graph.parts[rows] != graph.parts[graph.neighbours]
-    check(int(across.sum()) == 2 * graph.links, "graph: only the links join different parts")
+    check(bool(np.array_equal(across, graph.binding > 0.0)) and not graph.conductance[across].any(),
+          "graph: only the links join different parts, and they hold without passing weights on over time")
     check(bool((np.abs(smooth.rest_co(sheet)[stroke.weld[0], 0] - stroke.rest[0, 0]) < 1e-9)), "graph: nodes are at the vertices")
 
-    for merge, expected in ((0.0, 0), (0.0002, 0), (0.001, 11)):
+    # The gap is 0.5 mm: Merge Range holds fully up to itself and lets go over a quarter of it farther.
+    for merge, expected in ((0.0, 0), (0.0002, 0), (0.00039, 0), (0.00041, 22), (0.001, 22)):
         found = new_stroke(sheet, merge_range=merge).graph.links
-        check(found == expected, "merge range {:.4f}: {:d} links (expected {:d})".format(merge, found, expected))
+        check(found == expected, "merge range {:.5f}: {:d} links (expected {:d})".format(merge, found, expected))
+    holds = [float(new_stroke(sheet, merge_range=merge).graph.binding.max()) for merge in (0.00045, 0.0005, 0.001)]
+    check(0.0 < holds[0] < 0.99 * holds[2] and abs(holds[1] - holds[2]) < 1e-6 * holds[2],
+          "merge range: links hold fully within it, less a little beyond it ({:.3g}, {:.3g}, {:.3g})".format(*holds))
 
     wide = new_stroke(sheet, merge_range=0.05).graph
     rows = np.repeat(np.arange(wide.count), np.diff(wide.pointers))
     across = wide.parts[rows] != wide.parts[wide.neighbours]
-    per_node = np.bincount(rows[across], minlength=wide.count)
-    check(int(per_node.max()) <= smoothing.MAX_LINKS, "graph: a node links to at most {:d} others".format(smoothing.MAX_LINKS))
-    check(int(across.sum()) == 2 * wide.links and wide.links > 11, "graph: a wide range still only links different parts")
+    check(bool(np.array_equal(across, wide.binding > 0.0)) and wide.links > 22,
+          "graph: a wide range links more nodes, still only between different parts")
+
+
+def test_link_limit():
+    # Six layers half a millimetre apart: each node sees five others within range.
+    layers = [smooth.grid(0.0, 0.05, 0.05, 0.01) for _ in range(6)]
+    pieces = [(co + np.array([0.0, 0.0, 0.0005 * number]), quads) for number, (co, quads) in enumerate(layers)]
+    _rig, sheet, owner = smooth.build(pieces=pieces)
+    graph = new_stroke(sheet, merge_range=0.005).graph
+    tris = smoothing._read_triangles(sheet.data).astype(np.int64)
+    nodes, corners, _bary, _distance = graph._surfaces(smooth.rest_co(sheet), tris, 0.005, True)
+    per_node = np.bincount(nodes, minlength=graph.count)
+
+    def closest_layers(layer):
+        others = sorted((other for other in range(6) if other != layer), key=lambda other: abs(other - layer))
+        return set(others[:smoothing.MAX_LINKS])
+
+    nearest = all(set(owner[corners[nodes == node, 0]].tolist()) == closest_layers(owner[node])
+                  for node in range(0, graph.count, 7))
+    check(int(per_node.max()) == smoothing.MAX_LINKS and int(per_node.min()) == smoothing.MAX_LINKS and nearest,
+          "links: a node links to its {:d} nearest layers, not to all within range".format(smoothing.MAX_LINKS))
 
 
 def test_graph_cache():
@@ -142,6 +167,127 @@ def test_smooth_across_gap():
     total = after["j_a"] + after["j_b"] + after["j_c"]
     check(float(np.abs(total - 1.0).max()) < 1e-4, "across the gap: totals kept")
     check(not after["j_c"].any(), "across the gap: groups nothing has aren't invented")
+
+
+def test_small_reach_still_joins():
+    _rig, sheet, _owner = smooth.build()
+    stroke = new_stroke(sheet, merge_range=0.002, reach=0.002)
+    smooth.apply_all(stroke, sheet)
+    a = profile(sheet, smooth.by_name(sheet)["j_a"])
+    left, right = float(np.interp(SEAM_A, *a)), float(np.interp(SEAM_B, *a))
+    check(abs(left - right) < 0.05 and 0.3 < left < 0.7,
+          "small reach: parts that touch still end up alike across the gap ({:.2f} | {:.2f})".format(left, right))
+    check(at(0.0, a, -0.01) > 0.95 and at(0.0, a, 0.01) < 0.05,
+          "small reach: an edge away from the gap, the weights are nearly as they were ({:.3f}, {:.3f})".format(
+              at(0.0, a, -0.01), at(0.0, a, 0.01)))
+
+
+def folded(apart, sharp=False, steps=12):
+    """The profile of a strip from x 0 to 0.1 that folds back over itself, ``apart`` above, to x 0.04:
+    around a half circle, or with ``sharp`` up a wall leaning back over the strip, with sharp corners."""
+    lower = [(x, 0.0) for x in np.linspace(0.0, 0.1, 11)]
+    upper = [(x, apart) for x in np.linspace(0.09, 0.04, 6)]
+    if sharp:
+        bend = [(0.1 - 0.005 * k / 4, apart * k / 4) for k in range(1, 5)]
+    else:
+        angles = np.linspace(-0.5 * np.pi, 0.5 * np.pi, steps + 1)[1:]
+        bend = [(0.1 + 0.5 * apart * np.cos(angle), 0.5 * apart * (1.0 + np.sin(angle))) for angle in angles]
+    return lower + bend + upper
+
+
+def layers_at(sheet, x, apart):
+    """The vertices of the lower and the upper layer of a `folded` strip at ``x``, in the middle row."""
+    co = smooth.rest_co(sheet)
+    here = (np.abs(co[:, 0] - x) < 1e-6) & (np.abs(co[:, 1] - 0.05) < 1e-6)
+    lower = np.flatnonzero(here & (np.abs(co[:, 2]) < 1e-6))
+    upper = np.flatnonzero(here & (np.abs(co[:, 2] - apart) < 1e-6))
+    return int(lower[0]), int(upper[0])
+
+
+def by_layer(apart):
+    """Weights for a `folded` strip: j_a below the middle of the fold, j_b above it."""
+    def weights(_part, co):
+        upper = co[:, 2] > 0.5 * apart
+        return {"j_a": (~upper).astype(float), "j_b": upper.astype(float)}
+    return weights
+
+
+def test_folded_hem():
+    apart = 0.001
+    _rig, sheet, owner = smooth.build(pieces=[smooth.strip(folded(apart))], weights=by_layer(apart))
+    check(int(owner.max()) == 0, "fold: the strip is one loose part")
+    lower, upper = layers_at(sheet, 0.06, apart)
+    results = {}
+    for join in (True, False):
+        stroke = new_stroke(sheet, merge_range=0.002, reach=0.005, join_folds=join)
+        smooth.apply_all(stroke, sheet)
+        results[join] = (smooth.by_name(sheet), stroke.graph.links)
+        stroke.restore()
+        sheet.data.update()
+    after, links = results[True]
+    gap = abs(after["j_a"][lower] - after["j_a"][upper])
+    check(links > 0 and gap < 0.05 and 0.3 < after["j_a"][lower] < 0.7,
+          "fold: a hem folded back gets the same weights on both layers, so they move together ({:.3f} | {:.3f})".format(
+              after["j_a"][lower], after["j_a"][upper]))
+    co = smooth.rest_co(sheet)
+    far = np.flatnonzero((co[:, 0] < 0.015) & (np.abs(co[:, 2]) < 1e-6))
+    check(float(after["j_a"][far].min()) > 0.95,
+          "fold: away from the hem the weights stay ({:.3f})".format(float(after["j_a"][far].min())))
+    alone, links = results[False]
+    check(links == 0 and abs(alone["j_a"][lower] - alone["j_a"][upper]) > 0.8,
+          "fold: with Join Folds off, the layers of one part are left apart ({:.3f} | {:.3f})".format(
+              alone["j_a"][lower], alone["j_a"][upper]))
+
+
+def test_bend_is_not_a_fold():
+    # 12 mm apart and a Merge Range past that: a strip bent back gently is one sheet and stays apart (like
+    # trouser legs at the crotch); folded with sharp corners, its layers are sheets of their own and hold together.
+    apart = 0.012
+    for sharp in (False, True):
+        _rig, sheet, _owner = smooth.build(pieces=[smooth.strip(folded(apart, sharp=sharp, steps=24))],
+                                           weights=by_layer(apart))
+        lower, upper = layers_at(sheet, 0.06, apart)
+        stroke = new_stroke(sheet, merge_range=0.015, reach=0.005)
+        smooth.apply_all(stroke, sheet)
+        after = smooth.by_name(sheet)
+        gap = abs(after["j_a"][lower] - after["j_a"][upper])
+        if sharp:
+            check(stroke.graph.links > 0 and gap < 0.05,
+                  "bend: folded with sharp corners, the layers end up alike ({:.3f})".format(gap))
+        else:
+            check(stroke.graph.links == 0 and gap > 0.8,
+                  "bend: bent back gently, one smooth sheet is left apart ({:.3f})".format(gap))
+
+
+def test_dense_over_coarse():
+    # A fine layer (2.5 mm cells) half a millimetre over a coarse one (2 cm cells), its vertices nowhere
+    # near the coarse one's: every one of them still holds on to the surface under it.
+    coarse = smooth.grid(0.0, 0.2, 0.1, 0.02)
+    fine_co, fine_quads = smooth.grid(0.05, 0.15, 0.0975, 0.0025)
+    fine = (fine_co + np.array([0.0, 0.00125, 0.0005]), fine_quads)
+
+    def weights(part, co):
+        if part == 0:
+            return {"j_a": 1.0 - co[:, 0] / 0.2, "j_b": co[:, 0] / 0.2}
+        return {"j_c": np.ones(len(co))}
+
+    _rig, sheet, owner = smooth.build(pieces=[coarse, fine], weights=weights)
+    stroke = new_stroke(sheet, merge_range=0.002, reach=0.002)
+    graph = stroke.graph
+    rows = np.repeat(np.arange(graph.count), np.diff(graph.pointers))
+    bound = np.zeros(graph.count, dtype=bool)
+    bound[rows[graph.binding > 0.0]] = True
+    check(bool(bound[stroke.weld[owner == 1]].all()), "dense over coarse: every vertex of the fine layer is linked")
+    smooth.apply_all(stroke, sheet)
+    after = smooth.by_name(sheet)
+    co = smooth.rest_co(sheet)
+    inner = np.flatnonzero((owner == 1) & (co[:, 0] > 0.07) & (co[:, 0] < 0.13) & (np.abs(co[:, 1] - 0.05) < 0.0015))
+    below = np.flatnonzero((owner == 0) & (np.abs(co[:, 1] - 0.04) < 1e-6))
+    below = below[np.argsort(co[below, 0])]
+    error = max(float(np.abs(after[name][inner] - np.interp(co[inner, 0], co[below, 0], after[name][below])).max())
+                for name in smooth.BONES)
+    check(error < 0.05 and float(after["j_c"][inner].min()) < 0.8,
+          "dense over coarse: the layers end up with the same weights where they lie on each other ({:.3f})".format(error))
 
 
 def test_welded_split_seam():
@@ -541,6 +687,7 @@ def test_registered():
     engine = inspect.signature(smoothing.SmoothStroke.__init__).parameters
     check(abs(engine["reach"].default - settings.bl_rna.properties["smooth_reach"].default) < 1e-9 and
           abs(engine["merge_range"].default - settings.bl_rna.properties["smooth_merge_range"].default) < 1e-9 and
+          engine["join_folds"].default == settings.bl_rna.properties["smooth_use_folds"].default and
           engine["max_groups"].default == settings.bl_rna.properties["smooth_max_groups"].default,
           "defaults: the engine's match the settings'")
     settings.mode = 'COPY'

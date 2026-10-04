@@ -231,11 +231,12 @@ def _draw_heels_main(layout, settings):
 
 
 def _draw_smooth_main(layout, settings):
-    """The Smooth settings: how far the weights around a vertex count, which loose parts count as
-    connected, and the group limit."""
+    """The Smooth settings: how far the weights around a vertex count, which surfaces are held together
+    across gaps, and the group limit."""
     col = layout.column(align=True)
     col.prop(settings, "smooth_reach")
     col.prop(settings, "smooth_merge_range")
+    layout.prop(settings, "smooth_use_folds")
     layout.prop(settings, "smooth_max_groups")
 
 

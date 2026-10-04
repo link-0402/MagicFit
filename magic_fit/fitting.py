@@ -271,6 +271,53 @@ def _connected(count, edges):
     return labels, (int(labels.max()) + 1 if len(labels) else 0)
 
 
+def sheet_joins(unit, middle, points, corners):
+    """Where a mesh's triangles meet and how they turn there, for telling its sheets apart (see `in_sheet`).
+
+    ``corners`` (t, 3) are the triangles' corners among the welded vertices ``points``, ``unit`` their unit
+    normals and ``middle`` their middles. Returns the pairs of triangles that share an edge (one, other;
+    an edge of more than two triangles joins nothing), the cosine of the turn between their normals, its
+    angle, and how wide the two are across the edge (how far their middles are from it, together).
+    """
+    count = len(points)
+    first = corners.T.reshape(-1)
+    second = corners[:, [1, 2, 0]].T.reshape(-1)
+    low, high = np.minimum(first, second), np.maximum(first, second)
+    face = np.flatnonzero(low != high)
+    keys = low[face] * count + high[face]
+    order = np.argsort(keys)
+    keys, face = keys[order], face[order] % len(corners)
+    same = np.concatenate(([False], keys[1:] == keys[:-1], [False]))
+    pair = np.flatnonzero(same[1:-1] & ~same[:-2] & ~same[2:])
+    one, other = face[pair], face[pair + 1]
+    cosine = np.einsum("ij,ij->i", unit[one], unit[other])
+    end = points[keys[pair] // count]
+    along = points[keys[pair] % count] - end
+    along /= np.maximum(np.linalg.norm(along, axis=1, keepdims=True), 1e-30)
+    width = sum(np.linalg.norm(np.cross(middle[f] - end, along), axis=1) for f in (one, other))
+    return one, other, cosine, np.arccos(np.clip(cosine, -1.0, 1.0)), width
+
+
+def in_sheet(joins, radius):
+    """Which pairs of triangles of `sheet_joins` lie in one sheet: those that turn less than ``SHEET_COSINE``
+    from each other and bend around no tighter a radius than ``radius`` (the turn over their width).
+    Flatter than ``FLAT_COSINE``, they always do: triangles a quarter of a millimetre wide would pass."""
+    one, other, cosine, turn, width = joins
+    return (one != other) & (cosine > SHEET_COSINE) & ((cosine >= FLAT_COSINE) | (width >= radius * turn))
+
+
+def mesh_sheets(points, tris):
+    """The sheet of each of the triangles ``tris`` of the welded vertices ``points``, and how many there are:
+    triangles joined where the mesh turns less than 90 degrees and bends no more sharply than ``FOLD_RADIUS``
+    (see `FitStroke._sheets`). A hem folded back, a lining or a copy for the back side is a sheet of its own."""
+    a, b, c = (points[tris[:, k]] for k in range(3))
+    normals = np.cross(b - a, c - a)
+    unit = normals / np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-30)
+    joins = sheet_joins(unit, (a + b + c) / 3.0, points, tris)
+    keep = in_sheet(joins, FOLD_RADIUS)
+    return _connected(len(tris), np.stack((joins[0][keep], joins[1][keep]), axis=1))
+
+
 def _both_ways(edges):
     """Every edge both ways: (tail, head)."""
     return np.concatenate((edges[:, 0], edges[:, 1])), np.concatenate((edges[:, 1], edges[:, 0]))
@@ -1570,38 +1617,15 @@ class FitStroke:
         a, b, c = (self.co[tris[:, k]] for k in range(3))
         normals = np.cross(b - a, c - a)
         unit = normals / np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-30)
-        middle = (a + b + c) / 3.0
         # Two triangles sharing an edge (welded across seams) are in one sheet unless they turn too far.
-        # An edge of more than two joins nothing.
         corners = self.weld[tris]
-        first = corners.T.reshape(-1)
-        second = corners[:, [1, 2, 0]].T.reshape(-1)
-        low, high = np.minimum(first, second), np.maximum(first, second)
-        face = np.flatnonzero(low != high)
-        keys = low[face] * self.weld_count + high[face]
-        order = np.argsort(keys)
-        keys, face = keys[order], face[order] % len(tris)
-        same = np.concatenate(([False], keys[1:] == keys[:-1], [False]))
-        pair = np.flatnonzero(same[1:-1] & ~same[:-2] & ~same[2:])
-        one, other = face[pair], face[pair + 1]
-        cosine = np.einsum("ij,ij->i", unit[one], unit[other])
-        keep = (one != other) & (cosine > SHEET_COSINE)
-        # How sharply those that turn bend: the turn between their normals over how far their middles are
-        # from the edge between them. (Flatter than about 6 degrees, triangles a quarter of a millimetre
-        # wide would still pass.)
-        bent = np.flatnonzero(keep & (cosine < FLAT_COSINE))
-        points = self.points
-        end = points[keys[pair[bent]] // self.weld_count]
-        along = points[keys[pair[bent]] % self.weld_count] - end
-        along /= np.maximum(np.linalg.norm(along, axis=1, keepdims=True), 1e-30)
-        width = sum(np.linalg.norm(np.cross(middle[f[bent]] - end, along), axis=1) for f in (one, other))
-        turn = np.arccos(cosine[bent])
-        keep[bent] = width >= FOLD_RADIUS * turn
+        joins = sheet_joins(unit, (a + b + c) / 3.0, self.points, corners)
+        one, other = joins[0], joins[1]
+        keep = in_sheet(joins, FOLD_RADIUS)
         sheet, count = _connected(len(tris), np.stack((one[keep], other[keep]), axis=1))
         # Each sheet's walls: its pieces between where it bends around SOLID_FOLD_RADIUS, the rims of a
         # closed solid (see `_vote`).
-        gentle = keep.copy()
-        gentle[bent] &= width >= SOLID_FOLD_RADIUS * turn
+        gentle = keep & in_sheet(joins, SOLID_FOLD_RADIUS)
         wall, walls = _connected(len(tris), np.stack((one[gentle], other[gentle]), axis=1))
         # Per welded vertex and sheet around it (a "side"): the normals of the sheet's triangles there, by
         # area, as they were and smoothed over FACING_RINGS more rings of the sheet. Most vertices lie in
