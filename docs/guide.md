@@ -553,7 +553,7 @@ How it differs from Blender's Move:
 
 ## Resize
 
-**Resize** moves clothing from one body to another and adds the result to each mesh as a shape key. The bodies can be two shape keys of one devkit body, like the Yet Another Devkit Mannequin's Rue, Lava or Buff keys. They can also be two different bodies with the same UV layout, like the RueXB devkit's body and the Mannequin.
+**Resize** moves clothing from one body to another and adds the result to each mesh as a shape key. The bodies can be two shape keys of one devkit body, like the Yet Another Devkit Mannequin's Rue, Lava or Buff keys. They can also be two different bodies: another body mod with the same UV layout, like the RueXB devkit's body and the Mannequin, or any body the clothing was made on, like an outfit's own body from another game.
 
 1. In the **Resize** panel on the **Body Fit** tab, pick the **From Body**, the body the clothing fits now.
 2. Pick the **To Body**. Leave it empty to go to another shape key of the From Body.
@@ -568,12 +568,18 @@ Examples:
 | RueXB to YAB | RueXB devkit's `DefaultFullBodyWeight` | | Mannequin | |
 | YAB to Rue | Mannequin | | | `Rue` |
 | Rue to YAB | Mannequin | `Rue` | | |
+| Another game's outfit to YAB | The outfit's own body, lined up with it | | Mannequin | |
 
 Bring in bodies from other files with **File → Append**. The other shape keys of the bodies count as they're set: for Rue with a medium chest, set the Mannequin to Medium first.
 
 **The result** is a new shape key on each mesh, named after the To Shapekey (or **Key Name**). It's turned on, and the mesh's other keys are turned off. Turn it off to compare, set it halfway for an in-between size, or keep fitting it with Body Fit. Resize doesn't change Body Fit's body for you: its report says what to set to check the fit, then fix what still clips with [Body Fit](#body-fit).
 
-**Different bodies are matched by UV map.** Body mods made for the same skin textures (YAB, Rue, RueXB and Lava all use bibo's) share a UV layout, so each spot of the texture is the same spot on both bodies. Resize refuses bodies that don't match well enough, like bibo and Gen3.
+**Match By** says how Resize tells which spot of the To Body each spot of the From Body is, when they're different meshes:
+
+- **Auto** (default): by vertices for a copy of the From Body, else by UV map when the bodies share a layout, else by shape. The report says which it used.
+- **Vertices:** vertex by vertex, for a copy of the From Body in another shape.
+- **UV Map:** body mods made for the same skin textures (YAB, Rue, RueXB and Lava all use bibo's) share a UV layout, so each spot of the texture is the same spot on both bodies. Resize refuses bodies that don't match well enough, like bibo and Gen3.
+- **Shape:** for bodies of any kind, like an outfit's own body from another game (see [Clothing from another game](#clothing-from-another-game)). Each spot of the From Body goes to the closest spot of the To Body that faces the same way, so the two bodies must lie on each other. Hands, feet and heads aren't matched (heeled feet would land on flat ones): they follow the arms, legs and neck.
 
 How it works:
 
@@ -598,6 +604,7 @@ Good to know:
 | --- | --- |
 | From Body | The body the clothing fits now. |
 | To Body | The body to fit to. Empty: the From Body. |
+| Match By | How different bodies are matched: Auto, Vertices, UV Map or Shape. |
 | Use Shapekeys | Resize from or to shape keys. Off by default. |
 | From Shapekey | The From Body's key the clothing fits. Empty: the body as its keys show it. |
 | To Shapekey | The To Body's key to fit to. Empty: the body as its keys show it. |
@@ -606,6 +613,22 @@ Good to know:
 | Rigid Parts | Loose parts smaller than this keep their shape. 0 turns it off. |
 | Keep Close | Brings tight clothing back to its old distance from the body afterwards. |
 | Key Name | Name of the new shape key. Empty: the To Shapekey's name, the To Body's, or "Resized". |
+
+### Clothing from another game
+
+Clothing ripped from another game usually comes with the body it was made on. Resize from that body:
+
+1. Join the outfit's body into one mesh, if it comes in pieces.
+2. [Line Up](#line-up) the outfit and its body together, so both sit on the Mannequin. Selecting one mesh is enough when they share an armature.
+3. In **Resize**, pick the outfit's body as the **From Body** and the Mannequin as the **To Body**, select the outfit's meshes and click **Resize**. **Auto** matches the bodies by shape.
+
+The clothing keeps how it sat on its own body: loose parts stay as loose, and tight ones end up as close to the Mannequin as they were to their own body. Clipping drops to about what the outfit already had on its own body. Delete the outfit's body afterwards, or keep it for another resize.
+
+What to check afterwards:
+
+- **The chest,** where the bodies differ most. Shape matching knows no anatomy: with a much larger or higher bust than the Mannequin's, clothing can crease along the old underbust, and details tied to the skin (a piercing, a seam under the breasts) slide by 1 to 2 cm. Resize warns when the bodies differ by more than 3 cm.
+- **Shoes and gloves** follow the legs and arms, so the Mannequin's toes can poke through heeled boots.
+- **The rest of the clipping:** the few percent the outfit had on its own body. Fix it with [Body Fit](#body-fit).
 
 ## Clipping marks
 
@@ -630,7 +653,7 @@ The panel lists each checked mesh with how many vertices clip. Big changes can t
 
 ## Line Up
 
-A model from another game, VRChat or The Sims stands in its own pose and size. **Line Up** scales, turns and poses it so its hips, shoulders and every limb joint land on the body's. With **Fit Shape**, it then reshapes the model bone by bone, so it sits around the body without losing its details. Refitting it with [Resize](#resize), [Body Fit](#body-fit) and [Weight Transfer](#weight-transfer) starts from the right place.
+A model from another game, VRChat or The Sims stands in its own pose and size. **Line Up** scales, turns and poses it so its hips, shoulders and every limb joint land on the body's. With **Fit Shape**, it then reshapes the model bone by bone, so it sits around the body without losing its details. Refitting it with [Resize](#resize), [Body Fit](#body-fit) and [Weight Transfer](#weight-transfer) starts from the right place. When the model comes with the body it was made on, line that up too, and [Resize from it](#clothing-from-another-game) to fit the clothing around the body.
 
 1. On the **Line Up** tab, pick the **Body**, such as the devkit Mannequin.
 2. Select the model in Object Mode. One of its meshes or its armature is enough: everything on that armature comes along.

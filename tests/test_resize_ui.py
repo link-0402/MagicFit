@@ -133,6 +133,26 @@ def steps():
         bpy.ops.object.mode_set(mode='OBJECT')
     yield 0.2
 
+    # --- Another body without a UV map (another game's), matched by shape.
+    settings = bpy.context.scene.body_fit_brush
+    settings.resize_from_object = resize.coarse_body("Plain Body", uv=None)
+    settings.resize_to_object = bpy.data.objects["Body"]
+    settings.resize_match = 'SHAPE'
+    settings.resize_key_name = "Shape"
+    for obj in bpy.context.view_layer.objects:
+        obj.select_set(obj.name == "Suit")
+    bpy.context.view_layer.objects.active = bpy.data.objects["Suit"]
+    for area in env.window.screen.areas:
+        area.tag_redraw()
+    yield 0.3
+    check(operators.check_resize_ready(bpy.context) is None, "shape: ready with a body matched by shape")
+    env.screenshot("resize_04_shape.png")
+    with env.override(sidebar):
+        result = bpy.ops.magic_fit.resize('EXEC_DEFAULT', True)
+    yield 0.5
+    check(result == {'FINISHED'} and keys_of(bpy.data.objects["Suit"])[-1] == "Shape",
+          "shape: added the key, the bodies matched by shape")
+
 
 def run():
     magic_fit.register()

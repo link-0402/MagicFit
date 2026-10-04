@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(ROOT, "tests"))
 
 import resize  # noqa: E402
 import magic_fit  # noqa: E402
-from magic_fit import fitting, operators, resizing  # noqa: E402
+from magic_fit import fitting, lineup, operators, resizing  # noqa: E402
 
 FAILURES = []
 
@@ -75,10 +75,16 @@ def garment_edges(objects):
 
 def reset_settings():
     settings = bpy.context.scene.body_fit_brush
-    for prop in ("resize_from_object", "resize_from_key", "resize_to_object", "resize_to_key", "resize_radius",
-                 "resize_bridge", "resize_rigid_size", "resize_keep_close", "resize_key_name", "resize_use_keys_state"):
+    for prop in ("resize_from_object", "resize_from_key", "resize_to_object", "resize_to_key", "resize_match",
+                 "resize_radius", "resize_bridge", "resize_rigid_size", "resize_keep_close", "resize_key_name",
+                 "resize_use_keys_state"):
         settings.property_unset(prop)
     return settings
+
+
+def add_group(obj, name, members):
+    """Give mesh ``obj`` a vertex group ``name`` holding the vertices ``members`` (a mask) at weight 1."""
+    obj.vertex_groups.new(name=name).add(np.flatnonzero(members).tolist(), 1.0, 'REPLACE')
 
 
 # -----------------------------------------------------------------------------
@@ -150,53 +156,62 @@ def test_rest_shape_missing_group():
 def test_body_shapes():
     body, _garments = resize.build()
     large, small, quads = resize.body_shapes()
-    source, target, tris = resizing.body_shapes(body, "", None, "Small")
-    check(np.allclose(source, large, atol=1e-6) and np.allclose(target, small, atol=1e-6),
+    shapes = resizing.body_shapes(body, "", None, "Small")
+    check(np.allclose(shapes.source, large, atol=1e-6) and np.allclose(shapes.target, small, atol=1e-6),
           "shapes: From the basis, To the key")
-    check(len(tris) == 2 * len(quads), "shapes: the body's triangles")
+    check(len(shapes.tris) == 2 * len(quads) and shapes.how == 'VERTICES', "shapes: the body's triangles")
     body.data.shape_keys.key_blocks["Small"].value = 1.0
-    source, target, _tris = resizing.body_shapes(body, "", None, "Small")
-    check(np.allclose(source, large, atol=1e-6), "shapes: a key picked for To is off in From, whatever it shows")
-    source, target, _tris = resizing.body_shapes(body, "Small", None, "Basis")
-    check(np.allclose(source, small, atol=1e-6) and np.allclose(target, large, atol=1e-6),
+    shapes = resizing.body_shapes(body, "", None, "Small")
+    check(np.allclose(shapes.source, large, atol=1e-6), "shapes: a key picked for To is off in From, whatever it shows")
+    shapes = resizing.body_shapes(body, "Small", None, "Basis")
+    check(np.allclose(shapes.source, small, atol=1e-6) and np.allclose(shapes.target, large, atol=1e-6),
           "shapes: the other way round, the basis naming no key")
     body.data.shape_keys.key_blocks["Small"].value = 0.0
 
     body.location = (0.0, 0.0, 1.0)
     bpy.context.view_layer.update()
-    source, _target, _tris = resizing.body_shapes(body, "", None, "Small")
-    check(np.allclose(source, large + (0.0, 0.0, 1.0), atol=1e-6), "shapes: in world space")
+    shapes = resizing.body_shapes(body, "", None, "Small")
+    check(np.allclose(shapes.source, large + (0.0, 0.0, 1.0), atol=1e-6), "shapes: in world space")
     copy = resize.mesh_object("Small Body", small, quads)
     copy.location = (1.0, 0.0, 0.0)
     bpy.context.view_layer.update()
-    source, target, _tris = resizing.body_shapes(body, "", copy, "")
-    check(np.allclose(target, small + (0.0, 0.0, 1.0), atol=1e-6),
+    shapes = resizing.body_shapes(body, "", copy, "")
+    check(np.allclose(shapes.target, small + (0.0, 0.0, 1.0), atol=1e-6),
           "shapes: another object's shape, placed like the body wherever it stands")
 
+    tri = resize.mesh_object("Tri", [(0, 0, 0), (1, 0, 0), (0, 1, 0)], [(0, 1, 2)])
     messages = {
         "same": resizing.check_shapes(body, "", None, "Basis"),
         "missing": resizing.check_shapes(body, "Nope", None, "Small"),
         "keyless": resizing.check_shapes(copy, "", None, ""),
-        "no uv": resizing.check_shapes(body, "", resize.mesh_object("Tri", [(0, 0, 0), (1, 0, 0), (0, 1, 0)], [(0, 1, 2)]), ""),
+        "no uv": resizing.check_shapes(body, "", tri, "", 'UV'),
+        "other vertices": resizing.check_shapes(body, "", tri, "", 'VERTICES'),
         "none": resizing.check_shapes(None, "", None, ""),
     }
     check(messages["same"] == "From and To are the same shape", "check: the same shape twice")
     check(messages["missing"] == "'Body' has no shape key 'Nope'", "check: a missing key")
     check("no shape keys" in messages["keyless"], "check: a body without keys needs a To body")
     check(messages["no uv"] == "'Tri' has no UV map to match it to 'Body' by",
-          "check: a different To body needs a UV map to be matched by")
+          "check: matched by UV map, a different To body needs one")
+    check(messages["other vertices"] == "'Body' and 'Tri' have different vertices: match them by UV map or shape",
+          "check: matched by vertices, a different To body needs the same ones")
+    check(resizing.check_shapes(body, "", tri, "") is None and resizing.check_shapes(body, "", tri, "", 'SHAPE') is None,
+          "check: Auto and Shape take any To body")
     check(messages["none"] == "Pick the From Body", "check: no body")
-    check(resizing.check_shapes(body, "", copy, "") is None and not resizing.matches_by_uv(body, copy),
+    check(resizing.check_shapes(body, "", copy, "") is None and resizing.matching(body, copy) == 'VERTICES',
           "check: two objects with the same vertices work, vertex by vertex")
+    check(resizing.matching(body, None, 'SHAPE') == 'VERTICES' and resizing.matching(body, body, 'UV') == 'VERTICES',
+          "check: one body's own shapes are always matched vertex by vertex")
 
 
 def test_matched_bodies():
     body, garments = resize.build()
     coarse = resize.coarse_body()
     coarse_large = resize.positions(coarse)
-    check(resizing.check_shapes(coarse, "", body, "Small") is None and resizing.matches_by_uv(coarse, body),
-          "matched: a different body is matched by the UV maps")
-    source, target, tris = resizing.body_shapes(coarse, "", body, "Small")
+    shapes = resizing.body_shapes(coarse, "", body, "Small")
+    check(resizing.check_shapes(coarse, "", body, "Small") is None and resizing.matching(coarse, body) == 'AUTO'
+          and shapes.how == 'UV', "matched: a different body sharing the UV layout is matched by the UV maps")
+    source, target, tris = shapes.source, shapes.target, shapes.tris
     expected = resize.shrink(coarse_large)
     error = np.linalg.norm(target - expected, axis=1)
     check(len(source) == len(coarse_large) and np.allclose(source, coarse_large) and len(tris) == 2 * 46 * 36,
@@ -208,8 +223,8 @@ def test_matched_bodies():
               np.median(error) * 1000, error.max() * 1000))
 
     # Resizing with the matched bodies comes out like with the To body's own key.
-    direct = resizing.ShapeChange(*resizing.body_shapes(body, "", None, "Small"))
-    matched = resizing.ShapeChange(source, target, tris)
+    direct = resizing.body_shapes(body, "", None, "Small").change()
+    matched = shapes.change()
     suit = resize.positions(garments["Suit"])
     diff = np.linalg.norm(matched.apply(suit) - direct.apply(suit), axis=1)
     check(np.median(diff) < 0.0002 and diff.max() < 0.001,
@@ -221,7 +236,7 @@ def test_matched_bodies():
     far = (1.0, 0.0, 0.0)
     twin = resize.body_object("Twin", np.concatenate([large + far, large]), np.concatenate([small + far, small]),
                               np.concatenate([quads, quads + len(large)]), np.tile(resize.body_uvs(large), (2, 1)))
-    _source, twin_target, _tris = resizing.body_shapes(coarse, "", twin, "Small")
+    twin_target = resizing.body_shapes(coarse, "", twin, "Small", 'UV').target
     check(np.allclose(twin_target, target), "matched: overlapping UV islands, the close one is picked")
 
     # A part the To body lacks (hands, say) with UVs overlapping its chest's, 30 cm away from it: landing
@@ -232,24 +247,137 @@ def test_matched_bodies():
     extra = resize.body_object("Coarse And Stray", np.concatenate([c_large, stray]), np.concatenate([c_small, stray]),
                                np.concatenate([c_quads, stray_quads + len(c_large)]),
                                np.concatenate([resize.body_uvs(c_large), resize.body_uvs(stray)]))
-    extra_source, extra_target, extra_tris = resizing.body_shapes(extra, "", body, "Small")
-    check(len(extra_source) == len(c_large) and np.allclose(extra_source, source) and np.allclose(extra_target, target)
-          and len(extra_tris) == len(tris), "matched: a part the To body lacks is left out")
+    extra_shapes = resizing.body_shapes(extra, "", body, "Small")
+    check(len(extra_shapes.source) == len(c_large) and np.allclose(extra_shapes.source, source)
+          and np.allclose(extra_shapes.target, target) and len(extra_shapes.tris) == len(tris),
+          "matched: a part the To body lacks is left out")
 
     quarter = resize.body_shapes(resize.XS[:35], resize.ZS[:27])
-    mirrored = resize.body_uvs(large) * (-1.0, 1.0) + (1.0, 0.0)
+    mirrored = resize.body_object("Mirrored", large, small, quads, resize.body_uvs(large) * (-1.0, 1.0) + (1.0, 0.0))
     for label, other in (
-            ("a mirrored UV map", resize.body_object("Mirrored", large, small, quads, mirrored)),
+            ("a mirrored UV map", mirrored),
             ("a quarter of the body", resize.body_object("Quarter", *quarter, resize.body_uvs(quarter[0]))),
     ):
         try:
-            resizing.body_shapes(coarse, "", other, "Small")
+            resizing.body_shapes(coarse, "", other, "Small", 'UV')
             check(False, "matched: refused with " + label)
         except resizing.ResizeError as error:
             check("UV" in str(error), "matched: refused with {:s} ({:s})".format(label, str(error)))
+    check(resizing.body_shapes(coarse, "", mirrored, "Small").how == 'SHAPE',
+          "matched: Auto matches bodies whose UV maps don't match by shape")
     # The same vertices joined the same way are a copy, matched vertex by vertex whatever their UVs.
-    check(not resizing.matches_by_uv(coarse, resize.coarse_body("Copy", uv=lambda co: np.zeros((len(co), 2)))),
+    copy = resize.coarse_body("Copy", uv=lambda co: np.zeros((len(co), 2)))
+    check(resizing.matching(coarse, copy) == 'VERTICES' and resizing.body_shapes(coarse, "", copy, "Small").how == 'VERTICES',
           "matched: a copy of the From body isn't matched by UV")
+
+
+def surface_distances(points, co, tris):
+    """Unsigned distance of points to the surface (``co``, triangles ``tris``)."""
+    find = BVHTree.FromPolygons(np.asarray(co).tolist(), np.asarray(tris).tolist(), all_triangles=True).find_nearest
+    return np.array([find(point)[3] for point in np.asarray(points).tolist()])
+
+
+def test_shape_matched_bodies():
+    body, garments = resize.build()
+    large, small, quads = resize.body_shapes()
+    # Another body without a UV map (another game's), lying on the body.
+    plain = resize.coarse_body("Plain Body", uv=None)
+    plain_large = resize.positions(plain)
+    check(resizing.check_shapes(plain, "", body, "Small") is None, "shape: Auto takes a body without a UV map")
+    shapes = resizing.body_shapes(plain, "", body, "Small")
+    match = shapes.match
+    check(shapes.how == 'SHAPE' and len(shapes.source) == len(plain_large) and np.allclose(shapes.source, plain_large)
+          and len(shapes.tris) == 2 * 46 * 36, "shape: Auto matches it by shape, on all of the From body's vertices")
+    check(match.known.all() and match.matched.all() and match.matched_share > 0.999 and match.folded == 0.0,
+          "shape: all of it found on the To body ({:.1f}% matched, {:.1f}% folded)".format(
+              100 * match.matched_share, 100 * match.folded))
+    on = surface_distances(shapes.target, small, resize.triangles(body))
+    check(on.max() < 1e-5, "shape: the matched shape lies on the To shape ({:.4f} mm off at most)".format(1000 * on.max()))
+    # Closest spots aren't where the key takes each spot: the matched shape slides along the body, a
+    # little where the breasts shrink a lot.
+    error = np.linalg.norm(shapes.target - resize.shrink(plain_large), axis=1)
+    fronts = [np.argmin(np.linalg.norm(plain_large[:, [0, 2]] - (cx, cz), axis=1)) for cx, _cy, cz in resize.CENTERS]
+    check(np.median(error) < 0.0005 and error[fronts].max() < 0.001,
+          "shape: mostly where the To body's key puts the same spot, the breasts' fronts too (median {:.2f}, "
+          "fronts {:.2f} mm off; {:.0f} mm at most)".format(
+              1000 * np.median(error), 1000 * error[fronts].max(), 1000 * error.max()))
+    check(abs(match.apart) < 1e-4 and 0.03 < match.spread < 0.04,
+          "shape: the bodies differ only at the breasts (by {:.0f} mm, typically {:.2f})".format(
+              1000 * match.spread, 1000 * match.apart))
+
+    # The suit resized with it keeps its distance to the body, as with the key.
+    suit = garments["Suit"]
+    before = resize.positions(suit)
+    after = shapes.change(bridge=resizing.BRIDGE_RADIUS).apply(before, edges=resize.edges(suit))
+    h0 = signed_distance(before, large, quads)
+    h1 = signed_distance(after, small, quads)
+    dh = np.abs(h1 - h0)
+    check(np.median(dh) < 0.001 and np.percentile(dh, 99) < 0.003,
+          "shape: the suit stays about as far from the body (median {:.2f}, 99% within {:.2f} mm)".format(
+              np.median(dh) * 1000, np.percentile(dh, 99) * 1000))
+    check(resize.flipped(before, after, resize.triangles(suit)) == 0 and float(h1.min()) > 0.0,
+          "shape: no face of the suit turned over, nothing sank in ({:.2f} mm closest)".format(h1.min() * 1000))
+
+
+def test_shape_refused():
+    body, _garments = resize.build()
+    large, small, quads = resize.body_shapes()
+    plain = resize.coarse_body("Plain Body", uv=None)
+    # Matched by shape, the bodies must lie on each other; by UV map they can stand anywhere.
+    body.location = (0.0, -0.3, 0.0)
+    bpy.context.view_layer.update()
+    try:
+        resizing.body_shapes(plain, "", body, "Small")
+        check(False, "shape: refused bodies standing apart")
+    except resizing.ResizeError as error:
+        check(str(error) == "'Plain Body' and 'Body' don't lie on each other (typically 30 cm apart): line them up first",
+              "shape: refused bodies standing apart ({:s})".format(str(error)))
+    check(resizing.body_shapes(resize.coarse_body(), "", body, "Small").how == 'UV',
+          "UV map: the To body can stand anywhere")
+    body.location = (0.0, 0.0, 0.0)
+    bpy.context.view_layer.update()
+    quarter = resize.body_shapes(resize.XS[:35], resize.ZS[:27])
+    try:
+        resizing.body_shapes(plain, "", resize.body_object("Quarter", *quarter, None), "Small")
+        check(False, "shape: refused a To body that's a quarter of it")
+    except resizing.ResizeError as error:
+        check(str(error).startswith("Only 26% of 'Plain Body' lies over 'Quarter'"),
+              "shape: refused a To body that's a quarter of it ({:s})".format(str(error)))
+
+
+def test_shape_skipped_parts():
+    body, _garments = resize.build()
+    plain = resize.coarse_body("Plain Body", uv=None)
+    co = resize.positions(plain)
+    # A hand resting on the side of the chest, where the body doesn't change. Thighs make the groups tell
+    # the limbs.
+    def groups(obj, points):
+        hand = points[:, 0] < -0.152
+        thigh = (points[:, 2] < -0.13) & (np.abs(points[:, 0]) > 0.02) & (np.abs(points[:, 0]) < 0.1)
+        add_group(obj, "Spine", ~hand)
+        add_group(obj, "LeftHand", hand)
+        add_group(obj, "LeftThigh", thigh & (points[:, 0] < 0.0))
+        add_group(obj, "RightThigh", thigh & (points[:, 0] > 0.0))
+        add_group(obj, "Yiggle", np.ones(len(points), dtype=bool))  # a devkit's mask, telling no part
+        return hand
+    hand = groups(plain, co)
+    labels = resizing.part_labels(plain)
+    check(labels is not None and np.all(labels[hand] == lineup.PART_INDEX["hand_l"])
+          and np.all(labels[~hand] != lineup.PART_INDEX["hand_l"]), "skipped: parts from the groups named after them")
+    match = resizing.body_shapes(plain, "", body, "Small").match
+    check(np.array_equal(match.skipped, hand) and not match.known[hand].any() and not match.matched[hand].any(),
+          "skipped: a hand isn't matched by shape")
+    # Where the body doesn't change, it stays on it, sliding along with the parts around it.
+    off = surface_distances(match.target[hand], resize.body_shapes()[1], resize.triangles(body))
+    slide = np.linalg.norm(match.target[hand] - co[hand], axis=1)
+    check(off.max() < 1e-5 and slide.max() < 0.001, "skipped: it follows the parts around it, on the body "
+          "({:.4f} mm off it, {:.2f} mm along it)".format(1000 * off.max(), 1000 * slide.max()))
+    # Without groups of its own, the To body's tell: what lies on its hand.
+    bare = resize.coarse_body("Bare Body", uv=None)
+    check(resizing.part_labels(bare) is None, "skipped: a body without groups tells no parts")
+    groups(body, resize.positions(body))
+    match = resizing.body_shapes(bare, "", body, "Small").match
+    check(np.array_equal(match.skipped, hand), "skipped: without groups, what lies on the To body's hand")
 
 
 # -----------------------------------------------------------------------------
@@ -484,6 +612,20 @@ def test_keep_close():
     check(np.array_equal(resizing.keep_close(loose, loose + 0.01 * normal, edge_list, body, body, body_tris),
                          loose + 0.01 * normal), "keep close: loose cloth (1 cm off) isn't held to the body")
 
+    # The To body as a mesh of its own (a finer one of the same plane), as when matched by shape.
+    other, other_quads = resize.grid(np.linspace(-0.1, 0.1, 61), np.linspace(-0.1, 0.1, 61), lambda X, Z: np.zeros_like(X))
+    other_tris = np.concatenate([other_quads[:, [0, 1, 2]], other_quads[:, [0, 2, 3]]])
+    apart = resizing.keep_close(start, moved, edge_list, body, other, body_tris, target_tris=other_tris)
+    check(np.abs(apart - kept).max() < 1e-9, "keep close: against another mesh of the To body, the same")
+    unknown = resizing.keep_close(start, moved, edge_list, body, other, body_tris, target_tris=other_tris,
+                                  known=np.zeros(len(body), dtype=bool))
+    check(np.array_equal(unknown, moved), "keep close: nothing is held over parts not known on the To body")
+    partly = resizing.keep_close(start, moved, edge_list, body, other, body_tris, target_tris=other_tris,
+                                 known=body[:, 0] < 0.0) @ normal
+    check(partly[bag].max() < 0.002 + resizing.PULL_SLACK + 0.0005 and partly[dent].min() < -0.0005,
+          "keep close: only over the parts known (the bag comes back, the dent stays {:.2f} mm deep)".format(
+              -1000 * partly[dent].min()))
+
 
 def test_keep_close_suit():
     shape_change, large, small, quads = change()
@@ -542,8 +684,8 @@ def test_operator():
     check(bpy.ops.magic_fit.resize() == {'FINISHED'}, "button: finishes")
 
     check(abs(settings.resize_bridge - resizing.BRIDGE_RADIUS) < 1e-6, "button: bridges creases by default")
-    shape_change = resizing.ShapeChange(*resizing.body_shapes(body, "", None, "Small"), radius=settings.resize_radius,
-                                        bridge=settings.resize_bridge)
+    shape_change = resizing.body_shapes(body, "", None, "Small").change(radius=settings.resize_radius,
+                                                                       bridge=settings.resize_bridge)
     rigid = np.full(sum(len(co) for co in before.values()), -1)
     rigid[-8:] = 0  # the pendant is the only part smaller than Rigid Parts
     expected = shape_change.apply(np.concatenate(list(before.values())), rigid=rigid,
@@ -586,8 +728,8 @@ def test_operator_keep_close_off():
     settings.resize_keep_close = False
     before = np.concatenate([resize.positions(obj) for obj in garments.values()])
     check(bpy.ops.magic_fit.resize() == {'FINISHED'}, "keep close off: finishes")
-    shape_change = resizing.ShapeChange(*resizing.body_shapes(body, "", None, "Small"), radius=settings.resize_radius,
-                                        bridge=settings.resize_bridge)
+    shape_change = resizing.body_shapes(body, "", None, "Small").change(radius=settings.resize_radius,
+                                                                       bridge=settings.resize_bridge)
     rigid = np.full(len(before), -1)
     rigid[-8:] = 0
     expected = shape_change.apply(before, rigid=rigid)
@@ -610,8 +752,8 @@ def test_operator_matched_bodies():
     check(operators.resize_key_name(bpy.context) == "Small", "matched button: named after the To key")
     before = np.concatenate([resize.positions(obj) for obj in garments.values()])
     check(bpy.ops.magic_fit.resize() == {'FINISHED'}, "matched button: finishes")
-    shape_change = resizing.ShapeChange(*resizing.body_shapes(coarse, "", body, "Small"), radius=settings.resize_radius,
-                                        bridge=settings.resize_bridge)
+    shape_change = resizing.body_shapes(coarse, "", body, "Small").change(radius=settings.resize_radius,
+                                                                         bridge=settings.resize_bridge)
     rigid = np.full(len(before), -1)
     rigid[-8:] = 0  # the pendant
     expected = shape_change.apply(before, rigid=rigid, edges=garment_edges(garments.values()))
@@ -620,6 +762,38 @@ def test_operator_matched_bodies():
     check(not resizing.shows_to_shape(coarse, "", body, "Small"), "matched hint: the To body doesn't show its To key")
     body.data.shape_keys.key_blocks["Small"].value = 1.0
     check(resizing.shows_to_shape(coarse, "", body, "Small"), "matched hint: now it does")
+
+
+def test_operator_shape_matched():
+    body, garments = resize.build()
+    plain = resize.coarse_body("Plain Body", uv=None)
+    settings = reset_settings()
+    check(settings.resize_match == 'AUTO', "match by: Auto by default")
+    settings.resize_from_object = plain
+    settings.resize_to_object = body
+    settings.resize_to_key = "Small"
+    for obj in bpy.context.view_layer.objects:
+        obj.select_set(obj.name in garments)
+    check(operators.check_resize_ready(bpy.context) is None, "shape button: ready with a body of another kind")
+    settings.resize_match = 'VERTICES'
+    check(operators.check_resize_ready(bpy.context) == "'Plain Body' and 'Body' have different vertices: match them "
+                                                      "by UV map or shape", "shape button: not vertex by vertex")
+    settings.resize_match = 'UV'
+    check(operators.check_resize_ready(bpy.context) == "'Plain Body' has no UV map to match it to 'Body' by",
+          "shape button: not by UV map")
+    settings.resize_match = 'SHAPE'
+    before = np.concatenate([resize.positions(obj) for obj in garments.values()])
+    check(bpy.ops.magic_fit.resize() == {'FINISHED'}, "shape button: finishes")
+    shapes = resizing.body_shapes(plain, "", body, "Small", 'SHAPE')
+    change = shapes.change(radius=settings.resize_radius, bridge=settings.resize_bridge)
+    check(change.to_body is not None and change.known is shapes.match.known,
+          "shape button: keeps clothing close to the To body itself")
+    rigid = np.full(len(before), -1)
+    rigid[-8:] = 0  # the pendant
+    expected = change.apply(before, rigid=rigid, edges=garment_edges(garments.values()))
+    got = np.concatenate([resize.positions(obj, "Small") for obj in garments.values()])
+    check(np.abs(got - expected).max() < 1e-5, "shape button: the meshes got the resized shape ({:.2g} m off)".format(
+        np.abs(got - expected).max()))
 
 
 def test_operator_edit_mode_and_drivers():
@@ -675,8 +849,9 @@ def test_use_shapekeys():
 def test_registered():
     check(hasattr(bpy.ops.magic_fit, "resize"), "the Resize operator is registered")
     settings = bpy.context.scene.body_fit_brush
-    for prop in ("resize_from_object", "resize_from_key", "resize_to_object", "resize_to_key", "resize_radius",
-                 "resize_bridge", "resize_rigid_size", "resize_keep_close", "resize_key_name", "resize_use_keys"):
+    for prop in ("resize_from_object", "resize_from_key", "resize_to_object", "resize_to_key", "resize_match",
+                 "resize_radius", "resize_bridge", "resize_rigid_size", "resize_keep_close", "resize_key_name",
+                 "resize_use_keys"):
         check(prop in settings.bl_rna.properties, "setting: " + prop)
 
 

@@ -27,6 +27,9 @@ one about as much. Body Fit fixes that afterwards.
 
 The two shapes can also come from two different bodies (a devkit's RueXB body and another's Rue one):
 their vertices are then matched by their UV maps, which body mods made for the same skin textures share.
+Bodies of any kind (an outfit's own body from another game, lined up on the Mannequin with it) are
+matched by shape instead: each vertex goes to the closest spot of the other body, where that faces the
+same way, and the parts that can't be matched like that (hands, feet, a head) follow the rest.
 
 Like `painting`, the engine (`ShapeChange`) works on world space arrays and doesn't need the 3D view.
 """
@@ -287,12 +290,17 @@ class ShapeChange:
     between surfaces closer than that (the two sides of a crease). With ``bridge`` (a ball radius, see
     `bridged`), clothing that doesn't lie on the skin moves with crease-free versions of both shapes;
     0 follows the skin everywhere.
+
+    ``to_body`` (positions and triangles) is the To body itself when ``target`` was matched onto it by
+    shape, and ``known`` which vertices of ``target`` lie on it (see `match_by_shape`): Keep Close then
+    brings clothing back to its distance from the To body itself, over those vertices only.
     """
 
-    def __init__(self, source, target, tris, radius=DEFAULT_RADIUS, bridge=0.0):
+    def __init__(self, source, target, tris, radius=DEFAULT_RADIUS, bridge=0.0, to_body=None, known=None):
         self.source = np.asarray(source, dtype=np.float64).reshape(-1, 3)
         self.target = np.asarray(target, dtype=np.float64).reshape(-1, 3)
         self.tris = np.asarray(tris, dtype=np.int64).reshape(-1, 3)
+        self.to_body, self.known = to_body, known
         if self.source.shape != self.target.shape:
             raise ResizeError("The two body shapes have different vertex counts")
         area = _vertex_areas(self.source, self.tris) if len(self.tris) else np.zeros(len(self.source))
@@ -418,8 +426,10 @@ class ShapeChange:
             def keep_progress(done):
                 if progress is not None:
                     progress((self.steps + done * rounds) / total)
+            to_co, to_tris = self.to_body if self.to_body is not None else (self.target, None)
             points = keep_close(first, points, copies[np.asarray(edges, dtype=np.int64).reshape(-1, 2)],
-                                self.source, self.target, tris, anchors=loose, progress=keep_progress)
+                                self.source, to_co, tris, anchors=loose, progress=keep_progress,
+                                target_tris=to_tris, known=self.known)
         result = points[copies]
         if rigid is not None:
             keep_rigid(start, result, np.asarray(rigid))
@@ -441,7 +451,8 @@ def _blend_shares(points, shares):
     return np.where(shares < 0.01, 0.0, np.where(shares > 0.99, 1.0, shares))
 
 
-def keep_close(start, moved, edges, source, target, tris, anchors=None, progress=None):
+def keep_close(start, moved, edges, source, target, tris, anchors=None, progress=None, target_tris=None,
+               known=None):
     """Bring tight clothing back to its old distance from the body after a smooth move (Keep Close).
 
     ``start`` are the points fitted to the body's ``source`` shape, ``moved`` where the move took them
@@ -451,11 +462,16 @@ def keep_close(start, moved, edges, source, target, tris, anchors=None, progress
     back along the body's normal by the difference beyond that. The corrections are spread over the
     edges, so the rest of the clothing comes along smoothly and it doesn't crease; points at the same
     spot always move alike. Returns the new positions.
+
+    With ``target_tris``, ``target`` is another mesh (the To body a body of other vertices was matched
+    to by shape), and with ``known`` (per vertex of ``source``), only points over source triangles most
+    of whose corners are known count (where the matched shape lies on that mesh: over a heel left to
+    follow the leg, Keep Close would press a boot onto the To body's flat foot).
     """
     from .fitting import BodySurface
 
-    def surface(co):
-        return BodySurface(co, tris, BVHTree.FromPolygons(co.tolist(), tris.tolist(), all_triangles=True))
+    def surface(co, faces=tris):
+        return BodySurface(co, faces, BVHTree.FromPolygons(co.tolist(), faces.tolist(), all_triangles=True))
 
     start = np.asarray(start, dtype=np.float64)
     moved = np.asarray(moved, dtype=np.float64)
@@ -466,9 +482,14 @@ def keep_close(start, moved, edges, source, target, tris, anchors=None, progress
     first = np.zeros(count, dtype=np.int64)
     first[weld[::-1]] = np.arange(len(weld))[::-1]
     points = moved[first]
-    near = surface(np.asarray(source, dtype=np.float64)).nearest(start[first])
+    source_surface = surface(np.asarray(source, dtype=np.float64))
+    near = source_surface.nearest(start[first])
     height = near.distance
     close = near.found & ~near.beyond & (np.abs(height) < KEEP_CLOSE_DISTANCE)
+    if known is not None:
+        welded = np.zeros(len(source_surface.co), dtype=bool)
+        welded[source_surface._weld] = np.asarray(known, dtype=bool)
+        close &= welded[near.corners].sum(axis=1) >= 2
     if anchors is not None:
         free = np.ones(count, dtype=bool)
         np.logical_and.at(free, weld, np.asarray(anchors, dtype=bool))
@@ -477,7 +498,8 @@ def keep_close(start, moved, edges, source, target, tris, anchors=None, progress
     pairs = np.unique(pairs[pairs[:, 0] != pairs[:, 1]], axis=0)
     a, b = pairs[:, 0], pairs[:, 1]
     degree = np.maximum(np.bincount(a, minlength=count) + np.bincount(b, minlength=count), 1)[:, None]
-    body = surface(np.asarray(target, dtype=np.float64))
+    body = surface(np.asarray(target, dtype=np.float64),
+                   tris if target_tris is None else np.asarray(target_tris, dtype=np.int64).reshape(-1, 3))
     which = np.flatnonzero(close)
     for done in range(KEEP_ROUNDS if len(which) else 0):
         near = body.nearest(points[which])
@@ -658,6 +680,209 @@ def match_by_uv(uv, co, tri_verts, tri_uv, other_co):
     return triangle, weights
 
 
+# Bodies of any kind are matched by shape, lying on each other (an outfit's own body from another game and
+# the Mannequin, after Line Up): each vertex of one goes to the closest spot of the other no farther than
+# this...
+SHAPE_REACH = 0.10
+# ...that faces within about 60 degrees of the way it faces...
+SHAPE_FACING = 0.5
+# ...and that it lies off mostly along that spot's normal (as Fit Shape's matches do), unless closer than
+# this (bodies lined up within a few millimetres).
+SHAPE_ALONG = 0.6
+SHAPE_SLACK = 0.003
+# Parts never matched by shape (fingers count with the hands): toes, heels and fingers find the wrong
+# spots, many on one (heeled feet on the Mannequin's flat ones), and FFXIV bodies have no head. They follow
+# the parts around them.
+SHAPE_SKIPPED = ("head", "hand", "foot")
+# The moves found are smoothed over the body across about this distance (Resize averages over a centimetre
+# anyway), and fade out over this distance from what matched into what didn't.
+SHAPE_SMOOTH = 0.01
+SHAPE_FADE = 0.15
+# Then the vertices of the smoothed shape that match again are put onto the other body where it's closer
+# than this, so the matched shape is that body's surface itself, not a smoothed copy of it.
+SHAPE_PROJECT = 0.02
+# A body is refused when less than this share of its area lies over the other at all (not past its open
+# edges, not in a skipped part); MIN_MATCHED and MAX_MEDIAN_GAP count as for UV maps, over that area.
+SHAPE_MIN_OVER = 0.3
+# Where the bodies differ by more than this (for the farthest 5 % of what matched), clothing tied to the
+# skin's landmarks (the underbust, a piercing) slides and can crease: Resize warns.
+SHAPE_DIFFERENT = 0.03
+
+
+class ShapeMatch:
+    """Where each vertex of a body goes on another, matched by shape (see `match_by_shape`).
+
+    ``target`` is its position on the other body (n x 3). ``matched`` marks the vertices that match it
+    (those closer than SHAPE_PROJECT were put onto it), ``skipped`` those in parts never matched by shape,
+    ``beyond`` those past its open edges (it has nothing there) that don't match, and ``known`` those
+    neither: the others follow them. ``over`` is the share of
+    the body's area known, ``matched_share`` the share of that area that matched, ``folded`` the share of
+    the known triangles turned over in the matched shape (pressed many on one), ``apart`` the median
+    distance between the bodies over the known vertices, and ``spread`` the 95th percentile of it over the
+    matched ones.
+    """
+
+    def __init__(self):
+        self.target = self.matched = self.skipped = self.beyond = self.known = None
+        self.over = self.matched_share = self.folded = self.apart = self.spread = 0.0
+
+
+def skipped_parts():
+    """Indices into lineup.PARTS of the parts never matched by shape (SHAPE_SKIPPED)."""
+    from . import lineup
+    chosen = [index for index, part in enumerate(lineup.PARTS)
+              if (part.rsplit("_", 1)[0] if part.endswith(("_l", "_r")) else part) in SHAPE_SKIPPED
+              or part in lineup.DIGIT_PARTS]
+    return np.array(chosen, dtype=np.int64)
+
+
+def _screened_fill(values, weights, edges, count, stiffness, hold, fixed=None, start=None, iterations=2000,
+                   tolerance=1e-7):
+    """Solve (W + stiffness L + hold I) x = W values over a graph of ``count`` vertices (``edges``: pairs; L
+    its uniform Laplacian, W the diagonal of ``weights``), each column by conjugate gradients with a Jacobi
+    preconditioner, from ``start`` (else ``values`` where weighted, 0 elsewhere). That smooths ``values``
+    where they're weighted, and fills in the rest smoothly, fading to 0 over about sqrt(stiffness / hold)
+    edges from the weighted ones. Where ``fixed`` (a mask), x is ``values`` exactly, and the rest is solved
+    around it."""
+    a, b = edges[:, 0], edges[:, 1]
+    values = np.asarray(values, dtype=np.float64).reshape(count, -1)
+    weights = np.asarray(weights, dtype=np.float64)
+    free = np.ones((count, 1)) if fixed is None else (~np.asarray(fixed, dtype=bool)).astype(np.float64)[:, None]
+    degree = (np.bincount(a, minlength=count) + np.bincount(b, minlength=count)).astype(np.float64)
+    diagonal = (weights + stiffness * degree + hold)[:, None]
+
+    def around(x):
+        return np.stack([np.bincount(a, weights=x[b, k], minlength=count) + np.bincount(b, weights=x[a, k], minlength=count)
+                         for k in range(x.shape[1])], axis=1)
+
+    def times(x):
+        # Over the free vertices only: the fixed ones' values are in the right-hand side.
+        return free * (diagonal * x - stiffness * around(x))
+
+    held = (1.0 - free) * values
+    rhs = free * (weights[:, None] * values + stiffness * around(held))
+    x = free * (np.where(weights[:, None] > 0.0, values, 0.0) if start is None else np.reshape(start, (count, -1)))
+    r = rhs - times(x)
+    z = r / diagonal
+    p = z.copy()
+    rz = np.einsum("ij,ij->j", r, z)
+    norm = max(float(np.linalg.norm(rhs)), 1e-30)
+    for _ in range(iterations):
+        if float(np.linalg.norm(r)) <= tolerance * norm:
+            break
+        q = times(p)
+        step = rz / np.maximum(np.einsum("ij,ij->j", p, q), 1e-300)
+        x += step * p
+        r -= step * q
+        z = r / diagonal
+        rz_new = np.einsum("ij,ij->j", r, z)
+        p = z + (rz_new / np.maximum(rz, 1e-300)) * p
+        rz = rz_new
+    return x + held
+
+
+def match_by_shape(co, tris, to_co, to_tris, labels=None, to_labels=None):
+    """Where each vertex of a body (``co``, ``tris``) goes on another body of any vertices (``to_co``,
+    ``to_tris``) lying on it, matched by shape.
+
+    Each vertex takes the closest spot of the other body within SHAPE_REACH that faces about the same way
+    and that it lies off along that spot's normal. Those moves are smoothed over the body and filled in
+    where nothing matched (fading out over SHAPE_FADE), and the vertices that match again from there are
+    put onto the other body. ``labels`` (per vertex, its part in lineup.PARTS, -1 for none) mark the parts
+    never matched (SHAPE_SKIPPED); without them, ``to_labels`` (the same for the other body) mark the
+    vertices whose closest spot is in such a part. Returns a ShapeMatch.
+    """
+    from .fitting import BodySurface
+
+    def surface(points, faces):
+        return BodySurface(points, faces, BVHTree.FromPolygons(points.tolist(), faces.tolist(), all_triangles=True))
+
+    body = surface(np.asarray(co, dtype=np.float64), np.asarray(tris, dtype=np.int64).reshape(-1, 3))
+    other = surface(np.asarray(to_co, dtype=np.float64), np.asarray(to_tris, dtype=np.int64).reshape(-1, 3))
+    # Vertices at the same spot (split seams) are one.
+    weld, count, corners = body._weld, len(body.co), body.corners
+    skip = skipped_parts()
+    skipped = np.zeros(count, dtype=bool)
+    if labels is not None:
+        np.logical_or.at(skipped, weld, np.isin(labels, skip))
+    near = other.nearest(body.co)
+    if labels is None and to_labels is not None:
+        skipping = np.zeros(len(other.co), dtype=bool)
+        np.logical_or.at(skipping, other._weld, np.isin(to_labels, skip))
+        closest = near.corners[np.arange(count), np.argmax(near.bary, axis=1)]
+        skipped = near.found & skipping[closest]
+
+    def accept(points, facing, near):
+        """Which of ``points`` (facing ``facing``) match their closest spots ``near``, and how far those are."""
+        offset = near.location - points
+        length = np.linalg.norm(offset, axis=1)
+        ok = near.found & ~near.beyond & ~skipped & (length <= SHAPE_REACH)
+        ok &= np.einsum("ij,ij->i", facing, near.normal) > SHAPE_FACING
+        ok &= np.abs(np.einsum("ij,ij->i", offset, near.normal)) >= SHAPE_ALONG * length - SHAPE_SLACK
+        return ok, length
+
+    # Each triangle turned the way the body's outward normals face it, for the normals of the moved shape.
+    a, b, c = (body.co[corners[:, k]] for k in range(3))
+    before = np.cross(b - a, c - a)
+    turn = np.where(np.einsum("ij,ij->i", before, body.tri_normals) < 0.0, -1.0, 1.0)
+
+    def normals(points):
+        a, b, c = (points[corners[:, k]] for k in range(3))
+        face = np.cross(b - a, c - a) * turn[:, None]
+        summed = np.stack([np.bincount(corners.reshape(-1), np.repeat(face[:, k], 3), minlength=count)
+                           for k in range(3)], axis=1)
+        return summed / np.maximum(np.linalg.norm(summed, axis=1, keepdims=True), 1e-12)
+
+    found, gap = accept(body.co, body.normals, near)
+    beyond = near.beyond.copy()
+    edge = max(body.edge_length, 1e-6)
+    stiffness = (SHAPE_SMOOTH / edge) ** 2
+    hold = stiffness * (edge / SHAPE_FADE) ** 2
+    moved = body.co + _screened_fill(near.location - body.co, found, body.edges, count, stiffness, hold)
+    again = other.nearest(moved)
+    matched, off = accept(moved, normals(moved), again)
+    put = matched & (off < SHAPE_PROJECT)
+    moved[put] = again.location[put]
+    if put.any() and not put.all():
+        # The rest follows what was put onto the other body from where it was put, not from the smoothed
+        # moves, which would leave a step there: a hand would end up off the wrist it hangs from.
+        moves = moved - body.co
+        moved = body.co + _screened_fill(moves, np.zeros(count), body.edges, count, stiffness, hold, fixed=put,
+                                         start=moves)
+    beyond &= ~matched
+    known = ~skipped & ~beyond
+
+    result = ShapeMatch()
+    area = np.linalg.norm(body.area_normals, axis=1)
+    known_area = float(area[known].sum())
+    result.over = known_area / max(float(area.sum()), 1e-30)
+    result.matched_share = float(area[known & matched].sum()) / max(known_area, 1e-30)
+    result.apart = float(np.median(gap[known])) if known.any() else math.inf
+    result.spread = float(np.percentile(gap[found], 95)) if found.any() else 0.0
+    ta, tb, tc = (moved[corners[:, k]] for k in range(3))
+    counted = known[corners].all(axis=1) & (np.linalg.norm(before, axis=1) > 1e-14)
+    turned = counted & (np.einsum("ij,ij->i", before, np.cross(tb - ta, tc - ta)) < 0.0)
+    result.folded = float(turned.sum()) / max(int(counted.sum()), 1)
+    result.target = moved[weld]
+    result.matched, result.skipped, result.beyond, result.known = matched[weld], skipped[weld], beyond[weld], known[weld]
+    return result
+
+
+def check_shape_match(match, name, other_name):
+    """Why a match by shape (``match``, a ShapeMatch) of the body ``name`` to ``other_name`` can't be used (a
+    message), or None."""
+    if match.over < SHAPE_MIN_OVER:
+        return "Only {:.0f}% of '{:s}' lies over '{:s}': line them up on each other first".format(
+            100.0 * match.over, name, other_name)
+    if match.apart > MAX_MEDIAN_GAP:
+        return "'{:s}' and '{:s}' don't lie on each other (typically {:.0f} cm apart): line them up first".format(
+            name, other_name, 100.0 * match.apart)
+    if match.matched_share < MIN_MATCHED:
+        return "Only {:.0f}% of '{:s}' could be matched to '{:s}' by shape: the bodies are too different".format(
+            100.0 * match.matched_share, name, other_name)
+    return None
+
+
 # -----------------------------------------------------------------------------
 # Shapes of Blender meshes
 
@@ -784,9 +1009,39 @@ def _same_vertices(mesh, other):
     return np.array_equal(_edge_set(mesh), _edge_set(other))
 
 
-def matches_by_uv(body, to_body):
-    """Whether Resize matches ``body`` and ``to_body`` by their UV maps: they're different meshes."""
-    return to_body is not None and not _same_vertices(body.data, to_body.data)
+def matching(body, to_body, match='AUTO'):
+    """How Resize matches the From body ``body`` with the To body (``to_body``, else ``body`` itself), with
+    Match By ``match`` ('AUTO', 'VERTICES', 'UV' or 'SHAPE'): one body's shapes and, for 'AUTO', copies of
+    one mesh go vertex by vertex ('VERTICES'); other bodies as ``match`` says, 'AUTO' meaning by UV map where
+    they share a layout, else by shape."""
+    if to_body is None or to_body == body:
+        return 'VERTICES'
+    if match == 'AUTO' and _same_vertices(body.data, to_body.data):
+        return 'VERTICES'
+    return match
+
+
+def part_labels(obj):
+    """Body part (index into lineup.PARTS) of each vertex of mesh ``obj``, -1 for none, by its weights in
+    the deform bones of its armature, else in its vertex groups named after body parts. None when they
+    don't tell its limbs."""
+    from . import lineup
+    parts = None
+    armature = lineup.armature_of(obj)
+    if armature is not None:
+        _parts, deform, _joints = lineup.armature_rig(armature)
+        parts = {group.name: deform[group.name] for group in obj.vertex_groups if group.name in deform}
+        if not lineup.has_half(parts):
+            parts = None
+    if parts is None:
+        # Groups whose names say nothing about a body part (a devkit's 'Buff' or 'Yiggle' masks) would join
+        # the part they share the most weight with, and outweigh its bones.
+        names = [group.name for group in obj.vertex_groups if lineup.classify(group.name) != (None, None)]
+        parts, _named = lineup.group_parts_by_name(names, lineup.mesh_weights(obj, names))
+        if not lineup.has_half(parts):
+            return None
+    part_weights = lineup.mesh_weights(obj, list(parts)).by_part(parts)
+    return np.where(part_weights.sum(axis=1) > 0.0, np.argmax(part_weights, axis=1), -1)
 
 
 def _key_name(obj, name):
@@ -797,8 +1052,9 @@ def _key_name(obj, name):
     return name if keys is not None and keys.key_blocks.get(name) is not None else None
 
 
-def check_shapes(body, from_key, to_body, to_key):
-    """Why the From and To shapes can't be used, or None when they can. ``to_body`` None means ``body``."""
+def check_shapes(body, from_key, to_body, to_key, match='AUTO'):
+    """Why the From and To shapes can't be used, or None when they can. ``to_body`` None means ``body``;
+    ``match`` is how different bodies are matched (see `matching`)."""
     if body is None:
         return "Pick the From Body"
     if body.type != 'MESH':
@@ -810,11 +1066,14 @@ def check_shapes(body, from_key, to_body, to_key):
         return "'{:s}' has no shape key '{:s}'".format(body.name, from_key)
     if _key_name(other, to_key) is None:
         return "'{:s}' has no shape key '{:s}'".format(other.name, to_key)
-    if len(other.data.vertices) != len(body.data.vertices):
-        # A different body: it's matched by the UV maps (the same vertex count is taken for a copy).
-        for obj, match in ((body, other), (other, body)):
-            if obj.data.uv_layers.active is None:
-                return "'{:s}' has no UV map to match it to '{:s}' by".format(obj.name, match.name)
+    if other != body:
+        if match == 'VERTICES' and len(other.data.vertices) != len(body.data.vertices):
+            return "'{:s}' and '{:s}' have different vertices: match them by UV map or shape".format(
+                body.name, other.name)
+        if match == 'UV':
+            for obj, match_to in ((body, other), (other, body)):
+                if obj.data.uv_layers.active is None:
+                    return "'{:s}' has no UV map to match it to '{:s}' by".format(obj.name, match_to.name)
     for obj in {body, other}:
         keys = obj.data.shape_keys
         if keys is not None and not keys.use_relative:
@@ -830,17 +1089,36 @@ def check_shapes(body, from_key, to_body, to_key):
     return None
 
 
-def body_shapes(body, from_key, to_body, to_key):
-    """The From and To shapes of the body (world space, on the vertices of ``body``) and its triangles.
+class BodyShapes:
+    """The From and To shapes Resize moves meshes between, in world space: ``source`` and ``target`` on the
+    same vertices, ``tris`` their triangles, and ``how`` the bodies were matched ('VERTICES', 'UV' or
+    'SHAPE'). A match by shape also keeps the To body itself (``to_co``, ``to_tris``) and the ShapeMatch
+    (``match``), whose known vertices lie on it."""
+
+    def __init__(self, source, target, tris, how):
+        self.source, self.target, self.tris, self.how = source, target, tris, how
+        self.to_co = self.to_tris = self.match = None
+
+    def change(self, radius=DEFAULT_RADIUS, bridge=0.0):
+        """The ShapeChange between the two shapes."""
+        if self.match is None:
+            return ShapeChange(self.source, self.target, self.tris, radius=radius, bridge=bridge)
+        return ShapeChange(self.source, self.target, self.tris, radius=radius, bridge=bridge,
+                           to_body=(self.to_co, self.to_tris), known=self.match.known)
+
+
+def body_shapes(body, from_key, to_body, to_key, match='AUTO'):
+    """The From and To shapes of the body (a BodyShapes, on the vertices of ``body``).
 
     From is ``body`` with its shape key ``from_key`` fully on, To is ``to_body`` (``body`` when None)
     with ``to_key`` fully on; empty names add no key. The other shape keys stay at their current
     values, except that when both are the same object, the key picked for one shape is off in the other.
-    The To shape is taken in its own object space and placed like ``body``, so the To body can stand
-    anywhere. A To body with other vertices is matched to ``body`` by their UV maps, and only the
-    vertices of ``body`` found on it are returned.
+    A To body with other vertices is matched to ``body`` as ``match`` says (see `matching`): by their UV
+    maps, keeping only the vertices of ``body`` found on it, or by shape. Matched by vertices or UV map,
+    the To shape is taken in its own object space and placed like ``body``, so the To body can stand
+    anywhere; matched by shape, the bodies must lie on each other.
     """
-    problem = check_shapes(body, from_key, to_body, to_key)
+    problem = check_shapes(body, from_key, to_body, to_key, match)
     if problem is not None:
         raise ResizeError(problem)
     other = to_body if to_body is not None else body
@@ -857,9 +1135,35 @@ def body_shapes(body, from_key, to_body, to_key):
     source = rest_shape(body, source_values)
     target = rest_shape(other, target_values)
     tris = _tris(body.data)
-    if matches_by_uv(body, to_body):
-        source, target, tris = _match_bodies(body, source, other, target, tris)
-    return _transform(source, body.matrix_world), _transform(target, body.matrix_world), tris
+    way = matching(body, to_body, match)
+    if way in ('UV', 'AUTO'):
+        try:
+            matched = _match_bodies(body, source, other, target, tris)
+        except ResizeError:
+            if way == 'UV':
+                raise
+        else:
+            return BodyShapes(_transform(matched[0], body.matrix_world), _transform(matched[1], body.matrix_world),
+                              matched[2], 'UV')
+    if way in ('SHAPE', 'AUTO'):
+        return _shape_bodies(body, source, other, target, tris)
+    return BodyShapes(_transform(source, body.matrix_world), _transform(target, body.matrix_world), tris, 'VERTICES')
+
+
+def _shape_bodies(body, source, other, target, tris):
+    """The shape ``target`` of ``other`` matched by shape to ``body`` (shape ``source``, triangles ``tris``),
+    both where they stand: a BodyShapes."""
+    source = _transform(source, body.matrix_world)
+    to_co = _transform(target, other.matrix_world)
+    to_tris = _tris(other.data)
+    labels = part_labels(body)
+    match = match_by_shape(source, tris, to_co, to_tris, labels, part_labels(other) if labels is None else None)
+    problem = check_shape_match(match, body.name, other.name)
+    if problem is not None:
+        raise ResizeError(problem)
+    result = BodyShapes(source, match.target, tris, 'SHAPE')
+    result.to_co, result.to_tris, result.match = to_co, to_tris, match
+    return result
 
 
 def _match_bodies(body, source, other, target, tris):

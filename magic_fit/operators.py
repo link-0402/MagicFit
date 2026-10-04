@@ -527,7 +527,7 @@ def check_resize_ready(context):
     if body is not None and settings.resize_to_object in (None, body) and not settings.resize_use_keys:
         return "Pick a To Body, or turn on Use Shapekeys"
     from_key, to_key = resize_keys(settings)
-    problem = resizing.check_shapes(body, from_key, settings.resize_to_object, to_key)
+    problem = resizing.check_shapes(body, from_key, settings.resize_to_object, to_key, settings.resize_match)
     if problem is not None:
         return problem
     targets = resize_targets(context)
@@ -2807,9 +2807,8 @@ class MAGIC_FIT_OT_resize(bpy.types.Operator):
         window_manager.progress_begin(0, 100)
         try:
             try:
-                source, target, tris = resizing.body_shapes(body, from_key, to_body, to_key)
-                change = resizing.ShapeChange(source, target, tris, radius=settings.resize_radius,
-                                              bridge=settings.resize_bridge)
+                bodies = resizing.body_shapes(body, from_key, to_body, to_key, settings.resize_match)
+                change = bodies.change(radius=settings.resize_radius, bridge=settings.resize_bridge)
             except resizing.ResizeError as error:
                 self.report({'ERROR'}, str(error))
                 return {'CANCELLED'}
@@ -2859,10 +2858,20 @@ class MAGIC_FIT_OT_resize(bpy.types.Operator):
             needed.append("switch {:s} to the To shape".format("it" if needed else "'{:s}'".format(shown.name)))
         hint = "; to fit against it, " + " and ".join(needed) if needed else ""
         rigid_count = len(np.unique(rigid[rigid >= 0]))
+        match = bodies.match
+        how = ""
+        if bodies.how == 'UV':
+            how = ", bodies matched by UV map"
+        elif match is not None:
+            how = ", bodies matched by shape: {:.0f}% matched, {:.1f}% folded".format(
+                100.0 * match.matched_share, 100.0 * match.folded)
         self.report({'INFO'}, "Added shape key '{:s}' to {:d} mesh(es){:s} in {:.1f} s ({:d} steps{:s}){:s}".format(
             block.name, len(targets), ", {:d} rigid part(s)".format(rigid_count) if rigid_count else "",
-            time.perf_counter() - started, change.steps,
-            ", bodies matched by UV map" if resizing.matches_by_uv(body, to_body) else "", hint))
+            time.perf_counter() - started, change.steps, how, hint))
+        if match is not None and match.spread > resizing.SHAPE_DIFFERENT:
+            self.report({'WARNING'}, "'{:s}' and '{:s}' differ by {:.0f} cm in places: check there (often the chest) "
+                                     "for creases, and move details tied to the skin, like piercings, by hand".format(
+                                         body.name, shown.name, 100.0 * match.spread))
         return {'FINISHED'}
 
 

@@ -59,7 +59,7 @@ The **[Weight Brushes](docs/guide.md#weight-brushes)** fix weights where you pai
 
 **[Fit Move](docs/guide.md#fit-move)** moves vertices like Blender's Move, but its proportional editing keeps to the mesh: moving the trousers on one inner thigh leaves the other leg alone, split seams stay closed, and the edge of a hidden part stays joined to it.
 
-**[Resize](docs/guide.md#resize)** moves clothing made for one body to another, such as YAB to Rue, and saves the result as a shape key. The whole outfit moves as one smooth piece, so it doesn't tear where the body changes a lot. A dress that hangs from the breasts keeps hanging from them when they grow.
+**[Resize](docs/guide.md#resize)** moves clothing made for one body to another, such as YAB to Rue, and saves the result as a shape key. The whole outfit moves as one smooth piece, so it doesn't tear where the body changes a lot. A dress that hangs from the breasts keeps hanging from them when they grow. Clothing from another game moves from its own body, lined up on the Mannequin, to the Mannequin.
 
 **[Clipping marks](docs/guide.md#clipping-marks)** show live, in pink, where your meshes clip into the body, even while it's posed or scaled by Customize+.
 
