@@ -14,8 +14,8 @@ from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 from mathutils.geometry import intersect_line_line, intersect_line_plane
 
-from . import (facedata, facing, fitting, goals, hairing, heeling, lineup, moving, painting, relaxing, resizing,
-               skirting, smoothing, straighten)
+from . import (connecting, facedata, facing, fitting, goals, hairing, heeling, lineup, moving, painting, relaxing,
+               resizing, skirting, smoothing, straighten)
 from .cplus import rig as cplus_rig
 from .properties import COMING_MODES
 
@@ -1828,6 +1828,81 @@ class MAGIC_FIT_OT_heel_weights(_WholeMeshWeights, bpy.types.Operator):
     nothing_changed = "Nothing changed: no part of the mesh is below the ankle, or it has its heel weights already"
 
 
+def connect_targets(context):
+    """The meshes Connect Parts works on: the selected ones and the active one, each mesh data once,
+    never the body."""
+    body = context.scene.magic_fit.target
+    result = []
+    seen = set()
+    for obj in [context.object, *context.selected_objects]:
+        if obj is None or obj.type != 'MESH' or obj == body or obj.data.as_pointer() in seen:
+            continue
+        seen.add(obj.data.as_pointer())
+        result.append(obj)
+    return result
+
+
+def check_connect_ready(context):
+    """Why the Connect Parts button can't be used right now, or None when it can."""
+    if context.mode not in {'OBJECT', 'PAINT_WEIGHT'}:
+        return "Connect parts in Object or Weight Paint mode"
+    targets = connect_targets(context)
+    if not targets:
+        obj = context.object
+        if obj is not None and obj == context.scene.magic_fit.target:
+            return "Select meshes other than the body"
+        return "Select the meshes to connect"
+    if not any(smoothing.smoothed_groups(obj) for obj in targets):
+        return "No weights to connect"
+    return None
+
+
+class MAGIC_FIT_OT_connect_parts(bpy.types.Operator):
+    """Give loose parts that lie on bigger ones (belts, loops, flaps, buckles) the weights of what they lie on,
+    so they move together when bones bend or scale. Works on every selected mesh"""
+    bl_idname = "magic_fit.connect_parts"
+    bl_label = "Connect Parts"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        problem = check_connect_ready(context)
+        if problem is not None:
+            cls.poll_message_set(problem)
+            return False
+        return True
+
+    def execute(self, context):
+        settings = context.scene.magic_fit
+        targets = connect_targets(context)
+        try:
+            strokes, tris, edges = connecting.build(context, targets, settings)
+        except connecting.ConnectError as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
+        allowed = []
+        for obj in targets:
+            masked = context.mode == 'PAINT_WEIGHT' and obj == context.object
+            mask = np.zeros(len(obj.data.vertices), dtype=bool)
+            mask[_unhidden_vertices(obj.data, masked)] = True
+            allowed.append(mask)
+        connected = connecting.connect(strokes, tris, edges, allowed=allowed, **connecting.stroke_params(settings))
+        changed = 0
+        for obj, stroke in zip(targets, strokes):
+            created = stroke.created_group_names()
+            if created:
+                self.report({'INFO'}, "Added vertex groups to '{:s}': {:s}".format(obj.name, ", ".join(created)))
+            if stroke.modified:
+                changed += 1
+                obj.data.update()
+        if not changed:
+            self.report({'INFO'}, "Nothing changed: no part lies within Distance of a bigger one, or they are "
+                                  "connected already")
+            return {'CANCELLED'}
+        self.report({'INFO'}, "Connected {:d} part(s) in {:d} mesh(es)".format(sum(connected), changed))
+        return {'FINISHED'}
+
+
 def _match_text(matches, count=6):
     return ",".join("{:d}:{:.3f}".format(number, score) for number, score in matches[:count])
 
@@ -2827,6 +2902,7 @@ classes = (
     MAGIC_FIT_OT_fit_move,
     MAGIC_FIT_OT_skirt_weights,
     MAGIC_FIT_OT_heel_weights,
+    MAGIC_FIT_OT_connect_parts,
     MAGIC_FIT_OT_hair_weights,
     MAGIC_FIT_OT_pick_hair_skeleton,
     MAGIC_FIT_OT_face_weights,

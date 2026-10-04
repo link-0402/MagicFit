@@ -15,14 +15,14 @@ bl_info = {
 # modules are reloaded too, in dependency order. (Every version so far has had `properties`.)
 _reloading = "properties" in locals()
 
-from . import properties, tabs, painting, fitting, moving, straighten, goals, skirting, heeling, hairing, smoothing, gamefiles, facedata, facing, relaxing, resizing, lineup, clipping, operators, tool  # noqa: E402
+from . import properties, tabs, painting, fitting, moving, straighten, goals, skirting, heeling, hairing, smoothing, connecting, gamefiles, facedata, facing, relaxing, resizing, lineup, clipping, operators, tool  # noqa: E402
 from . import robust_transfer, cplus, preferences  # noqa: E402
 
 if _reloading:
     import importlib
     for _module in (properties, tabs, painting, fitting, moving, straighten, goals, skirting, heeling, hairing, smoothing,
-                    gamefiles, facedata, facing, relaxing, resizing, lineup, clipping, operators, tool, robust_transfer,
-                    cplus, preferences):
+                    connecting, gamefiles, facedata, facing, relaxing, resizing, lineup, clipping, operators, tool,
+                    robust_transfer, cplus, preferences):
         importlib.reload(_module)
 
 _modules = (properties, tabs, operators, tool, clipping, robust_transfer, cplus, preferences)

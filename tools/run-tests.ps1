@@ -85,7 +85,7 @@ if ($OtherScreen) {
     $Position = @($area.X, ($desktop.Height - $height - ($area.Y + $titleBar)), $area.Width, $height)
 }
 
-$core = 'core','fit_core','move_core','straighten_core','skirt_core','heels_core','smooth_core','hair_core',
+$core = 'core','fit_core','move_core','straighten_core','skirt_core','heels_core','smooth_core','connect_core','hair_core',
         'face_core','relax_core','resize_core','lineup_core','transfer_core','cplus_core'
 $ui = 'ui','fit_ui','move_ui','fit_deformed_ui','straighten_ui','skirt_ui','heels_ui','smooth_ui','hair_ui',
       'face_ui','relax_ui','resize_ui','lineup_ui','clipping_ui','sidebar_ui','transfer_ui','cplus_ui'
