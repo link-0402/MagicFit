@@ -55,6 +55,18 @@ def grid(size, length=1.0):
     return v, f, x
 
 
+def torn(v, x=0.1, gap=0.015):
+    """Closest points for the vertices ``v`` of a sheet bridging a crease along x == ``x``: they switch from
+    one wall to the other there, ``gap`` away on either side."""
+    return v + np.where(v[:, :1] < x - 1e-9, -gap, gap) * np.array([1.0, 0.0, 0.0])
+
+
+def bridged(v, distance, x=0.1, spacing=0.02):
+    """Distances and closest points (torn) for the vertices ``v`` of a sheet ``distance`` off the body that
+    bridges a crease between x == ``x`` - ``spacing`` and ``x``, floating 1.5 cm high on the first side."""
+    return np.where(np.isclose(v[:, 0], x - spacing), 0.015, distance), torn(v, x)
+
+
 def flat_grid(xs, ys, z=0.0):
     """A flat triangulated grid over the coordinates xs and ys, as vertices and faces."""
     X, Y = np.meshgrid(xs, ys, indexing='ij')
@@ -111,80 +123,194 @@ class NumericalTests(unittest.TestCase):
         np.testing.assert_allclose(result[:, [1, 3]], alone, atol=1e-7)
         np.testing.assert_allclose(result.sum(axis=1), 1, atol=1e-5)
 
-    def test_match_confidence_fades_between_limits(self):
-        distances = np.array([0, 0, 0, 0, 0, 0.2, 0])
-        angles = np.array([0, 30, 45, 60, 90, 10, np.nan])
-        np.testing.assert_allclose(wt.match_confidence(distances, angles, 0.1, 30, 90),
-                                   [1, 1, 0.84375, 0.5, 0, 0, 0])
-        # Without a soft band, confidence is the old binary match.
-        np.testing.assert_array_equal(wt.match_confidence(distances, angles, 0.1, 30, 30),
-                                      [1, 1, 0, 0, 0, 0, 0])
-
-    def test_closest_surface_angles_fold_flipped_normals(self):
+    def test_closest_surface_interpolates_weights_and_normals(self):
         v = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=float)
         f = np.array([[0, 1, 2]])
-        n = np.tile([0, 0, 1.0], (3, 1))
-        points = np.array([[0.2, 0.2, 0.1], [0.2, 0.2, 0.1], [0.2, 0.2, 0.1], [0.2, 0.2, 0.1]])
-        normals = np.array([[0, 0, 1], [0, 0, -1], [0, np.sin(np.pi / 6), np.cos(np.pi / 6)], [0, 0, 0]])
-        weights = np.eye(3)
-        folded = wt.match_closest_surface(v, f, n, points, normals, weights, True)
-        np.testing.assert_allclose(folded.angles[:3], [0, 0, 30], atol=1e-6)
-        self.assertTrue(np.isnan(folded.angles[3]))
-        np.testing.assert_allclose(folded.distances, 0.1)
-        np.testing.assert_allclose(folded.weights, np.tile([0.6, 0.2, 0.2], (4, 1)), atol=1e-6)
-        oriented = wt.match_closest_surface(v, f, n, points, normals, weights, False)
-        np.testing.assert_allclose(oriented.angles[:3], [0, 180, 30], atol=1e-6)
+        n = np.tile([0, 0, 2.0], (3, 1))
+        match = wt.match_closest_surface(v, f, n, np.array([[0.2, 0.2, 0.1], [0.2, 0.2, -0.1]]), np.eye(3))
+        np.testing.assert_allclose(match.distances, 0.1)
+        np.testing.assert_allclose(match.weights, np.tile([0.6, 0.2, 0.2], (2, 1)), atol=1e-6)
+        np.testing.assert_allclose(match.points, [[0.2, 0.2, 0]] * 2, atol=1e-6)
+        np.testing.assert_allclose(match.normals, [[0, 0, 1]] * 2, atol=1e-6)
 
-    def test_bridge_trust_follows_the_gap(self):
+    def test_parts_face_the_body_as_a_whole(self):
+        v, f = flat_grid(np.linspace(0, 0.1, 6), np.linspace(0, 0.1, 6), 0.001)
+        near = np.full(len(v), 0.001)
+        np.testing.assert_array_equal(wt.part_facing(v, f, np.ones(len(v)), near), 1)
+        np.testing.assert_array_equal(wt.part_facing(v, f, -np.ones(len(v)), near), -1)
+        # Half one way and half the other (a closed solid strap), or out of reach: neither way.
+        halves = np.where(v[:, 0] < 0.05, 1.0, -1.0)
+        np.testing.assert_array_equal(wt.part_facing(v, f, halves, near), 0)
+        np.testing.assert_array_equal(wt.part_facing(v, f, np.ones(len(v)), near + 1), 0)
+        # Each loose part votes for itself.
+        both = np.vstack([v, v + [0.2, 0, 0]])
+        facing = wt.part_facing(both, np.vstack([f, f + len(v)]), np.r_[np.ones(len(v)), -np.ones(len(v))],
+                                np.r_[near, near])
+        np.testing.assert_array_equal(facing, np.r_[np.ones(len(v)), -np.ones(len(v))])
+        # Turned the way its part faces, a vertex whose match faces the part's outside (skin pressing on it
+        # from above) gets a negative cosine, also with the part built inside out. Undefined stays NaN.
+        up = np.tile([0.0, 0.0, 1.0], (len(v), 1))
+        pressed = up.copy()
+        pressed[0] = -pressed[0]
+        for sign in (1, -1):
+            normals = sign * up
+            normals[1] = 0
+            cosines = wt.facing_cosines(v, f, normals, pressed, near)
+            self.assertAlmostEqual(cosines[0], -1)
+            self.assertTrue(np.isnan(cosines[1]))
+            np.testing.assert_allclose(cosines[2:], 1)
+        # A part facing neither way still compares either way round.
+        np.testing.assert_allclose(wt.facing_cosines(v, f, up * halves[:, None], up, near), 1)
+
+    def test_trust_follows_the_gap(self):
         v, f = flat_grid(np.linspace(0, 0.2, 11), np.linspace(0, 0.2, 11))
         index = int(np.argmin(np.linalg.norm(v - [0.1, 0.1, 0], axis=1)))
-        trust = []
-        for gap in (0, 0.002, 0.004, 0.01, 0.03):
-            distances = np.full(len(v), gap)
-            trust.append(wt.bridge_confidence(v, f, distances, np.ones(len(v)))[index])
-        # Touching and 2 mm away count alike, then trust falls with the gap down to the floor.
-        self.assertAlmostEqual(trust[0], trust[1])
-        self.assertTrue(np.all(np.diff(trust[1:]) < 0))
-        self.assertGreater(trust[0], 0.9)
-        self.assertLess(trust[0], 1)
-        self.assertAlmostEqual(trust[-1], wt.BRIDGE_FLOOR)
+        ones = np.ones(len(v))
+
+        def trust(gap, bridge=False, **options):
+            distances, points = bridged(v, gap) if bridge else (np.full(len(v), gap), None)
+            return wt.bridge_confidence(v, f, distances, ones, points, **options)[index]
+        # Away from creases, the mesh is trusted like skin it touches up to SKIN_REACH, then less and less
+        # down to the floor.
+        touching = trust(0)
+        self.assertGreater(touching, 0.99)
+        self.assertLess(touching, 1)
+        self.assertAlmostEqual(trust(wt.SKIN_REACH), touching)
+        far = [trust(gap) for gap in (0.015, 0.02, 0.025)]
+        self.assertTrue(np.all(np.diff(far) < 0) and far[0] < touching)
+        self.assertAlmostEqual(trust(0.05), wt.BRIDGE_FLOOR)
+        # Near where it bridges a crease, only touching counts like that (up to SKIN_TOUCH, fading out by the
+        # height a tear needs): trust falls with the gap from there, twice as fast.
+        bridge = [trust(gap, True) for gap in (0, 0.002, 0.004, 0.01, 0.03)]
+        self.assertAlmostEqual(bridge[0], bridge[1])
+        self.assertTrue(np.all(np.diff(bridge[1:]) < 0))
+        self.assertGreater(bridge[0], 0.9)
+        self.assertLess(bridge[0], touching)
+        self.assertAlmostEqual(bridge[-1], wt.BRIDGE_FLOOR)
         # The solver pulls with area * t / (1 - t) / L^4 = area / (softness * d)^4, whatever L is.
-        for length in (0.005, 0.0125, 0.05):
-            t = wt.bridge_confidence(v, f, np.full(len(v), 0.004), np.ones(len(v)), length)[index]
+        for length in (0.0125, 0.05):
+            t = trust(0.004, True, soft_length=length)
             np.testing.assert_allclose(t / (1 - t) / length ** 4, 1 / (wt.BRIDGE_SOFTNESS * 0.004) ** 4, rtol=1e-6)
-        # A wider softness lowers the trust at the same gap; Max Distance cuts it off.
-        wide = wt.bridge_confidence(v, f, np.full(len(v), 0.004), np.ones(len(v)), softness=6.0)[index]
-        self.assertLess(wide, trust[2])
-        cut = wt.bridge_confidence(v, f, np.full(len(v), 0.004), np.ones(len(v)), max_distance=0.003)
-        np.testing.assert_array_equal(cut, wt.BRIDGE_FLOOR)
+            t = trust(0.025, soft_length=length)
+            np.testing.assert_allclose(t / (1 - t) / length ** 4, 1 / (wt.SKIN_SOFTNESS * 0.025) ** 4, rtol=1e-6)
+        # Max Distance cuts it off.
+        np.testing.assert_array_equal(wt.bridge_confidence(v, f, np.full(len(v), 0.004), ones, max_distance=0.003),
+                                      wt.BRIDGE_FLOOR)
         with self.assertRaises(ValueError):
-            wt.bridge_confidence(v, f, np.zeros(len(v)), np.ones(len(v)), 0.0)
+            wt.bridge_confidence(v, f, np.zeros(len(v)), ones, soft_length=0.0)
 
-    def test_bridge_trust_fades_with_the_normals_either_way(self):
+    def test_bridge_trust_ignores_skin_facing_the_outside(self):
         v, f = flat_grid(np.linspace(0, 0.2, 11), np.linspace(0, 0.2, 11))
         index = int(np.argmin(np.linalg.norm(v - [0.1, 0.1, 0], axis=1)))
-        trust = {}
+        for distances, points in ((np.zeros(len(v)), None), bridged(v, 0.0)):
+            cosines = np.ones(len(v))
+            cosines[index] = -1
+            trust = wt.bridge_confidence(v, f, distances, cosines, points)
+            self.assertAlmostEqual(trust[index], wt.BRIDGE_FLOOR)
+            self.assertGreater(trust[index + 1], 0.9)
+
+    def test_trust_fades_with_the_normals_where_the_mesh_bridges(self):
+        v, f = flat_grid(np.linspace(0, 0.2, 11), np.linspace(0, 0.2, 11))
+        index = int(np.argmin(np.linalg.norm(v - [0.1, 0.1, 0], axis=1)))
+        # Floating above the crease, beyond what touches the skin.
+        distances, points = bridged(v, 2 * wt.SKIN_TOUCH)
+        trust, skin = {}, {}
         for angle in (0, 5, 11, 18, 25, 40, 180):
             cosines = np.full(len(v), np.abs(np.cos(np.radians(angle))))
-            trust[angle] = wt.bridge_confidence(v, f, np.zeros(len(v)), cosines)[index]
+            trust[angle] = wt.bridge_confidence(v, f, distances, cosines, points)[index]
+            skin[angle] = wt.bridge_confidence(v, f, np.zeros(len(v)), cosines)[index]
         self.assertAlmostEqual(trust[0], trust[5])
         self.assertAlmostEqual(trust[0], trust[11])
         self.assertAlmostEqual(trust[0], trust[180])
         self.assertTrue(trust[11] > trust[18] > trust[25])
         self.assertAlmostEqual(trust[25], wt.BRIDGE_FLOOR)
         self.assertAlmostEqual(trust[40], wt.BRIDGE_FLOOR)
+        # Away from creases, the normals don't matter on the skin: clothing rarely follows its curves.
+        self.assertTrue(np.allclose(list(skin.values()), skin[0]))
         # Undefined normals count as disagreeing.
-        undefined = wt.bridge_confidence(v, f, np.zeros(len(v)), np.full(len(v), np.nan))
+        undefined = wt.bridge_confidence(v, f, distances, np.full(len(v), np.nan), points)
         np.testing.assert_allclose(undefined[index], wt.BRIDGE_FLOOR)
 
+        # Touching the skin (within SKIN_TOUCH), it lies on it even where it bridges: the normals don't
+        # matter. Floating up to twice that, the trust fades out.
+        def at(gap, angle):
+            gaps, torn = bridged(v, gap)
+            return wt.bridge_confidence(v, f, gaps, np.full(len(v), np.cos(np.radians(angle))), torn)[index]
+        self.assertGreater(at(0.0, 0), 0.9)
+        for angle in (25, 40, 80):
+            self.assertAlmostEqual(at(wt.SKIN_TOUCH, angle), at(0.0, 0))
+        fading = [at(gap, 40) for gap in (wt.SKIN_TOUCH, 1.5 * wt.SKIN_TOUCH, 2 * wt.SKIN_TOUCH)]
+        self.assertTrue(fading[0] > fading[1] > fading[2])
+        self.assertAlmostEqual(fading[2], wt.BRIDGE_FLOOR)
+
+    def test_crease_bridges_find_where_the_mesh_spans_a_crease(self):
+        # A V-shaped groove, and a sheet 1 mm above its walls that bridges it flat where they're lower than
+        # 2 cm, floating 1.5 cm above them in the middle.
+        gx, gy = np.meshgrid(np.linspace(-0.1, 0.1, 41), np.linspace(-0.05, 0.05, 11), indexing='ij')
+        index = np.arange(gx.size).reshape(gx.shape)
+        gf = np.vstack([np.column_stack([index[:-1, :-1].ravel(), index[1:, :-1].ravel(), index[1:, 1:].ravel()]),
+                        np.column_stack([index[:-1, :-1].ravel(), index[1:, 1:].ravel(), index[:-1, 1:].ravel()])])
+        sheet, sf = flat_grid(np.linspace(-0.08, 0.08, 33), np.linspace(-0.03, 0.03, 7))
+        x = sheet[:, 0]
+        merge = wt.find_vertex_merge_map(sheet, wt.BRIDGE_WELD)
+        ones = np.ones(len(sheet))
+
+        def zone(sign, height, offset=0.0):
+            body = np.column_stack([gx.ravel(), gy.ravel(), sign * np.abs(gx.ravel())])
+            normals = np.column_stack([-sign * np.sign(gx.ravel()) * 0.7, np.zeros(gx.size), np.full(gx.size, 0.7)])
+            points = sheet.copy()
+            points[:, 2] = height + offset
+            match = wt.match_closest_surface(body, gf, normals, points, np.ones((len(body), 1)))
+            return match, wt.crease_bridges(points, sf, match.points, match.distances, ones, merge)
+        match, bridging = zone(1, np.maximum(np.abs(x), 0.02) + 0.001)
+        # Its closest points switch walls in the middle: it bridges the groove there, BRIDGE_ZONE around.
+        self.assertTrue(np.all(bridging[np.abs(x) < wt.BRIDGE_ZONE] > 0.99))
+        np.testing.assert_array_equal(bridging[np.abs(x) > 2 * wt.BRIDGE_ZONE + 0.005], 0)
+        # Skin touching it from outside doesn't count.
+        np.testing.assert_array_equal(wt.crease_bridges(sheet, sf, match.points, match.distances, -ones, merge), 0)
+        # A sheet following the groove 3 mm off its walls lies on the skin: no bridge.
+        np.testing.assert_array_equal(zone(1, np.abs(x) + 0.004)[1], 0)
+        # Over a ridge its closest points move less than it does: nothing bridges.
+        np.testing.assert_array_equal(zone(-1, np.maximum(np.abs(x), 0.02) + 0.001, 0.05)[1], 0)
+
+    def test_trust_over_fingers_ignores_the_normals_even_where_the_mesh_bridges(self):
+        v, f = flat_grid(np.linspace(0, 0.2, 11), np.linspace(0, 0.2, 11))
+        index = int(np.argmin(np.linalg.norm(v - [0.1, 0.1, 0], axis=1)))
+        distances, points = bridged(v, 0.0)
+        touching = wt.bridge_confidence(v, f, distances, np.ones(len(v)), points)[index]
+
+        gap = 0.008
+
+        def trust(distance, angle, share):
+            distances, points = bridged(v, distance)
+            return wt.bridge_confidence(v, f, distances, np.full(len(v), np.cos(np.radians(angle))), points,
+                                        digits=np.full(len(v), share))[index]
+        # 8 mm off (beyond what touches the skin) with the normals 40 degrees apart, like a glove's plate at the
+        # webbing: off the fingers it lets go...
+        self.assertAlmostEqual(trust(gap, 40, 0.0), wt.BRIDGE_FLOOR)
+        # ...over a finger it's trusted like skin it touches.
+        self.assertAlmostEqual(trust(gap, 40, 1.0), touching)
+        self.assertAlmostEqual(trust(gap, 40, 0.5), wt.BRIDGE_FLOOR)
+        self.assertTrue(wt.BRIDGE_FLOOR < trust(gap, 40, 0.7) < touching)
+        # Not where the finger touches it from outside, nor farther than twice SKIN_REACH.
+        self.assertAlmostEqual(trust(gap, 120, 1.0), wt.BRIDGE_FLOOR)
+        self.assertAlmostEqual(trust(2 * wt.SKIN_REACH, 40, 1.0), wt.BRIDGE_FLOOR)
+        self.assertTrue(wt.DIGIT_BONE.match('j_hito_a_l') and wt.DIGIT_BONE.match('iv_ko_c_r')
+                        and wt.DIGIT_BONE.match('iv_asi_oya_b_l'))
+        self.assertFalse(wt.DIGIT_BONE.match('j_kosi') or wt.DIGIT_BONE.match('j_te_l')
+                         or wt.DIGIT_BONE.match('j_asi_a_l'))
+        np.testing.assert_allclose(wt.digit_share([[1, 3], [0, 0], [2, 0]], [False, True]), [0.75, 0, 0])
+
     def test_bridge_trust_is_shared_by_coincident_vertices(self):
-        # Two loose parts meeting at a split seam, with different normals on either side.
+        # Two loose parts meeting at a split seam where the mesh bridges, with different normals on either
+        # side.
         left, lf = flat_grid(np.linspace(-0.1, 0, 6), np.linspace(0, 0.1, 6))
         right, rf = flat_grid(np.linspace(0, 0.1, 6), np.linspace(0, 0.1, 6))
         v = np.vstack([left, right])
         f = np.vstack([lf, rf + len(left)])
         cosines = np.r_[np.ones(len(left)), np.full(len(right), np.cos(np.radians(20)))]
-        trust = wt.bridge_confidence(v, f, np.full(len(v), 0.003), cosines)
+        distances, points = bridged(v, 0.003, 0.0)
+        trust = wt.bridge_confidence(v, f, distances, cosines, points)
         seam_left = np.flatnonzero(np.isclose(left[:, 0], 0))
         seam_right = len(left) + np.flatnonzero(np.isclose(right[:, 0], 0))
         self.assertFalse(np.allclose(cosines[seam_left], cosines[seam_right]))
@@ -202,8 +328,8 @@ class NumericalTests(unittest.TestCase):
         self.assertTrue(np.all((border[seam] > 0.049) & (border[seam] < 0.052)))
         np.testing.assert_allclose(border[np.isclose(v[:, 0], -0.1)], 0)
         np.testing.assert_array_equal(wt.free_border_distance(v, np.zeros((0, 3), int), merge), np.inf)
-        # 1 cm off the body, a vertex on a hem keeps more trust than one 5 cm inside.
-        trust = wt.bridge_confidence(v, f, np.full(len(v), 0.01), np.ones(len(v)))
+        # 2.5 cm off the body, a vertex on a hem keeps more trust than one 5 cm inside.
+        trust = wt.bridge_confidence(v, f, np.full(len(v), 0.025), np.ones(len(v)))
         hem = np.flatnonzero(np.isclose(v[:, 0], -0.1) & np.isclose(v[:, 1], 0.05))[0]
         inside = np.flatnonzero(seam)[0]
         self.assertGreater(trust[hem], 2 * trust[inside])
@@ -520,23 +646,72 @@ class NumericalTests(unittest.TestCase):
         with self.assertRaises(wt.InpaintingError):
             wt.prepare_inpainting(v, f, w, matched, 'FAST')
 
-    def test_final_sync_repairs_smoothing_regression(self):
+    def test_a_wire_thinner_than_the_weld_still_solves(self):
+        # A mod's wire (0.15 mm across, rings 0.24 mm apart) far from a sheet: welded, each ring becomes one vertex
+        # without faces or links. Trusted weakly, it keeps its own weights instead of leaving an empty row.
+        sheet, sf = flat_grid(np.linspace(0, 0.7, 8), np.linspace(0, 0.7, 8))
+        ring = [[0, 7e-5 * np.cos(a), 7e-5 * np.sin(a)] for a in np.linspace(0, 2 * np.pi, 8, endpoint=False)]
+        wire = np.vstack([np.array(ring) + [0.2 + r * 2.4e-4, 0.2, 0.3] for r in range(3)])
+        wf = np.array([face for r in range(2) for k in range(8)
+                       for face in ([r * 8 + k, r * 8 + (k + 1) % 8, r * 8 + 8 + k],
+                                    [r * 8 + (k + 1) % 8, r * 8 + 8 + (k + 1) % 8, r * 8 + 8 + k])])
+        v, f = np.vstack([sheet, wire]), np.vstack([sf, wf + len(sheet)])
+        w = np.column_stack([v[:, 0], 1 - v[:, 0]])
+        w[len(sheet):] = [0.3, 0.7]
+        matched = np.arange(len(v)) < len(sheet) // 2
+        confidence = np.where(np.arange(len(v)) < len(sheet), 0.6, 0.9)
+        domain = wt.prepare_inpainting(v, f, w, matched, 'COMBINED', wt.BRIDGE_WELD, confidence,
+                                       wt.BRIDGE_SOFT_LENGTH)
+        result = wt.solve_inpainting(domain)
+        self.assertFalse(domain.harmonic_fallback)
+        np.testing.assert_allclose(result[len(sheet):], w[len(sheet):], atol=1e-6)
+        np.testing.assert_allclose(result.sum(axis=1), 1, atol=1e-6)
+
+    def test_combined_mode_only_links_parts_facing_the_same_way(self):
+        # Two plates 1 mm apart, each matched along one end to a group of its own.
+        plate, pf = flat_grid(np.linspace(0, 1, 21), np.linspace(0, 1, 21))
+        v, f = np.vstack([plate, plate + [0, 0, 0.001]]), np.vstack([pf, pf + len(plate)])
+        upper = np.arange(len(v)) >= len(plate)
+        w = np.column_stack([~upper, upper]).astype(float)
+        matched = v[:, 0] < 0.2
+        up = np.tile([0.0, 0.0, 1.0], (len(v), 1))
+
+        def turned(degrees):
+            # The upper plate's outside turned away from the lower one's about y.
+            angle = np.radians(degrees)
+            return np.where(upper[:, None], [np.sin(angle), 0.0, np.cos(angle)], up)
+
+        def mixed(normals):
+            solved = wt.solve_inpainting(wt.prepare_inpainting(v, f, w, matched, 'COMBINED', normals=normals))
+            return solved[~upper, 1].max()
+        # Facing each other, like the sides of two fingers of a glove, they wrap different parts of the body and
+        # keep their own weights.
+        self.assertLess(mixed(turned(180)), 1e-6)
+        self.assertLess(mixed(turned(90)), 1e-6)
+        # Facing the same way, like a lining under a panel, or with no known facing, they move together.
+        for normals in (turned(0), turned(45), None, np.zeros_like(up)):
+            self.assertGreater(mixed(normals), 0.2)
+        # A part that nothing else anchors still takes the weights of what it touches.
+        domain = wt.prepare_inpainting(v, f, w, matched & ~upper, 'COMBINED', normals=turned(180))
+        self.assertFalse(domain.rejected.any())
+        np.testing.assert_allclose(wt.solve_inpainting(domain)[upper], w[~upper], atol=1e-4)
+        with self.assertRaises(wt.InpaintingError):
+            wt.prepare_inpainting(v, f, w, matched, 'COMBINED', normals=up[:5])
+
+    def test_final_sync_repairs_seams_pulled_apart(self):
         v, f, w, matched = split_surface()
         w[:4] = [[1, 0], [0, 1], [0.8, 0.2], [0.2, 0.8]]
         ok, solved = wt.inpaint(v, f, w, matched, False, 0.0001)
         self.assertTrue(ok)
-        edges = np.unique(np.sort(np.vstack([f[:, :2], f[:, 1:], f[:, [2, 0]]]), axis=1), axis=0)
-        adjacency = wt.sp.sparse.csr_array((np.ones(len(edges) * 2),
-                                           (edges.ravel(), edges[:, ::-1].ravel())), shape=(8, 8))
-        adjacency.setdiag(1)
-        lists = [adjacency[[i]].indices.tolist() for i in range(8)]
-        smoothed = np.asarray(wt.smooth_weigths(v, solved, matched, adjacency, lists, 4, 0.2, 5))
-        self.assertGreater(np.max(np.abs(smoothed[[1, 3]] - smoothed[[4, 6]])), 0.05)
+        # A later step (a group limit, a mask) leaves the two sides of the split seam different.
+        changed = solved.astype(np.float64)
+        changed[[1, 3]] = [[0.7, 0.3], [0.4, 0.6]]
+        self.assertGreater(np.max(np.abs(changed[[1, 3]] - changed[[4, 6]])), 0.05)
         final, synced, skipped = seams.synchronize_weights(
-            smoothed, np.ones_like(smoothed, bool), np.zeros(8, bool),
+            changed, np.ones_like(changed, bool), np.zeros(8, bool),
             [np.array([1, 4]), np.array([3, 6])], 1)
         np.testing.assert_array_equal(final[[1, 3]], final[[4, 6]])
-        np.testing.assert_array_equal(final[[0, 2, 5, 7]], smoothed[[0, 2, 5, 7]])
+        np.testing.assert_array_equal(final[[0, 2, 5, 7]], changed[[0, 2, 5, 7]])
         self.assertEqual((synced, skipped), (2, 0))
 
     def test_duplicate_and_collapsed_faces(self):
@@ -717,11 +892,6 @@ class TransferScene:
         bpy.ops.magic_fit.reset_transfer_settings()
         self.settings.use_deformed_source = False
         self.settings.use_deformed_target = False
-        self.settings.inpaint_mode = 'SURFACE'
-        self.settings.max_distance = 0.1
-        # The matching and inpainting underneath Crease Smoothing: direct matches by Max Distance and
-        # Normal Angle, soft ones up to Soft Limit. CreaseSmoothingTests turns it on.
-        self.settings.crease_smoothing = False
         # Tests turn these on where they check them.
         self.settings.virtual_merge = False
         self.settings.seam_sync = False
@@ -790,7 +960,7 @@ class TransferScene:
                 if obj.data.shape_keys else [],
                 [(m.name, m.type) for m in obj.modifiers])
 
-    def partial_scene(self, heights=(0, .75, 1, 2)):
+    def partial_scene(self, heights=(0, .0375, .05, .1)):
         source = self.mesh('Source', [[-10, -10, 0], [10, -10, 0], [0, 10, 0]], [[0, 1, 2]])
         self.weights(source, ['A', 'B'], np.tile([.9, .1], (3, 1)))
         vertices = [[x, y, z] for z in heights for x, y in [(0, 0), (1, 0), (0, 1)]]
@@ -798,9 +968,9 @@ class TransferScene:
         target = self.mesh('Target', vertices, faces)
         self.weights(target, ['A', 'B'], np.tile([.2, .8], (len(vertices), 1)))
         self.body = source
+        # Partial Reweight reaches 5 cm, fading out over its outer half.
         self.settings.partial_reweight = True
         self.settings.partial_reweight_falloff = 50
-        self.settings.max_distance = 1
         self.select(target)
         return source, target
 
@@ -811,7 +981,8 @@ class TransferScene:
 
 
 class BlenderTests(TransferScene, unittest.TestCase):
-    """Weight Transfer with Crease Smoothing off."""
+    """Weight Transfer's masks, partial transfers, seams, limits and writes. CreaseSmoothingTests covers how
+    the matches are trusted."""
 
     def test_partial_operator_falloff_preserves_outside_memberships(self):
         _, target = self.partial_scene()
@@ -820,7 +991,6 @@ class BlenderTests(TransferScene, unittest.TestCase):
         target.vertex_groups['A'].remove([10])
         before = self.memberships(target)
         geometry = self.snapshot(target)
-        self.settings.smoothing_enable = True
         self.settings.seam_sync = True
         self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
         np.testing.assert_allclose(self.read(target)[:6],
@@ -844,85 +1014,65 @@ class BlenderTests(TransferScene, unittest.TestCase):
                                    np.tile([.3, .4, .25], (12, 1)))
         self.assertEqual(self.memberships(target)[6:], before[6:])
 
-    def test_partial_zero_radius_and_hard_cutoff(self):
-        source, target = self.partial_scene()
+    def test_partial_hard_cutoff(self):
+        _, target = self.partial_scene((0, .03, .049, .1))
         self.settings.partial_reweight_falloff = 0
         self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
-        np.testing.assert_allclose(self.read(target)[:9], np.tile([.9, .1], (9, 1)), atol=1e-6)
-        self.weights(target, ['A', 'B'], np.tile([.2, .8], (12, 1)))
-        # Use exact BVH hits for the zero-radius case; triangle-interior
-        # projections can have a nonzero floating-point residual.
-        for vertex, original in zip(target.data.vertices[:3], source.data.vertices):
-            vertex.co = original.co
-        target.data.update()
-        self.settings.max_distance = 0
-        self.settings.partial_reweight_falloff = 100
-        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
-        np.testing.assert_allclose(self.read(target), [[.9, .1]] * 3 + [[.2, .8]] * 9, atol=1e-6)
+        np.testing.assert_allclose(self.read(target), [[.9, .1]] * 9 + [[.2, .8]] * 3, atol=1e-6)
 
     def test_partial_no_matches_and_selected_noop(self):
-        _, target = self.partial_scene((2,))
+        _, target = self.partial_scene((.1,))
         target.vertex_groups.remove(target.vertex_groups['B'])
         far = self.mesh('Far', self.v + [0, 0, 3], self.f)
         before = self.memberships(target)
-        for mode in wt.INPAINT_MODES:
-            self.settings.inpaint_mode = mode
-            self.settings.apply_to_selected = True
-            self.select(target, far)
-            self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
-            self.assertEqual(self.memberships(target), before)
-            self.assertNotIn('B', target.vertex_groups)
-            self.assertEqual(len(far.vertex_groups), 0)
+        self.settings.apply_to_selected = True
+        self.select(target, far)
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        self.assertEqual(self.memberships(target), before)
+        self.assertNotIn('B', target.vertex_groups)
+        self.assertEqual(len(far.vertex_groups), 0)
 
-    def test_partial_unsupported_normals_and_diagnostics(self):
-        _, target = self.partial_scene((0, .5, 2))
-        # Reject the middle part's normals, while the last part is outside.
-        for polygon in target.data.polygons:
-            if polygon.index == 1:
-                polygon.flip()
+    def test_partial_inpaint_mask_and_diagnostics(self):
+        _, target = self.partial_scene((0, .025, .1))
+        # The middle part lies wholly in the Inpaint Mask, away from the others, while the last part is out
+        # of reach.
+        for vertex in target.data.vertices[3:6]:
+            vertex.co.x += 3
         target.data.update()
-        self.settings.flip_vertex_normal = False
+        self.weights(target, ['Inpaint'], np.array([[0.0]] * 3 + [[1.0]] * 3 + [[0.0]] * 3))
+        target.magic_fit_transfer.inpaint_group = 'Inpaint'
         before = self.memberships(target)
         with patch.object(transfer, 'report_partial', wraps=transfer.report_partial) as report:
             self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
         staged = report.call_args.args[1][0]
-        self.assertEqual(np.count_nonzero((staged['strength'] > 0) & ~staged['supported']), 3)
-        self.assertEqual(self.memberships(target)[3:], before[3:])
-        # The first part trusts the body, the flipped one doesn't, and the last is out of range.
+        # The first part trusts the body, the masked one doesn't, and the last is out of range.
         self.assertTrue(np.all(staged['confidence'][:3] > .99))
-        self.assertTrue(np.all(staged['confidence'][3:6] < .01))
+        np.testing.assert_array_equal(staged['confidence'][3:6], 0)
         np.testing.assert_array_equal(staged['strength'][6:], 0)
+        self.assertEqual(self.memberships(target)[6:], before[6:])
+        # Nothing anchors the masked part, so it takes the weights of the points around it instead of being
+        # rejected.
+        self.assertTrue(np.all(staged['supported'][:6]))
+        np.testing.assert_allclose(self.read(target)[3:6], np.tile([.9, .1], (3, 1)), atol=1e-6)
         bpy.ops.object.mode_set(mode='EDIT')
         self.assertEqual(bpy.ops.magic_fit.select_rejected(), {'FINISHED'})
         bpy.ops.object.mode_set(mode='OBJECT')
-        self.assertEqual([v.select for v in target.data.vertices], [False] * 3 + [True] * 3 + [False] * 3)
-
-    def test_partial_no_usable_normals_in_every_mode(self):
-        _, target = self.partial_scene((.5,))
-        target.data.polygons[0].flip()
-        target.data.update()
-        self.settings.flip_vertex_normal = False
-        before = self.memberships(target)
-        for mode in wt.INPAINT_MODES:
-            self.settings.inpaint_mode = mode
-            self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
-            self.assertEqual(self.memberships(target), before)
+        self.assertFalse(any(v.select for v in target.data.vertices))
 
     def test_partial_surface_distance_world_and_evaluated_shapes(self):
-        source, target = self.partial_scene((.5,))
-        # Local .5 becomes world distance 1, halfway through a radius-2 falloff.
+        source, target = self.partial_scene((.0125,))
+        # Local 1.25 cm becomes world distance 2.5 cm, halfway through the 5 cm falloff.
         for obj in [source, target]:
             obj.location = (4, -3, 2)
             obj.scale = (2, 3, 2)
-        self.settings.max_distance = 2
         self.settings.partial_reweight_falloff = 100
         bpy.context.view_layer.update()
         self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
-        np.testing.assert_allclose(self.read(target), np.tile([.55, .45], (3, 1)), atol=1e-6)
+        np.testing.assert_allclose(self.read(target), np.tile([.55, .45], (3, 1)), atol=1e-5)
         source.shape_key_add(name='Basis')
         key = source.shape_key_add(name='Raised')
         for vertex in key.data:
-            vertex.co.z = .5
+            vertex.co.z = .0125
         key.value = 1
         self.settings.use_deformed_source = True
         bpy.context.view_layer.update()
@@ -931,7 +1081,7 @@ class BlenderTests(TransferScene, unittest.TestCase):
         target.shape_key_add(name='Basis')
         key = target.shape_key_add(name='Far')
         for vertex in key.data:
-            vertex.co.z += 2
+            vertex.co.z += .05
         key.value = 1
         self.settings.use_deformed_target = True
         bpy.context.view_layer.update()
@@ -948,8 +1098,6 @@ class BlenderTests(TransferScene, unittest.TestCase):
         self.weights(right, ['B', 'A'], np.tile([.8, .2], (4, 1)))
         self.settings.partial_reweight = True
         self.settings.partial_reweight_falloff = 0
-        self.settings.max_distance = 2
-        self.settings.flip_vertex_normal = False
         self.settings.apply_to_selected = True
         self.settings.seam_sync = True
         self.settings.seam_sync_across_objects = True
@@ -957,11 +1105,11 @@ class BlenderTests(TransferScene, unittest.TestCase):
         # Batch mode retains the existing convention of ignoring object masks.
         self.weights(right, ['Mask'], np.zeros((4, 1)))
         right.magic_fit_transfer.vertex_group = 'Mask'
-        for mode in wt.INPAINT_MODES:
-            self.settings.inpaint_mode = mode
-            self.select(left, right)
-            self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
-            np.testing.assert_allclose(self.read(right), np.tile([.9, .1], (4, 1)), atol=1e-6)
+        # The right mesh is built inside out, and still faces the body as a whole. Its far edge lies 1 m
+        # from the body, beyond Partial Reweight's 5 cm, and keeps its weights.
+        self.select(left, right)
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        np.testing.assert_allclose(self.read(right), [[.9, .1], [.2, .8]] * 2, atol=1e-6)
 
     def test_partial_seams_skip_falloff_and_preserved_members(self):
         self.settings.seam_sync = True
@@ -981,11 +1129,9 @@ class BlenderTests(TransferScene, unittest.TestCase):
 
     def test_partial_processing_excludes_unsupported_neighbors(self):
         # Connected triangles, but support stops at vertex 2. Unsupported weights
-        # must not enter smoothing averages or influence-limit dilation.
+        # must not be processed or change the others.
         obj = self.mesh('Target', [[0, 0, 0], [.1, 0, 0], [0, .1, 0], [.1, .1, 0]],
                         [[0, 1, 2], [1, 3, 2]])
-        self.settings.smoothing_enable = True
-        self.settings.max_distance = 1
         self.settings.num_limit_groups = 2
         outputs = []
         for unsupported in [[1, 0, 0, 0, 0], [.2, .2, .2, .2, .2]]:
@@ -999,7 +1145,7 @@ class BlenderTests(TransferScene, unittest.TestCase):
         np.testing.assert_array_equal(*outputs)
 
     def test_partial_numerical_failure_cancels_without_writes(self):
-        _, target = self.partial_scene((0, .75))
+        _, target = self.partial_scene((0, .0375))
         before = self.memberships(target)
         with patch.object(wt, 'solve_inpainting', side_effect=wt.InpaintingError('test failure')):
             with self.assertRaisesRegex(RuntimeError, 'test failure'):
@@ -1014,10 +1160,7 @@ class BlenderTests(TransferScene, unittest.TestCase):
         bpy.ops.magic_fit.reset_transfer_settings()
         self.assertFalse(self.settings.partial_reweight)
         self.assertEqual(self.settings.partial_reweight_falloff, 20)
-        self.settings.crease_smoothing = False
         self.settings.partial_reweight = True
-        self.settings.max_distance = 0
-        self.settings.inpaint_mode = 'SURFACE'
         self.test_standalone_inpaint_inversion_and_diagnostic()
 
     def test_operator_final_seams_and_geometry_and_bone_scaling(self):
@@ -1032,7 +1175,6 @@ class BlenderTests(TransferScene, unittest.TestCase):
         self.body.vertex_groups.new(name='C')
         before = self.snapshot(target)
         self.settings.seam_sync = True
-        self.settings.smoothing_enable = True
         self.settings.num_limit_groups = 1
         self.select(target)
         self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
@@ -1066,18 +1208,17 @@ class BlenderTests(TransferScene, unittest.TestCase):
         self.settings.apply_to_selected = True
         self.settings.seam_sync = True
         self.settings.virtual_merge = True
-        # Reject all right vertices by normals, including its duplicate seam.
+        # The right mesh is built inside out, beside the body: it faces it as a whole, alone or sharing a
+        # solve with the left one, and nothing is rejected.
         for polygon in right.data.polygons:
             polygon.flip()
         right.data.update()
-        self.settings.flip_vertex_normal = False
-        self.select(left, right)
-        original_right = self.read(right).copy()
-        with self.assertRaises(RuntimeError):
-            bpy.ops.magic_fit.transfer_weights()
-        np.testing.assert_array_equal(self.read(right), original_right)
-        self.assertEqual(len(left.vertex_groups), 0)
-        self.settings.seam_sync_across_objects = True
+        for across in (False, True):
+            self.settings.seam_sync_across_objects = across
+            self.select(left, right)
+            self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+            np.testing.assert_allclose(self.read(left), np.tile([0.25, 0.75], (4, 1)), atol=1e-6)
+            np.testing.assert_allclose(self.read(right), self.read(left), atol=1e-6)
         self.select(right, left)
         bpy.ops.object.mode_set(mode='EDIT')
         self.assertEqual(bpy.ops.magic_fit.select_rejected(), {'FINISHED'})
@@ -1091,10 +1232,6 @@ class BlenderTests(TransferScene, unittest.TestCase):
         self.assertEqual(bpy.ops.magic_fit.select_rejected(), {'FINISHED'})
         bpy.ops.object.mode_set(mode='OBJECT')
         self.assertFalse(any(vertex.select for vertex in right.data.vertices))
-        right.select_set(True)
-        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
-        np.testing.assert_allclose(self.read(left), np.tile([0.25, 0.75], (4, 1)), atol=1e-6)
-        np.testing.assert_allclose(self.read(right), self.read(left), atol=1e-6)
 
     def test_protected_seams_masks_and_locked_groups(self):
         self.source()
@@ -1131,11 +1268,12 @@ class BlenderTests(TransferScene, unittest.TestCase):
         self.assertEqual(bpy.ops.magic_fit.select_rejected(), {'FINISHED'})
         bpy.ops.object.mode_set(mode='OBJECT')
         self.assertFalse(any(v.select for v in target.data.vertices))
+        # Split seams count as joined even with Virtual Merge off, so the part in the mask isn't rejected.
         self.settings.virtual_merge = False
         bpy.ops.object.mode_set(mode='EDIT')
         self.assertEqual(bpy.ops.magic_fit.select_rejected(), {'FINISHED'})
         bpy.ops.object.mode_set(mode='OBJECT')
-        self.assertEqual([v.select for v in target.data.vertices], [False] * 4 + [True] * 4)
+        self.assertFalse(any(v.select for v in target.data.vertices))
 
     def test_inpaint_uses_the_rest_pose_like_the_transfer(self):
         self.source()
@@ -1228,74 +1366,27 @@ class BlenderTests(TransferScene, unittest.TestCase):
         self.assertFalse(self.settings.seam_sync_across_objects)
         self.assertAlmostEqual(self.settings.seam_distance, 0.0001)
         self.assertFalse(self.settings.normalize_weights_after_transfer)
-        self.assertAlmostEqual(np.degrees(self.settings.max_normal_angle_difference), 30, places=4)
-        self.assertAlmostEqual(np.degrees(self.settings.soft_normal_limit), 90, places=4)
-        self.assertTrue(self.settings.crease_smoothing)
-        self.assertAlmostEqual(self.settings.crease_softness, 1.0)
         # FFXIV models take 8 bones per vertex.
         self.assertTrue(self.settings.enforce_four_bone_limit)
         self.assertEqual(self.settings.num_limit_groups, 8)
+        # The matching picks how to treat each part of the body by itself.
+        for name in ('max_distance', 'inpaint_mode', 'crease_smoothing', 'crease_softness',
+                     'max_normal_angle_difference', 'soft_normal_limit', 'flip_vertex_normal', 'smoothing_enable',
+                     'smoothing_factor', 'smoothing_repeat'):
+            self.assertNotIn(name, self.settings.bl_rna.properties, name)
         self.settings.virtual_merge = False
         self.settings.seam_sync = False
         self.settings.seam_sync_across_objects = True
         self.settings.seam_distance = 0.01
         self.settings.normalize_weights_after_transfer = True
-        self.settings.soft_normal_limit = 0.5
-        self.settings.crease_smoothing = False
-        self.settings.crease_softness = 1.5
         self.settings.num_limit_groups = 4
         bpy.ops.magic_fit.reset_transfer_settings()
-        self.assertEqual(self.settings.inpaint_mode, 'COMBINED')
-        # Files store each mode's number, so those must stay; the list shows Combined first.
-        self.assertEqual({item.identifier: item.value
-                          for item in self.settings.bl_rna.properties['inpaint_mode'].enum_items},
-                         {'POINT': 0, 'SURFACE': 1, 'COMBINED': 2})
-        self.assertEqual(self.settings.bl_rna.properties['inpaint_mode'].enum_items[0].identifier, 'COMBINED')
         self.assertEqual(self.settings.num_limit_groups, 8)
         self.assertTrue(self.settings.virtual_merge)
         self.assertTrue(self.settings.seam_sync)
         self.assertFalse(self.settings.seam_sync_across_objects)
         self.assertAlmostEqual(self.settings.seam_distance, 0.0001)
         self.assertFalse(self.settings.normalize_weights_after_transfer)
-        self.assertAlmostEqual(np.degrees(self.settings.soft_normal_limit), 90, places=4)
-        self.assertTrue(self.settings.crease_smoothing)
-        self.assertAlmostEqual(self.settings.crease_softness, 1.0)
-
-    def test_soft_normal_limit_rescues_steep_loose_part(self):
-        xs, ys = np.meshgrid(np.linspace(-1, 1, 5), np.linspace(-1, 1, 5), indexing='ij')
-        index = np.arange(25).reshape(5, 5)
-        quads = [[index[i, j], index[i + 1, j], index[i + 1, j + 1], index[i, j + 1]]
-                 for i in range(4) for j in range(4)]
-        source = self.mesh('Source', np.column_stack([xs.ravel(), ys.ravel(), np.zeros(25)]), quads)
-        self.weights(source, ['A', 'B'], np.column_stack([(1 - xs.ravel()) / 2, (1 + xs.ravel()) / 2]))
-        self.body = source
-        # A flat part just above the source, and a separate part tilted by 60
-        # degrees whose upper edge lies beyond Max Distance.
-        rise = 0.1 * np.array([0, np.cos(np.pi / 3), np.sin(np.pi / 3)])
-        bottom = [[0.3, 0, 0.02], [0.5, 0, 0.02]]
-        target = self.mesh('Target', [[-0.5, 0, 0.02], [-0.3, 0, 0.02], [-0.3, 0.2, 0.02], [-0.5, 0.2, 0.02]]
-                           + bottom + [np.add(bottom[1], rise), np.add(bottom[0], rise)],
-                           [[0, 1, 2, 3], [4, 5, 6, 7]])
-        self.select(target)
-        self.settings.soft_normal_limit = self.settings.max_normal_angle_difference
-        with self.assertRaisesRegex(RuntimeError, 'No usable match'):
-            bpy.ops.magic_fit.transfer_weights()
-        self.assertEqual(len(target.vertex_groups), 0)
-        bpy.ops.magic_fit.reset_transfer_settings()
-        self.body = source
-        self.settings.use_deformed_source = self.settings.use_deformed_target = False
-        self.settings.inpaint_mode = 'SURFACE'
-        self.settings.max_distance = 0.1
-        self.settings.crease_smoothing = False
-        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
-        out = self.read(target)
-        np.testing.assert_allclose(out[:4], [[.75, .25], [.65, .35], [.65, .35], [.75, .25]], atol=1e-6)
-        np.testing.assert_allclose(out.sum(axis=1), 1, atol=1e-6)
-        self.assertTrue(np.all((out[4:, 0] > 0.2) & (out[4:, 0] < 0.4)))
-        # Full trust for direct matches, half for the 60 degree soft matches and
-        # none where the tilted part leaves Max Distance.
-        targets, _groups = operators.match_objects(bpy.context, self.settings, source, [target])
-        np.testing.assert_allclose(targets[0]['confidence'], [1] * 4 + [.5, .5, 0, 0], atol=0.01)
 
     def test_transfer_clears_deform_groups_the_body_lacks(self):
         self.source()
@@ -1525,14 +1616,8 @@ class BlenderTests(TransferScene, unittest.TestCase):
 
 
 class CreaseSmoothingTests(TransferScene, unittest.TestCase):
-    """Weight Transfer with Crease Smoothing, the default. BlenderTests covers the matching and inpainting
-    underneath with it off."""
-
-    def setUp(self):
-        super().setUp()
-        self.settings.crease_smoothing = True
-        self.settings.inpaint_mode = 'COMBINED'
-        self.settings.max_distance = 0.05
+    """How Weight Transfer trusts its matches: copied where the mesh lies on the body, blended where it bridges
+    a crease, hems, fingers and the pose left out."""
 
     def crease_scene(self, gusset=False):
         """A V-shaped groove weighted to bones L and R, and a narrow strap lying in it. With `gusset`, a
@@ -1583,34 +1668,41 @@ class CreaseSmoothingTests(TransferScene, unittest.TestCase):
         mesh = obj.evaluated_get(bpy.context.evaluated_depsgraph_get()).data
         return np.array([vertex.co[:] for vertex in mesh.vertices])
 
+    def copied(self, obj):
+        """The weights of the body (L and R) at the closest points of ``obj``: what copying them gives."""
+        targets, _groups = operators.match_objects(bpy.context, self.settings, self.body, [obj])
+        return targets[0]['weights'][:, [self.body.vertex_groups[name].index for name in ('L', 'R')]]
+
     def test_strap_in_a_crease_does_not_twist(self):
         rig, strap, x = self.crease_scene()
-        # The walls are 45 degrees off the strap. Copying them exactly, like a strap hugging the walls of
-        # a cleft, lets each edge follow its own wall.
-        self.settings.max_normal_angle_difference = np.radians(50)
+        # The walls are 45 degrees off the strap. Copying them, like a strap hugging the walls of a cleft,
+        # lets each edge follow its own wall.
+        copied = self.copied(strap)
         normals, gaps = {}, {}
-        for enabled in (False, True):
-            self.settings.crease_smoothing = enabled
+        for label in ('copied', 'transferred'):
             for pose_bone in rig.pose.bones:
                 pose_bone.scale = (1, 1, 1)
             bpy.context.view_layer.update()
-            self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+            if label == 'copied':
+                self.weights(strap, ['L', 'R'], copied)
+            else:
+                self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
             weights = self.read(strap, ['L', 'R'])
             np.testing.assert_allclose(weights.sum(axis=1), 1, atol=1e-5)
-            gaps[enabled] = abs(weights[x == x.min(), 0].mean() - weights[x == x.max(), 0].mean())
+            gaps[label] = abs(weights[x == x.min(), 0].mean() - weights[x == x.max(), 0].mean())
             # Growing both sides of the groove pushes its walls past each other. A strap switching sides
             # across its width turns inside out.
             for pose_bone in rig.pose.bones:
                 pose_bone.scale = (2, 2, 2)
             bpy.context.view_layer.update()
             posed = self.posed(strap)
-            normals[enabled] = [np.cross(posed[p.vertices[1]] - posed[p.vertices[0]],
-                                         posed[p.vertices[2]] - posed[p.vertices[0]])[2]
-                                for p in strap.data.polygons]
-        self.assertGreater(gaps[False], 0.3)
-        self.assertLess(gaps[True], gaps[False] / 2)
-        self.assertTrue(any(z < 0 for z in normals[False]))
-        self.assertTrue(all(z > 0 for z in normals[True]))
+            normals[label] = [np.cross(posed[p.vertices[1]] - posed[p.vertices[0]],
+                                       posed[p.vertices[2]] - posed[p.vertices[0]])[2]
+                              for p in strap.data.polygons]
+        self.assertGreater(gaps['copied'], 0.3)
+        self.assertLess(gaps['transferred'], gaps['copied'] / 2)
+        self.assertTrue(any(z < 0 for z in normals['copied']))
+        self.assertTrue(all(z > 0 for z in normals['transferred']))
 
     def test_bridge_blends_but_what_lies_on_the_body_follows_it(self):
         rig, gusset, x = self.crease_scene(gusset=True)
@@ -1620,13 +1712,15 @@ class CreaseSmoothingTests(TransferScene, unittest.TestCase):
         edges = np.array([edge.vertices[:] for edge in gusset.data.edges])
         row = np.flatnonzero(np.isclose(rest[:, 1], 0))
         row = row[np.argsort(rest[row, 0])]
+        copied = self.copied(gusset)
         stretch = {}
-        for enabled in (False, True):
-            self.settings.crease_smoothing = enabled
-            self.settings.max_normal_angle_difference = np.radians(50)
+        for label in ('copied', 'transferred'):
             bone.rotation_euler = (0, 0, 0)
             bpy.context.view_layer.update()
-            self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+            if label == 'copied':
+                self.weights(gusset, ['L', 'R'], copied)
+            else:
+                self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
             weights = self.read(gusset, ['L', 'R'])
             np.testing.assert_allclose(weights.sum(axis=1), 1, atol=1e-5)
             # Away from the groove, the gusset lies on the walls and follows them.
@@ -1635,7 +1729,7 @@ class CreaseSmoothingTests(TransferScene, unittest.TestCase):
                                        atol=0.02)
             np.testing.assert_allclose(weights[far & (x > 0)], np.tile([0, 1], (np.count_nonzero(far & (x > 0)), 1)),
                                        atol=0.02)
-            if enabled:
+            if label == 'transferred':
                 # Across the groove, both sides blend gradually and evenly...
                 profile = weights[row, 0]
                 self.assertTrue(np.all(np.diff(profile) <= 1e-4))
@@ -1651,10 +1745,10 @@ class CreaseSmoothingTests(TransferScene, unittest.TestCase):
             bone.rotation_euler = (0, np.radians(20), 0)
             bpy.context.view_layer.update()
             posed = self.posed(gusset)
-            stretch[enabled] = (np.linalg.norm(posed[edges[:, 1]] - posed[edges[:, 0]], axis=1)
-                                / np.linalg.norm(rest[edges[:, 1]] - rest[edges[:, 0]], axis=1)).max()
+            stretch[label] = (np.linalg.norm(posed[edges[:, 1]] - posed[edges[:, 0]], axis=1)
+                              / np.linalg.norm(rest[edges[:, 1]] - rest[edges[:, 0]], axis=1)).max()
         bone.rotation_euler = (0, 0, 0)
-        self.assertLess(stretch[True], stretch[False] / 3)
+        self.assertLess(stretch['transferred'], stretch['copied'] / 3)
 
     def test_bound_meshes_match_in_the_rest_pose(self):
         rig, gusset, _x = self.crease_scene(gusset=True)
@@ -1721,6 +1815,96 @@ class CreaseSmoothingTests(TransferScene, unittest.TestCase):
         pairs = np.array(list(copies.items()))
         np.testing.assert_allclose(weights[pairs[:, 0]], weights[pairs[:, 1]], atol=1e-6)
 
+    def crotch_scene(self, inside_out=False):
+        """A strip 2 mm under a plate weighted to bone A, its edges turned up between the plate and two walls
+        1 mm away, weighted mostly to B and C, which touch them from outside: a leotard's crotch between the
+        thighs. Returns the strip and which of its vertices lie along the walls."""
+        ys = np.linspace(-0.03, 0.03, 7)
+
+        def sheet(points, reverse=False):
+            # The cross-section ``points`` (x, z) swept along y, facing y cross the way it runs.
+            vertices = np.array([[x, y, z] for x, z in points for y in ys])
+            index = np.arange(len(vertices)).reshape(len(points), len(ys))
+            faces = np.array([[index[i, j], index[i, j + 1], index[i + 1, j + 1], index[i + 1, j]]
+                              for i in range(len(points) - 1) for j in range(len(ys) - 1)])
+            return vertices, faces[:, ::-1] if reverse else faces
+
+        # The plate faces down, the walls face each other.
+        pieces = [sheet([(x, 0.0) for x in np.linspace(-0.01, 0.01, 5)]),
+                  sheet([(-0.0125, z) for z in np.linspace(-0.02, 0.006, 6)]),
+                  sheet([(0.0125, z) for z in np.linspace(0.006, -0.02, 6)])]
+        offsets = np.cumsum([0] + [len(v) for v, _f in pieces])
+        body = self.mesh('Body', np.vstack([v for v, _f in pieces]),
+                         np.vstack([f + offset for (_v, f), offset in zip(pieces, offsets)]))
+        part = np.repeat(np.arange(3), [len(v) for v, _f in pieces])
+        self.weights(body, ['A', 'B', 'C'], np.column_stack([np.where(part == 0, 1, 0.4), (part == 1) * 0.6,
+                                                              (part == 2) * 0.6]))
+        self.body = body
+        # The strip faces away from the plate and toward the walls.
+        rest, faces = sheet([(-0.0115, 0.002), (-0.0115, 0.0)] + [(x, -0.002) for x in np.linspace(-0.0115, 0.0115, 7)]
+                            + [(0.0115, 0.0), (0.0115, 0.002)], reverse=inside_out)
+        strip = self.mesh('Strip', rest, faces)
+        self.select(strip)
+        return strip, np.isclose(np.abs(rest[:, 0]), 0.0115)
+
+    def test_skin_touching_the_mesh_from_outside_isnt_matched(self):
+        for inside_out in (False, True):
+            self.setUp()
+            strip, edges = self.crotch_scene(inside_out)
+            self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+            weights = self.read(strip, ['A', 'B', 'C'])
+            # The edges take the weights of the plate the strip lies under, not of the walls pressing on
+            # them, whichever way round the strip's triangles are.
+            self.assertLess(weights[edges, 1:].max(), 0.15, inside_out)
+            self.assertGreater(weights[edges, 0].min(), 0.85, inside_out)
+
+    def test_glove_fingers_keep_their_own_weights(self):
+        """Two fingers 1 mm apart, index and middle, in a glove whose fingers are loose parts 1.5 mm off them,
+        pressed into each other between the fingers."""
+        fingers = ['j_hito_a_l', 'j_naka_a_l']
+
+        def rig():
+            data = bpy.data.armatures.new('Hand')
+            obj = bpy.data.objects.new('Hand', data)
+            bpy.context.collection.objects.link(obj)
+            bpy.context.view_layer.objects.active = obj
+            bpy.ops.object.mode_set(mode='EDIT')
+            for name, x in zip(fingers, (-0.0075, 0.0075)):
+                bone = data.edit_bones.new(name)
+                bone.head, bone.tail = (x, 0, 0), (x, 0.06, 0)
+            bpy.ops.object.mode_set(mode='OBJECT')
+            return obj
+
+        def rigged(name, v, f, armature):
+            obj = self.mesh(name, v, f, rig=False)
+            obj.modifiers.new('Armature', 'ARMATURE').object = armature
+            return obj
+
+        def tube(cx, radius, sides=16, rings=13):
+            angles = np.linspace(0, 2 * np.pi, sides, endpoint=False)
+            vertices = [[cx + radius * np.cos(a), y, radius * np.sin(a)] for y in np.linspace(0, 0.06, rings)
+                        for a in angles]
+            # Facing outward.
+            faces = [[r * sides + s, (r + 1) * sides + s, (r + 1) * sides + (s + 1) % sides, r * sides + (s + 1) % sides]
+                     for r in range(rings - 1) for s in range(sides)]
+            return np.array(vertices), np.array(faces)
+
+        def pair(radius):
+            (left, lf), (right, rf) = tube(-0.0075, radius), tube(0.0075, radius)
+            return np.vstack([left, right]), np.vstack([lf, rf + len(left)]), np.arange(2 * len(left)) >= len(left)
+        hand = rig()
+        v, f, right = pair(0.007)
+        self.body = rigged('Body', v, f, hand)
+        self.weights(self.body, fingers, np.column_stack([~right, right]).astype(float))
+        v, f, right = pair(0.0085)
+        glove = rigged('Glove', v, f, hand)
+        self.select(glove)
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        weights = self.read(glove, fingers)
+        # Neither finger of the glove takes the other finger's weights where they press together.
+        self.assertLess(weights[~right, 1].max(), 0.05)
+        self.assertLess(weights[right, 0].max(), 0.05)
+
     def legs_scene(self):
         """Two thighs (FFXIV bone names) under a short skirt tube whose hem lies on them."""
         data = bpy.data.armatures.new('Legs')
@@ -1780,10 +1964,16 @@ class CreaseSmoothingTests(TransferScene, unittest.TestCase):
         batch = follow.call_args.args[0]
         self.assertIn('strides', batch[0])
         self.assertEqual(len(batch[0]['strides']['poses']), 4)
-        # The swinging thighs would come through the hem, so it's pulled towards them.
-        self.assertGreater(max(pull.max() for pull in pulls), 0.1)
+        self.assertTrue(pulls)
         weights = self.read(skirt, ['j_asi_a_l', 'j_asi_a_r', 'j_kosi'])
         np.testing.assert_allclose(weights.sum(axis=1), 1, atol=1e-5)
+        # The hem lying on the thighs follows them, so a swinging thigh can't come through it. (Trusted like
+        # the skin there, it needs no pull from the strides; test_hem_follow_pulls_a_hem_that_would_let_the_
+        # leg_through covers the pull.)
+        rest = np.array([vertex.co[:] for vertex in skirt.data.vertices])
+        hem = np.isclose(rest[:, 2], rest[:, 2].min())
+        self.assertGreater(weights[hem & (rest[:, 0] > 0.1), 0].min(), 0.95)
+        self.assertGreater(weights[hem & (rest[:, 0] < -0.1), 1].min(), 0.95)
         # Without the thighs' names, there are no strides to check.
         for bone in _rig.data.bones:
             if bone.name.startswith('j_asi'):
@@ -1819,7 +2009,6 @@ class CreaseSmoothingTests(TransferScene, unittest.TestCase):
 
     def test_stray_vertices_keep_the_bodys_weights(self):
         _rig, gusset, x = self.crease_scene(gusset=True)
-        self.settings.inpaint_mode = 'SURFACE'
         mesh = gusset.data
         mesh.vertices.add(1)
         mesh.vertices[-1].co = (-0.08, 0.0, 0.081)
@@ -1852,12 +2041,6 @@ class CreaseSmoothingTests(TransferScene, unittest.TestCase):
         self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
         for obj, used in parts:
             np.testing.assert_allclose(self.read(obj, ['L', 'R']), whole[used], atol=0.02)
-
-    def test_zero_max_distance_still_transfers(self):
-        _rig, gusset, _x = self.crease_scene(gusset=True)
-        self.settings.max_distance = 0
-        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
-        np.testing.assert_allclose(self.read(gusset, ['L', 'R']).sum(axis=1), 1, atol=1e-5)
 
 
 if __name__ == '__main__':

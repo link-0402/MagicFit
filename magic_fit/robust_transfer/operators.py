@@ -17,6 +17,7 @@ from . import dependencies, util
 
 def engine():
     """The solver modules `transfer` and `weighttransfer`, imported on first use: they load SciPy."""
+    dependencies.add_dll_directories()
     from . import transfer, weighttransfer
     return transfer, weighttransfer
 
@@ -201,13 +202,13 @@ def match_objects(context, settings, body, objects):
             if not any(included):
                 raise ValueError(f'Body {body.name} has no transferable vertex groups')
             weights = util.get_groups_arr(source, included)
-            strides = (transfer.stride_source(body, names, vertices, weights, surface_bvh, posed)
-                       if settings.crease_smoothing else None)
+            strides = transfer.stride_source(body, names, vertices, weights, surface_bvh, posed)
+            digits = transfer.digit_columns(names) & np.array(included, dtype=bool)
             for obj in meshes:
                 target = transfer.make_target(obj, depsgraph, settings)
                 target['deform_armature'] = transfer.deform_armature(obj, fallback)
                 transfer.match_target(target, vertices, triangles, normals, weights, settings, surface_bvh,
-                                      strides)
+                                      strides, digits)
                 targets[obj] = target
             groups = (names, deform, included)
     return [targets[obj] for obj in objects], groups
@@ -274,7 +275,7 @@ class MAGIC_FIT_OT_transfer_weights(bpy.types.Operator):
 
 
 class MAGIC_FIT_OT_select_rejected(bpy.types.Operator):
-    """Select loose parts with nothing matching the body. They make filling in weights fail"""
+    """Select loose parts that lie wholly in the Inpaint Mask. They make filling in weights fail"""
     bl_idname = "magic_fit.select_rejected"
     bl_label = "Select Rejected Loose Parts"
     bl_options = {'REGISTER', 'UNDO'}

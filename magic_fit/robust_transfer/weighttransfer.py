@@ -27,6 +27,12 @@
 # Changed for Magic Fit (2026-09): Crease Smoothing trusts each match by how far the target floats
 # above the source and how well their normals agree (bridge_confidence), groups are limited without
 # jumps (limit_groups_smoothly), and inpainting has a third mode, Combined (_link_loose_parts).
+# 2026-10: flipped normals are allowed per loose part, not per vertex (facing_cosines); Crease Smoothing
+# is the only matching: it blends across creases where the target bridges them (crease_bridges) and trusts
+# matches within SKIN_REACH like skin contact elsewhere, and on fingers and toes (DIGIT_BONE), where
+# Combined doesn't link parts whose outsides face each other (LINK_FACING), and within SKIN_TOUCH next to
+# bridges too. The standalone add-on's normal angle limits, smoothing and group-limit passes are gone. A vertex
+# no face or link reaches keeps its own match in the solve (_solve_constrained).
 #
 # ---- Original MIT License Notice Follows ----
 #
@@ -52,6 +58,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import re
 import warnings
 from dataclasses import dataclass
 
@@ -193,79 +200,133 @@ class SurfaceMatch:
     """Closest-surface data for every target vertex."""
     weights: np.ndarray
     distances: np.ndarray
-    # Degrees between the target and interpolated source normals, folded into
-    # [0, 90] when flipped normals are allowed. NaN where a normal is undefined.
-    angles: np.ndarray
     # Closest source points and the unit source normals there (zero where the
     # interpolated normal vanishes).
     points: np.ndarray = None
     normals: np.ndarray = None
 
 
-def match_closest_surface(source_verts, source_triangles, source_normals, target_verts,
-                          target_normals, source_weights, flip_vertex_normal, surface_bvh=None):
+def match_closest_surface(source_verts, source_triangles, source_normals, target_verts, source_weights,
+                          surface_bvh=None):
     """Interpolate source weights and normals at each target vertex's closest surface point."""
     sqrD, I, C, B = find_closest_point_on_surface(
         target_verts, source_verts, source_triangles, surface_bvh
     )
     weights = interpolate_attribute_from_bary(source_weights, B, I, source_triangles)
     source_normals = interpolate_attribute_from_bary(source_normals, B, I, source_triangles)
-    target_normals = np.asarray(target_normals, dtype=np.float64)
-
     source_norm = np.linalg.norm(source_normals, axis=1)
-    target_norm = np.linalg.norm(target_normals, axis=1)
-    valid = np.logical_and(source_norm > np.finfo(np.float32).eps,
-                           target_norm > np.finfo(np.float32).eps)
-    cosine = np.einsum('ij,ij->i', source_normals[valid], target_normals[valid])
-    cosine /= source_norm[valid] * target_norm[valid]
-    cosine = np.clip(cosine, -1.0, 1.0)
-    if flip_vertex_normal:
-        cosine = np.abs(cosine)
-    angles = np.full(len(weights), np.nan)
-    angles[valid] = np.degrees(np.arccos(cosine))
     unit_normals = np.zeros_like(source_normals, dtype=np.float64)
     source_valid = source_norm > np.finfo(np.float32).eps
     unit_normals[source_valid] = source_normals[source_valid] / source_norm[source_valid, np.newaxis]
-    return SurfaceMatch(weights, np.sqrt(sqrD), angles, C, unit_normals)
+    return SurfaceMatch(weights, np.sqrt(sqrD), C, unit_normals)
 
 
-def match_confidence(distances, angles, max_distance, max_angle, soft_angle):
-    """Trust in each closest-surface match: 1 for direct matches, 0 for unused ones.
-
-    Matches within max_distance whose normals differ by at most max_angle become
-    exact constraints. Up to soft_angle the trust fades smoothly, so steep or
-    detailed geometry (plates, rims, frills) still anchors its loose part
-    without forcing its weights like a direct match would.
-    """
-    distances = np.asarray(distances, dtype=np.float64)
-    angles = np.asarray(angles, dtype=np.float64)
-    usable = (distances <= max_distance) & np.isfinite(angles)
-    confidence = np.zeros(len(distances), dtype=np.float64)
-    confidence[usable & (angles <= max_angle)] = 1.0
-    band = usable & (angles > max_angle) & (angles < soft_angle)
-    if np.any(band):
-        t = (angles[band] - max_angle) / (soft_angle - max_angle)
-        confidence[band] = 1 - t * t * (3 - 2 * t)
-    return confidence
+# Flipped normals are allowed per loose part of the target, not per vertex: a part whose normals mostly face
+# away from the source's under it (a back-face layer, a part built inside out) is turned around as a whole.
+# Its vertices within PART_VOTE_REACH of the source vote, by area and how squarely their normals meet the
+# source's, and one way wins when it gets this share of the vote more than the other (as Body Fit decides
+# which way its sheets face). Parts that face neither way clearly (a closed solid strap, a part folded back on
+# itself) still compare either way round, vertex by vertex.
+PART_CLEAR = 0.3
+PART_VOTE_REACH = 0.05
 
 
-# Crease Smoothing: how far each closest-point match is trusted, by how far the target floats above
-# the source there. A match d away pulls the weights towards it only on length scales above
-# BRIDGE_SOFTNESS times d, so where the target lies on the source it copies its weights, and where it
-# spans a crease (the butt cleft, between the legs, under the bust) the weights of both sides blend
-# smoothly across it, over about BRIDGE_SOFTNESS times the height it floats.
+def part_facing(vertices, triangles, cosines, distances):
+    """+1 or -1 per vertex: whether the normals of its loose part (by ``triangles``) face the way the source's do
+    under it, or the other way; 0 where the part doesn't clearly face either way or lies out of reach of the
+    source (see PART_CLEAR). ``cosines``: per vertex, the cosine between its normal and the source's at its
+    match (NaN where either is undefined); ``distances``: how far its match is."""
+    V = np.asarray(vertices, dtype=np.float64)
+    F = np.asarray(triangles, dtype=np.int64).reshape(-1, 3)
+    count = len(V)
+    facing = np.zeros(count)
+    if not len(F):
+        return facing
+    graph = sp.sparse.coo_matrix((np.ones(2 * len(F)), (np.r_[F[:, 0], F[:, 1]], np.r_[F[:, 1], F[:, 2]])),
+                                 shape=(count, count)).tocsr()
+    part_count, parts = _connected_components(graph)
+    third = np.linalg.norm(np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]]), axis=1) / 6
+    area = np.zeros(count)
+    for k in range(3):
+        np.add.at(area, F[:, k], third)
+    cosines = np.nan_to_num(np.asarray(cosines, dtype=np.float64), nan=0.0)
+    vote = area * (np.asarray(distances, dtype=np.float64) <= PART_VOTE_REACH)
+    signed = np.bincount(parts, vote * cosines, part_count)
+    asked = np.bincount(parts, vote * np.abs(cosines), part_count)
+    sign = np.where(signed > PART_CLEAR * asked, 1.0, np.where(signed < -PART_CLEAR * asked, -1.0, 0.0))
+    return sign[parts]
+
+
+def _normal_cosines(normals, point_normals):
+    """Unit ``normals`` (zero where undefined) and their cosines with ``point_normals`` (NaN where either is)."""
+    N = np.asarray(normals, dtype=np.float64)
+    length = np.linalg.norm(N, axis=1)
+    unit = np.divide(N, length[:, np.newaxis], out=np.zeros_like(N),
+                     where=length[:, np.newaxis] > np.finfo(np.float32).eps)
+    point_normals = np.asarray(point_normals, dtype=np.float64)
+    valid = (length > np.finfo(np.float32).eps) & (np.linalg.norm(point_normals, axis=1) > np.finfo(np.float32).eps)
+    cosines = np.full(len(N), np.nan)
+    cosines[valid] = np.clip(np.einsum('ij,ij->i', unit[valid], point_normals[valid]), -1.0, 1.0)
+    return unit, cosines
+
+
+def facing_cosines(vertices, triangles, normals, point_normals, distances):
+    """The cosine between each target vertex's normal and the source's at its match (``point_normals``, unit or
+    zero), with every loose part turned the way it faces the source (see part_facing), and either way round
+    where it faces neither way clearly. NaN where either normal is undefined.
+
+    Negative where the source faces the target's outside there: it touches the target from outside, like a
+    thigh pressing on the edge of a leotard's crotch, instead of lying under it."""
+    _unit, cosines = _normal_cosines(normals, point_normals)
+    facing = part_facing(vertices, triangles, cosines, distances)
+    return np.where(facing != 0, facing * cosines, np.abs(cosines))
+
+
+def outward_normals(vertices, triangles, normals, point_normals, distances):
+    """Where the outside of the target faces: its unit normals with every loose part turned away from the source
+    (see part_facing). Zero where a part faces neither way clearly or a normal is undefined."""
+    unit, cosines = _normal_cosines(normals, point_normals)
+    return unit * part_facing(vertices, triangles, cosines, distances)[:, np.newaxis]
+
+
+# How far each closest-point match is trusted. A match d away pulls the weights towards it only on length
+# scales above a softness times d (see bridge_confidence), so where the mesh lies on the body it copies its
+# weights, and where it spans a crease (the butt cleft, between the legs, under the bust, see BRIDGE_TEAR) the
+# weights of both sides blend smoothly across it, over about BRIDGE_SOFTNESS times the height it floats.
+# Elsewhere matches count twice as far (SKIN_SOFTNESS): blending as widely there only let more skin through
+# the mesh when posed, with or without Customize+.
 BRIDGE_SOFTNESS = 3.0
-# Even touching vertices are smoothed below BRIDGE_SOFTNESS times this, so noise in the contact doesn't
-# show.
+SKIN_SOFTNESS = 1.5
+# Even touching vertices are smoothed below the softness times this, so noise in the contact doesn't show.
 BRIDGE_MIN_GAP = 0.002
 # Every vertex keeps this much trust, which anchors every loose part. It's what a vertex floating about
-# 1.3 cm high gets at softness 3, so blends get no wider than about 4 cm (softness times that height).
+# 1.3 cm high gets at BRIDGE_SOFTNESS, so blends get no wider than about 4 cm.
 BRIDGE_FLOOR = 0.01
-# Where the normals of target and source differ by more than the first angle (degrees, either way
-# round), the target lifts off the source, like the flanks of a crease; beyond the second its match is
-# only trusted as much as BRIDGE_FLOOR.
+# Bridges: where a mesh spans a crease, its closest points switch from one wall to the other between
+# neighbours, moving across an edge at least BRIDGE_TEAR times as far as the edge is long and at least
+# BRIDGE_TEAR_MIN. Over skin curving away from the mesh (a limb, a finger, a loose sleeve) they move less than
+# the mesh does, and where the mesh lies on the skin they don't jump. Where it switches floating at least
+# BRIDGE_TEAR_HEIGHT high, the mesh bridges the crease within BRIDGE_ZONE on the same loose part, fading out by
+# twice that. Wider zones, or zones growing with the height, measured worse: loosely fitted clothing floats
+# high without spanning a crease.
+BRIDGE_TEAR = 2.0
+BRIDGE_TEAR_MIN = 0.005
+BRIDGE_TEAR_HEIGHT = 0.005
+BRIDGE_ZONE = 0.015
+# Inside a zone, only what floats over the crease blends: a vertex within SKIN_TOUCH of the skin (fading out by
+# twice that, the height a tear needs) lies on it, and is trusted like one touching the skin away from bridges,
+# whatever its normals. Trusting only matching normals there let the skin through under clothing that follows its
+# curves loosely (seams, plates, low-poly shapes).
+SKIN_TOUCH = BRIDGE_TEAR_HEIGHT / 2
+# Near a bridge, where the normals of target and source differ by more than the first angle (degrees, each
+# part of the target turned the way it faces, see facing_cosines), the target lifts off the source, like the
+# flanks of a crease; beyond the second its match is only trusted as much as BRIDGE_FLOOR.
 BRIDGE_FULL_ANGLE = 11.0
 BRIDGE_ZERO_ANGLE = 25.0
+# Away from bridges, a vertex within SKIN_REACH of the skin (fading out by twice that) is trusted like one
+# touching it, however its normals turn: clothing rarely follows the skin's curves that closely (seams,
+# plates, low-poly shapes), and trusting only matching normals there let more skin through when posed.
+SKIN_REACH = 0.01
 # Within this distance of a free border (a hem or an opening that ends in a single layer, see
 # free_border_vertices), the target keeps more trust, as if it floated this much less high: nothing
 # beyond the border holds it, and a hem in front of a thigh has to follow it. The rim where a
@@ -279,9 +340,25 @@ BRIDGE_BORDER_FULL_ANGLE = 25.0
 BRIDGE_BORDER_ZERO_ANGLE = 45.0
 # Coincident vertices (split seams) count as one for the trust and the solve.
 BRIDGE_WELD = 1e-4
-# The soft length Crease Smoothing solves with: a quarter of the default Max Distance. The pull of a
-# match doesn't depend on it, only BRIDGE_FLOOR's and the border's do.
+# The soft length the solve works with. The pull of a match doesn't depend on it, only BRIDGE_FLOOR's and
+# the border's do.
 BRIDGE_SOFT_LENGTH = 0.0125
+
+# Fingers and toes: FFXIV's finger bones and the toe bones of IVCS skeletons. A mesh wraps each of them on
+# its own, like a glove, with no crease to bridge between them. Over one (its bones having at least the first
+# share of the match's weights, fully from the second), a vertex within SKIN_REACH is trusted like one
+# touching the skin even near a bridge, like a glove's webbing.
+DIGIT_BONE = re.compile(r'^(j|iv)_(asi_)?(oya|hito|naka|kusu|ko)_[abc]_[lr]$')
+DIGIT_SHARE = (0.5, 0.9)
+
+
+def digit_share(weights, digits):
+    """Each row's share of its ``weights`` on the columns marked in ``digits`` (finger and toe bones, see
+    DIGIT_BONE); 0 for rows without weights."""
+    W = np.clip(np.asarray(weights, dtype=np.float64), 0, None)
+    total = W.sum(axis=1)
+    on = W[:, np.asarray(digits, dtype=bool)].sum(axis=1)
+    return np.divide(on, total, out=np.zeros(len(W)), where=total > 0)
 
 
 def _smoothstep(t):
@@ -314,33 +391,76 @@ def free_border_distance(vertices, triangles, merge_map):
     return cKDTree(V[free]).query(V)[0]
 
 
-def bridge_confidence(vertices, triangles, distances, cosines, soft_length=BRIDGE_SOFT_LENGTH,
-                      softness=BRIDGE_SOFTNESS, weld_distance=BRIDGE_WELD, max_distance=np.inf):
-    """Trust in each vertex's closest-point match for Crease Smoothing, in [BRIDGE_FLOOR, 1].
+def crease_bridges(vertices, triangles, points, distances, cosines, merge_map):
+    """How much each vertex lies where the target bridges a crease (see BRIDGE_TEAR), from 0 to 1, measured
+    within its loose part (welded by merge_map). ``points``: each vertex's closest point on the source,
+    ``distances`` how far it is; ``cosines`` as for bridge_confidence: matches touching the target from
+    outside (a negative cosine) don't count."""
+    V = np.asarray(vertices, dtype=np.float64)
+    P = np.asarray(points, dtype=np.float64)
+    distances = np.asarray(distances, dtype=np.float64)
+    F = np.asarray(triangles, dtype=np.int64).reshape(-1, 3)
+    zone = np.zeros(len(V))
+    if not len(F):
+        return zone
+    edges = np.unique(np.sort(np.vstack((F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]])), axis=1), axis=0)
+    a, b = edges[:, 0], edges[:, 1]
+    jump = np.linalg.norm(P[a] - P[b], axis=1)
+    under = np.nan_to_num(np.asarray(cosines, dtype=np.float64), nan=0.0) >= 0
+    torn = ((jump >= BRIDGE_TEAR * np.linalg.norm(V[a] - V[b], axis=1)) & (jump >= BRIDGE_TEAR_MIN)
+            & (np.maximum(distances[a], distances[b]) >= BRIDGE_TEAR_HEIGHT) & under[a] & under[b])
+    if not np.any(torn):
+        return zone
+    welded = merge_map[F]
+    count = int(merge_map.max()) + 1
+    graph = sp.sparse.coo_matrix((np.ones(3 * len(F)), (welded.ravel(), np.roll(welded, 1, axis=1).ravel())),
+                                 shape=(count, count)).tocsr()
+    _parts, labels = _connected_components(graph)
+    # A fourth coordinate keeps loose parts far apart.
+    apart = (np.ptp(V, axis=0).max() + 4 * BRIDGE_ZONE) * labels[merge_map]
+    lifted = np.column_stack((V, apart))
+    near = cKDTree(lifted[np.unique(edges[torn])]).query(lifted, distance_upper_bound=2 * BRIDGE_ZONE)[0]
+    return _smoothstep(2 - near / BRIDGE_ZONE)
+
+
+def bridge_confidence(vertices, triangles, distances, cosines, points=None, soft_length=BRIDGE_SOFT_LENGTH,
+                      weld_distance=BRIDGE_WELD, max_distance=np.inf, digits=None):
+    """Trust in each vertex's closest-point match, in [BRIDGE_FLOOR, 1].
 
     The solver pulls a weakly matched vertex towards its match with its area times t / (1 - t) /
     soft_length^4 (see _soft_area and _solve_constrained). Here t / (1 - t) = (soft_length /
     (softness * d))^4, d the distance to the match, so the pull is area / (softness * d)^4 whatever
-    soft_length is: the match only shapes the weights on length scales above softness * d.
+    soft_length is: the match only shapes the weights on length scales above softness * d. The softness is
+    BRIDGE_SOFTNESS where the target bridges a crease (crease_bridges, from the closest ``points``; without
+    them nothing counts as a bridge), and SKIN_SOFTNESS away from bridges.
 
-    That trust fades out where the normals of target and source (cosines: |cos| of the angle between
-    them, 0 where either is undefined) differ by BRIDGE_FULL_ANGLE to BRIDGE_ZERO_ANGLE: across a crease,
-    the target lifts off the walls on both sides, and copying them would make it follow each wall and
-    fold. Within BRIDGE_BORDER_RADIUS of a free border, the trust is at least that of a vertex floating
-    BRIDGE_BORDER_SOFTNESS / softness times as high, fading out with the distance to the border and
-    with normals differing by BRIDGE_BORDER_FULL_ANGLE to BRIDGE_BORDER_ZERO_ANGLE: a hem along a thigh
-    follows it, while a strap across a crease still blends.
+    That trust fades out where the normals of target and source (cosines: the cosine of the angle between
+    them as facing_cosines turns them, NaN where either is undefined) differ by BRIDGE_FULL_ANGLE to
+    BRIDGE_ZERO_ANGLE, and is only BRIDGE_FLOOR where the source faces the target's outside (a negative
+    cosine): it touches the target from outside, instead of lying under it. Across a crease, the target
+    lifts off the walls on both sides, and copying them would make it follow each wall and fold. Away from
+    bridges, and over fingers and toes (``digits``: each match's share of weights on their bones, see
+    digit_share and DIGIT_BONE), a vertex within SKIN_REACH is trusted like one touching the skin, however its
+    normals turn, unless the skin faces its outside; near bridges, so is one within SKIN_TOUCH (fading out by
+    twice that), since it lies on the skin instead of floating over the crease. Within BRIDGE_BORDER_RADIUS of
+    a free border, the trust is at least that of a vertex floating BRIDGE_BORDER_SOFTNESS / softness times as
+    high, fading out with the distance to the border and with normals differing by BRIDGE_BORDER_FULL_ANGLE to
+    BRIDGE_BORDER_ZERO_ANGLE: a hem along a thigh follows it, while a strap across a crease still blends.
     Coincident vertices (within weld_distance, at least BRIDGE_WELD) share their normals' agreement, so
     split seams get the same input on both sides. Matches farther than max_distance only get the floor.
     """
     V = np.asarray(vertices, dtype=np.float64)
-    d = np.maximum(np.asarray(distances, dtype=np.float64), BRIDGE_MIN_GAP)
-    cosines = np.nan_to_num(np.abs(np.asarray(cosines, dtype=np.float64)), nan=0.0)
-    if not (np.isfinite(soft_length) and soft_length > 0 and np.isfinite(softness) and softness > 0):
-        raise ValueError("Crease Smoothing needs a positive soft length and Width")
+    distances = np.asarray(distances, dtype=np.float64)
+    d = np.maximum(distances, BRIDGE_MIN_GAP)
+    raw = np.nan_to_num(np.asarray(cosines, dtype=np.float64), nan=0.0)
+    if not (np.isfinite(soft_length) and soft_length > 0):
+        raise ValueError("The trust needs a positive soft length")
     merge_map = find_vertex_merge_map(V, max(weld_distance, BRIDGE_WELD))
     sizes = np.bincount(merge_map).astype(np.float64)
-    cosines = (np.bincount(merge_map, weights=cosines) / sizes)[merge_map]
+    cosines = (np.bincount(merge_map, weights=np.clip(raw, 0.0, 1.0)) / sizes)[merge_map]
+    bridge = (crease_bridges(V, triangles, points, distances, raw, merge_map) if points is not None
+              else np.zeros(len(V)))
+    softness = SKIN_SOFTNESS + (BRIDGE_SOFTNESS - SKIN_SOFTNESS) * bridge
     full, zero = np.cos(np.radians(BRIDGE_FULL_ANGLE)), np.cos(np.radians(BRIDGE_ZERO_ANGLE))
     agreement = _smoothstep((cosines - zero) / (full - zero))
     odds = (soft_length / (softness * d)) ** 4
@@ -351,7 +471,14 @@ def bridge_confidence(vertices, triangles, distances, cosines, soft_length=BRIDG
         full, zero = np.cos(np.radians(BRIDGE_BORDER_FULL_ANGLE)), np.cos(np.radians(BRIDGE_BORDER_ZERO_ANGLE))
         border_agreement = _smoothstep((cosines - zero) / (full - zero))
         trust = np.maximum(trust, border_odds / (1 + border_odds) * _smoothstep(near) * border_agreement)
-    trust[np.asarray(distances, dtype=np.float64) > max_distance] = BRIDGE_FLOOR
+    skin = np.maximum(1 - bridge, _smoothstep((2 * SKIN_TOUCH - distances) / SKIN_TOUCH))
+    if digits is not None:
+        skin = np.maximum(skin, _smoothstep((np.asarray(digits, dtype=np.float64) - DIGIT_SHARE[0])
+                                            / (DIGIT_SHARE[1] - DIGIT_SHARE[0])))
+    skin *= _smoothstep((2 * SKIN_REACH - distances) / SKIN_REACH) * (cosines > 0)
+    touching = (soft_length / (softness * BRIDGE_MIN_GAP)) ** 4
+    trust = np.maximum(trust, touching / (1 + touching) * skin)
+    trust[distances > max_distance] = BRIDGE_FLOOR
     trust[trust >= 0.999] = 1.0
     return trust
 
@@ -460,7 +587,7 @@ def forward_kinematics(rest, parents, rotations=None, scales=None):
     return deform
 
 
-# Hem Follow (Crease Smoothing): where a hem lies over one leg, a membrane between the legs can let
+# Hem Follow: where a hem lies over one leg, a membrane between the legs can let
 # a swinging thigh through it. Four strides check it: each hip in turn flexed HEM_STRIDE[0] degrees
 # forward with the other one HEM_STRIDE[1] back, plain and with the thighs and butt scaled as
 # Customize+ templates often do.
@@ -733,6 +860,11 @@ POINT_WELD_TOLERANCE = 1e-6
 # the local edge length, fading out by twice it. Weaker links are dropped.
 LINK_CONTACT = 0.5
 LINK_CUTOFF = 1e-3
+# Over fingers and toes, only where their outsides (see outward_normals) face the same way: fully while they
+# differ by up to the first angle (degrees), fading out by the second. Parts facing each other there, like the
+# plates on two fingers of a glove, wrap different fingers, which move apart. (Elsewhere, parts facing each
+# other are often layers of one garment, and linking them measured better.)
+LINK_FACING = (60.0, 90.0)
 # Beyond this multiple of a vertex's own smoothness stiffness, a weak match
 # only worsens the conditioning of the system without changing the result.
 MAX_SOFT_STIFFNESS = 1e4
@@ -790,16 +922,18 @@ def _link_laplacian(rows, cols, weights, count):
     return links - sp.sparse.diags(np.asarray(links.sum(axis=1)).ravel())
 
 
-def _link_loose_parts(V, F, L, mass, anchors):
+def _link_loose_parts(V, F, L, mass, anchors, normals=None):
     """Combined mode: link the loose parts of the mesh Laplacian L through the point cloud.
 
     Weights still only flow along the mesh within each loose part, so they
     can't jump a gap inside it, like the one between the legs of loose pants.
     Parts are linked where they touch, like a lining, a belt or overlapping
-    trims, so they move together. A part that no anchor reaches, not even
-    through the parts it touches, keeps every link to the points around it, as
-    in Point mode, so it takes their weights instead of being rejected.
-    Vertices without faces get their mass from the point cloud.
+    trims, so they move together, but not where their outsides (``normals``,
+    given over fingers and toes, zero elsewhere) face each other (see
+    LINK_FACING). A part that no anchor
+    reaches, not even through the links it keeps, keeps every link to the points
+    around it, as in Point mode, so it takes their weights instead of being
+    rejected. Vertices without faces get their mass from the point cloud.
     """
     count = len(V)
     graph = abs(L)
@@ -817,6 +951,11 @@ def _link_loose_parts(V, F, L, mass, anchors):
     t = np.clip(np.linalg.norm(V[rows] - V[cols], axis=1)
                 / np.maximum(reach, np.finfo(np.float64).tiny) - 1, 0, 1)
     strength = 1 - t * t * (3 - 2 * t)
+    if normals is not None:
+        known = np.any(normals[rows] != 0, axis=1) & np.any(normals[cols] != 0, axis=1)
+        full, zero = np.cos(np.radians(LINK_FACING))
+        facing = _smoothstep((np.einsum('ij,ij->i', normals[rows], normals[cols]) - zero) / (full - zero))
+        strength = np.where(known, strength * facing, strength)
     touching = strength > LINK_CUTOFF
     contacts = sp.sparse.csr_matrix((np.ones(np.count_nonzero(touching)),
                                      (rows[touching], cols[touching])), shape=(count, count))
@@ -831,7 +970,7 @@ def _link_loose_parts(V, F, L, mass, anchors):
 
 
 def prepare_inpainting(V2, F2, W2, Matched, mode, virtual_merge_distance=0.0,
-                       confidence=None, soft_length=0.0):
+                       confidence=None, soft_length=0.0, normals=None):
     """Build the actual solver graph, shared by solving and loose-part selection.
 
     Matched vertices are exact constraints. Other vertices with a positive
@@ -842,8 +981,9 @@ def prepare_inpainting(V2, F2, W2, Matched, mode, virtual_merge_distance=0.0,
     mode is one of INPAINT_MODES. 'POINT' solves on a point cloud of the
     vertices, so weights also flow between loose parts; 'SURFACE' on the mesh,
     so they stay within each loose part; 'COMBINED' on the mesh too, with loose
-    parts linked as _link_loose_parts describes. True and False stand for
-    'POINT' and 'SURFACE', like the standalone add-on's point_cloud flag.
+    parts linked as _link_loose_parts describes, by the outward ``normals`` (see
+    outward_normals, zero where they don't count) when given. True and False
+    stand for 'POINT' and 'SURFACE', like the standalone add-on's point_cloud flag.
     """
     if isinstance(mode, bool):
         mode = 'POINT' if mode else 'SURFACE'
@@ -872,6 +1012,10 @@ def prepare_inpainting(V2, F2, W2, Matched, mode, virtual_merge_distance=0.0,
         raise InpaintingError("Match confidence must be one value in [0, 1] per vertex")
     if not np.isfinite(soft_length) or soft_length < 0:
         raise InpaintingError("Soft match length must be finite and non-negative")
+    if normals is not None:
+        normals = np.asarray(normals, dtype=np.float64)
+        if normals.shape != V.shape or not np.all(np.isfinite(normals)):
+            raise InpaintingError("Target normals must be one finite vector per vertex")
     confidence = np.where(matched, 1.0, confidence)
     # Inpainting does not change fully matched input. Seam synchronization is
     # deliberately separate and also operates on fully matched meshes.
@@ -911,8 +1055,17 @@ def prepare_inpainting(V2, F2, W2, Matched, mode, virtual_merge_distance=0.0,
                 L = sp.sparse.csr_matrix((coo.data, (active[coo.row], active[coo.col])), shape=(n, n))
                 mass[active] = local_M.diagonal()
             if mode == 'COMBINED':
+                if normals is not None:
+                    # Welded vertices face the way of their summed normals, or no known way where those
+                    # mostly cancel out.
+                    summed = np.zeros((n, 3))
+                    np.add.at(summed, merge_map, normals)
+                    known = np.bincount(merge_map, weights=np.any(normals != 0, axis=1), minlength=n)
+                    length = np.linalg.norm(summed, axis=1, keepdims=True)
+                    normals = np.divide(summed, length, out=np.zeros_like(summed),
+                                        where=(length > 0.5 * known[:, np.newaxis]) & (length > 0))
                 L, mass = _link_loose_parts(V, F, L, mass,
-                                            matched | ((confidence > 0) & (soft_length > 0)))
+                                            matched | ((confidence > 0) & (soft_length > 0)), normals)
         L = L.astype(np.float64).tocsr()
         if np.any(~np.isfinite(L.data)) or np.any(~np.isfinite(mass)) or np.any(mass < 0):
             raise InpaintingError("Inpainting produced an invalid Laplacian or mass matrix")
@@ -963,8 +1116,12 @@ def _solve_constrained(L, mass, soft_area, soft_length, data, known, unknown, ha
     Q_unknown = Q[unknown]
     # Dimensionally, area / length^4 matches the biharmonic term, and
     # area / length^2 the harmonic one.
-    penalty = np.minimum(soft_area[unknown] * scale,
-                         MAX_SOFT_STIFFNESS * np.abs(Q.diagonal()[unknown]))
+    stiffness = np.abs(Q.diagonal()[unknown])
+    penalty = np.minimum(soft_area[unknown] * scale, MAX_SOFT_STIFFNESS * stiffness)
+    # Nothing smooths a vertex that no face or link reaches (a wire thinner than BRIDGE_WELD, its rings each welded
+    # into one vertex, leaves some), so capping its penalty by that zero stiffness would leave an empty row. It
+    # stands alone, so any pull at all makes it keep its own weights.
+    penalty[stiffness == 0] = 1.0
     system = (Q_unknown[:, unknown] + sp.sparse.diags(penalty)).tocsc()
     rhs = penalty[:, np.newaxis] * data[unknown] - Q_unknown[:, known] @ data[known]
     with warnings.catch_warnings():
@@ -1060,62 +1217,3 @@ def inpaint(V2, F2, W2, Matched, mode, virtual_merge_distance=0.0,
         return True, solve_inpainting(domain)
     except (RuntimeError, ValueError, TypeError):
         return False, np.asarray(W2, dtype=np.float32)
-
-
-
-def limit_mask(weights, adjacency_matrix, dilation_repeat=5, limit_num=4):
-    if weights.shape[1] <= limit_num: return np.zeros_like(weights)
-    
-    count = np.count_nonzero(weights, axis=1)
-    to_limit = count > limit_num
-    k = weights.shape[1] - limit_num
-    weights_inds = np.argpartition(weights, kth=k, axis=1)[:, :k]
-    row_indices = np.arange(weights.shape[0])[:, None]
-    erode_mask = np.zeros_like(weights, dtype=bool)
-    erode_mask[row_indices, weights_inds] = True
-    erode_mask = np.logical_and(erode_mask, to_limit[:, np.newaxis])
-    erode_mask = sp.sparse.csr_array(erode_mask).astype(np.float32)
-    adj_mat = adjacency_matrix
-    degrees = adj_mat.sum(axis=1)
-    smooth_mat = (1/degrees[:, np.newaxis]) * adj_mat
-    for _ in range(dilation_repeat):
-        avg_weights = smooth_mat @ erode_mask
-        erode_mask = erode_mask.maximum(avg_weights)
-    
-    return erode_mask.toarray()
-
-
-def smooth_weigths(verts, weights, matched, adjacency_matrix, adjacency_list, num_smooth_iter_steps, smooth_alpha, distance_threshold):
-    not_matched = ~matched
-    VIDs_to_smooth = np.zeros(verts.shape[0], dtype=bool)
-
-    def get_points_within_distance(V, VID, distance=distance_threshold):
-        """
-        Get all neighbours of vertex VID within dDISTANCE_THRESHOLD
-        """
-        queue = []
-        queue.append(VID)
-        while len(queue) != 0:
-            vv = queue.pop()
-            if vv < len(adjacency_list):
-                neigh = adjacency_list[vv]
-                for nn in neigh:
-                    if ~VIDs_to_smooth[nn] and np.linalg.norm(V[VID,:]-V[nn]) < distance:
-                        VIDs_to_smooth[nn] = True
-                        if nn not in queue:
-                            queue.append(nn)
-
-    for i in range(verts.shape[0]):
-        if not_matched[i]:
-            get_points_within_distance(verts, i, distance_threshold)
-            
-    adj_mat = adjacency_matrix.astype(np.float32)
-    degrees = adj_mat.sum(axis=1)
-    
-    smooth_mat = sp.sparse.diags(1/degrees) @ adj_mat
-    weights_smoothed = sp.sparse.csr_array(weights)
-    for _ in range(num_smooth_iter_steps):
-        weights_smoothed = (1 - smooth_alpha) * weights_smoothed + smooth_alpha * (smooth_mat @ weights_smoothed)
-        weights_smoothed[~VIDs_to_smooth] = weights[~VIDs_to_smooth]
-    return weights_smoothed.todense()
-            

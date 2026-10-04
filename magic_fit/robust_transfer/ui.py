@@ -21,18 +21,17 @@ from .operators import (
 SECTIONS_CLOSED = True
 
 
-def _section(layout, idname, label, toggle=None, used=True):
-    """A collapsible section, optionally with a checkbox (``toggle``: (data, property)) in its header,
-    greyed out when not ``used``. Returns its body, or None while it's closed."""
+def _section(layout, idname, label, toggle=None):
+    """A collapsible section, optionally with a checkbox (``toggle``: (data, property)) in its header.
+    Returns its body, or None while it's closed."""
     header, body = layout.panel(idname, default_closed=SECTIONS_CLOSED)
-    header.active = used
     if toggle is None:
         header.label(text=label)
     else:
         header.use_property_split = False
         header.prop(*toggle, text=label)
     if body is not None:
-        body.active = used and (toggle is None or getattr(*toggle))
+        body.active = toggle is None or getattr(*toggle)
     return body
 
 
@@ -49,7 +48,7 @@ def _draw_settings(layout, settings):
     body = _section(layout, "magic_fit_transfer_settings", "Settings")
     if body is not None:
         body.operator(MAGIC_FIT_OT_reset_transfer_settings.bl_idname, icon='LOOP_BACK')
-        body.prop(settings, "inpaint_mode")
+        _prop_with_toggle(body, "Partial Reweight", settings, "partial_reweight", "partial_reweight_falloff")
         _prop_with_toggle(body, "Virtual Merge", settings, "virtual_merge", "virtual_merge_distance")
         _prop_with_toggle(body, "Seam Sync", settings, "seam_sync", "seam_distance")
         row = body.row()
@@ -60,29 +59,6 @@ def _draw_settings(layout, settings):
         row = body.row()
         row.enabled = not settings.enforce_four_bone_limit
         row.prop(settings, "group_selection")
-
-    body = _section(layout, "magic_fit_transfer_mapping", "Vertex Mapping")
-    if body is not None:
-        body.prop(settings, "max_distance")
-        _prop_with_toggle(body, "Partial Reweight", settings, "partial_reweight", "partial_reweight_falloff")
-        # Crease Smoothing grades the matches itself.
-        col = body.column(align=True)
-        col.active = not settings.crease_smoothing
-        col.prop(settings, "max_normal_angle_difference", text="Normal Angle")
-        col.prop(settings, "soft_normal_limit", text="Soft Limit")
-        col = body.column(heading="Normals")
-        col.active = not settings.crease_smoothing
-        col.prop(settings, "flip_vertex_normal", text="Allow Flipped")
-
-    body = _section(layout, "magic_fit_transfer_crease", "Crease Smoothing", (settings, "crease_smoothing"))
-    if body is not None:
-        body.prop(settings, "crease_softness", text="Width")
-
-    body = _section(layout, "magic_fit_transfer_smoothing", "Smoothing", (settings, "smoothing_enable"),
-                    used=not settings.crease_smoothing)
-    if body is not None:
-        body.prop(settings, "smoothing_repeat", text="Repeat")
-        body.prop(settings, "smoothing_factor", text="Factor")
 
     body = _section(layout, "magic_fit_transfer_limit", "Limit Groups per Vertex",
                     (settings, "enforce_four_bone_limit"))

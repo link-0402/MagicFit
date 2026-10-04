@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Settings of Robust Weight Transfer by sentfromspacevr (https://github.com/sentfromspacevr), GPL-2.0-or-later.
-# The body to transfer from is the one shared by all tools, `Scene.magic_fit.target`.
-
-import math
+# The body to transfer from is the one shared by all tools, `Scene.magic_fit.target`. There's one way of
+# matching (Crease Smoothing, which picks how to treat each part of the body by itself), so the standalone
+# add-on's Max Distance, normal angle, smoothing and Inpaint Mode settings are gone.
 
 import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty, StringProperty
@@ -71,109 +71,22 @@ class WeightTransferSettings(bpy.types.PropertyGroup):
         description="Transfer to every selected mesh, not only the active one",
         default=False,
     )
-    max_distance: FloatProperty(
-        name="Max Distance",
-        description=(
-            "How far from the body a vertex can be and still copy its weights directly. With Partial "
-            "Reweight, also where the transfer stops"
-        ),
-        default=0.05,
-        min=0,
-        unit='LENGTH',
-        subtype='DISTANCE',
-    )
     partial_reweight: BoolProperty(
         name="Partial Reweight",
         description=(
-            "Only transfer within Max Distance of the body. Weights further away are kept as they are"
+            "Only transfer within 5 cm of the body. Weights further away are kept as they are"
         ),
         default=False,
     )
     partial_reweight_falloff: FloatProperty(
         name="Falloff Width",
         description=(
-            "How much of Max Distance is used to fade into the old weights at the edge. Zero gives a hard cut"
+            "How much of the 5 cm is used to fade into the old weights at the edge. Zero gives a hard cut"
         ),
         default=20,
         min=0,
         max=100,
         subtype='PERCENTAGE',
-    )
-    max_normal_angle_difference: FloatProperty(
-        name="Max Normal Difference",
-        description=(
-            "How far the mesh may face away from the body and still copy its weights exactly. Keep it low; "
-            "Soft Normal Limit handles bigger angles more gently. Not used with Crease Smoothing"
-        ),
-        default=math.radians(30),
-        min=0,
-        max=math.pi,
-        precision=3,
-        step=100,
-        unit='ROTATION',
-        subtype='ANGLE',
-    )
-    soft_normal_limit: FloatProperty(
-        name="Soft Normal Limit",
-        description=(
-            "Vertices past Max Normal Difference still guide the filled-in weights, less and less up to this "
-            "angle. Keeps steep or detailed parts in place. Set it to Max Normal Difference to turn it off. "
-            "Not used with Crease Smoothing"
-        ),
-        default=math.radians(90),
-        min=0,
-        max=math.pi,
-        precision=3,
-        step=100,
-        unit='ROTATION',
-        subtype='ANGLE',
-    )
-    flip_vertex_normal: BoolProperty(
-        name="Allow Flipped Normals",
-        description=(
-            "Also match where the mesh faces the opposite way from the body. Crease Smoothing always does"
-        ),
-        default=True,
-    )
-    crease_smoothing: BoolProperty(
-        name="Crease Smoothing",
-        description=(
-            "Copy the body's weights where the mesh lies on it, and blend them where it bridges a crease, like "
-            "under the bust or between the legs. Stops posed or scaled bones pinching the mesh into the "
-            "crease. Replaces Normal Angle, Soft Limit, Allow Flipped and Smoothing"
-        ),
-        default=True,
-    )
-    crease_softness: FloatProperty(
-        name="Crease Width",
-        description=(
-            "How widely weights blend where the mesh floats above the body. Raise it for smoother blends "
-            "over hollows; lower it to follow the body's weights more closely"
-        ),
-        default=1.0,
-        min=0.25,
-        soft_max=2.0,
-        step=10,
-        precision=2,
-    )
-    smoothing_enable: BoolProperty(
-        name="Smoothing",
-        description="Smooth the filled-in weights. Not used with Crease Smoothing",
-        default=False,
-    )
-    smoothing_factor: FloatProperty(
-        name="Smoothing Factor",
-        description="How strongly each smoothing pass blends a vertex with its neighbours",
-        default=0.2,
-        min=0,
-        max=1,
-        step=10,
-    )
-    smoothing_repeat: IntProperty(
-        name="Smoothing Repeat",
-        description="How many smoothing passes to run",
-        default=4,
-        min=0,
     )
     enforce_four_bone_limit: BoolProperty(
         name="Limit Groups per Vertex",
@@ -198,26 +111,6 @@ class WeightTransferSettings(bpy.types.PropertyGroup):
             ('DEFORM_POSE_BONES', "Deform Pose Bones", "Only transfer the groups of the armature's deform bones"),
         ),
         default='DEFORM_POSE_BONES',
-    )
-    inpaint_mode: EnumProperty(
-        name="Inpaint Mode",
-        description="How weights are filled in where the body doesn't match",
-        # Files store each mode's number, which must stay the same; the list shows the usual one first.
-        items=(
-            ('COMBINED', "Combined",
-             "The usual choice. Weights spread along each part and to parts touching it, like a lining, but "
-             "don't jump gaps, like between the legs of loose pants. Seams stay closed",
-             2),
-            ('POINT', "Point",
-             "Weights spread to anything nearby, joined or not, so they can bleed across gaps, like from one "
-             "pant leg to the other. Only faster than Combined where big parts lie on each other",
-             0),
-            ('SURFACE', "Surface",
-             "Weights only spread along each part's own surface. Fails on parts with nothing matching the "
-             "body, and split seams can tear",
-             1),
-        ),
-        default='COMBINED',
     )
     virtual_merge: BoolProperty(
         name="Virtual Merge by Distance",

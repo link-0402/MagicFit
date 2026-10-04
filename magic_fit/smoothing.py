@@ -47,6 +47,7 @@ from . import fitting, goals, hairing, straighten
 from .goals import DEFAULT_MAX_GROUPS
 from .painting import MIN_CHANGE, deform_bone_names
 from .relaxing import _closest_on_triangles
+from .robust_transfer import dependencies
 
 # The weights around a vertex count out to this many times Reach; beyond that, the region a dab looks at
 # ends (the influence of weights farther away is small, and the farther the region goes, the slower a dab).
@@ -83,6 +84,7 @@ def _direct_solver():
         return None
     if not _direct:
         try:
+            dependencies.add_dll_directories()
             from scipy import sparse
             from scipy.sparse.linalg import splu
             _direct.append((sparse, splu))

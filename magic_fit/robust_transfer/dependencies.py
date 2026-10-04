@@ -4,10 +4,11 @@
 
 SciPy and robust-laplacian ship as wheels with the extension, which Blender installs where they fit:
 Windows (64-bit) with Blender 5.2's Python. Importing SciPy can take seconds the first time, so the
-solver modules are only imported when a transfer runs.
+solver modules are only imported when a transfer runs, after `add_dll_directories`.
 """
 
 import importlib.util
+import os
 import sys
 import sysconfig
 
@@ -18,6 +19,27 @@ WHEEL_PLATFORM = "win-amd64"
 WHEEL_PYTHON = (3, 13)
 
 _missing = None
+_dll_directories = {}  # folder -> what os.add_dll_directory returned
+
+
+def add_dll_directories():
+    """Let Windows find the DLLs SciPy's compiled modules load (OpenBLAS, in scipy.libs next to the scipy
+    package). Call before importing SciPy's submodules.
+
+    SciPy adds that folder itself, but only when it's first imported and only if the folder exists then.
+    Blender deletes and extracts the wheels again when an extension using them is reinstalled, and other
+    add-ons may import SciPy at any time: a session that imported it while the folder was missing failed
+    with "DLL load failed while importing _fblas" until Blender was restarted."""
+    if sys.platform != "win32":
+        return
+    try:
+        spec = importlib.util.find_spec("scipy")
+    except (ImportError, ValueError):
+        return
+    for location in (spec.submodule_search_locations if spec else None) or ():
+        folder = os.path.join(os.path.dirname(location), "scipy.libs")
+        if folder not in _dll_directories and os.path.isdir(folder):
+            _dll_directories[folder] = os.add_dll_directory(folder)
 
 
 def missing():
