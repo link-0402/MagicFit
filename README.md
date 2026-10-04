@@ -50,7 +50,7 @@ The **[Weight Brushes](docs/guide.md#weight-brushes)** fix weights where you pai
 - **Skirt** gives skirts and long dresses the weights of FFXIV's skirt bones, so they swing with the game's cloth physics.
 - **Heels** makes high heels and boots rigid below the ankle, so heels and soles don't bend.
 - **Hair** weights new hair to FFXIV's hair bones. It picks the hair skeleton that fits best and tells you which EST entry to set in Penumbra. When exporting the hair with Instant Edit, this EST setting is automatically written into the mod for you.
-- **Face** gives custom faces the weights of the game's face they replace: lids that meet when the game shuts the eyes, a mouth that moves like the game's, and lashes, teeth and piercings that follow along. Repairs fix just the lids, lashes, mouth, parts or neck, and test poses play the game's blink and expressions.
+- **Face** gives custom faces the weights of the game's face they replace: lids that meet when the game shuts the eyes, a mouth that moves like the game's, and lashes, teeth, tongue and piercings that follow along. Repairs fix just the lids, lashes, mouth, parts or neck, and test poses play the game's blink and expressions.
 **Note**: Face Weight mode is experimental and still being worked on for now and may not produce optimal results for sculpts that differ too greatly from the game's faces.  
 
 ### Body Fit
@@ -83,7 +83,7 @@ Only tested against Sims 4, VRChat and Unreal Engine models for the time being. 
 - **Ctrl Z undoes** every stroke and button.
 - **If a brush can't work yet,** for example because no body is picked, its cursor turns dashed and shows why.
 - **For hair,** set the EST entry that Hair shows in your mod: in Penumbra, under **Edit Mod → Meta Manipulations**, as an **Extra Skeleton Parameters** entry.
-- **For faces,** select the face together with its eyes, lashes and other parts before clicking **Face Weights**.
+- **For faces,** set the face and its parts (eyes, lashes, teeth, tongue, piercings) under **Meshes** on the Face sub-tab before clicking **Face Weights**: select them all and click **Fill from Selection**, then check what each one was taken for.
 
 ## Credits
 

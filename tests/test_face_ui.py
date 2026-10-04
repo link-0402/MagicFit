@@ -138,6 +138,20 @@ def steps():
         check(bpy.ops.magic_fit.face_weights.poll(), "button: ready for a face without weights")
     env.screenshot("face_01_sidebar.png")
 
+    # --- Meshes: Fill from Selection sets the face and its parts; Face Weights then works on those.
+    with env.override(sidebar):
+        result = bpy.ops.magic_fit.face_meshes_from_selection('EXEC_DEFAULT', True)
+    env.redraw()
+    yield 0.4
+    others = [item.object for item in settings.face_others]
+    check(result == {'FINISHED'} and settings.face_skin == skin and settings.face_eyeballs in (
+          objects["eye_l"], objects["eye_r"]) and objects["etc"] in others,
+          "meshes: Fill from Selection sets the face, an eyeball and the other parts")
+    env.screenshot("face_01b_meshes.png")
+    face.select([], None)
+    with env.override(sidebar):
+        check(bpy.ops.magic_fit.face_weights.poll(), "meshes: Face Weights is ready with nothing selected")
+
     # --- The button: detection, armature, weights, neck, all in one undo step.
     with env.override(sidebar):
         bpy.ops.ed.undo_push(message="Before face weights")

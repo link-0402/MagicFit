@@ -367,9 +367,25 @@ FFXIV moves faces with a **face skeleton**: bones for the eyelids, eyeballs, bro
 1. Import the face mod with all its meshes (face, eyes, lashes, teeth, piercings), where TexTools, Instant Edit and Yet Another Addon put imported models. With an armature, `j_kao` can be anywhere as long as the face sits on it.
 2. Open the **Face** sub-tab.
 3. Set the **Game Face**. **Detect** reads it from a name like `c0801f0002` on the object, mesh or material. Without one, it guesses by shape: usually the right race, but often the wrong face number, and the report says so. **Pick** lets you choose the race and face from a list.
-4. Select the face and its parts and click **Face Weights**. It adds the face bones to the armature (or makes a new **Face Skeleton**), weights the face and each part, and reports what it did.
-5. Check the result with the **Test Poses**: **Blink**, **Shut Eyes** (the game's Shut Eyes expression, which the Bow emote's face uses too), **Talk**, **Shout**, **Angry**, **Clench**, **Ouch**, **Die** and **Salute**. **Rest** puts the bones back.
-6. To fix a spot, paint with **Paint Face Weights**. For a part, select the face too.
+4. Under **Meshes**, set the face and its parts: select them all and click **Fill from Selection**, then check each one and change any that's wrong. Or pick them one by one.
+5. Click **Face Weights**. It adds the face bones to the armature (or makes a new **Face Skeleton**), weights the face and each part, and reports what it did.
+6. Check the result with the **Test Poses**: **Blink**, **Shut Eyes** (the game's Shut Eyes expression, which the Bow emote's face uses too), **Talk**, **Shout**, **Angry**, **Clench**, **Ouch**, **Die** and **Salute**. **Rest** puts the bones back.
+7. To fix a spot, paint with **Paint Face Weights**. To paint a part, it must be under Meshes (or, with no Face set, select the face too).
+
+**Meshes** says which mesh is what. Only the Face is needed, but parts not set here aren't weighted (the report names any that are selected). A mesh may be set as two parts, like teeth and tongue in one mesh.
+
+| Mesh | What it is |
+| --- | --- |
+| Face | The skin, with the lips and the neck opening. Loose parts of it inside the mouth (a mouth socket, teeth) are found by themselves. |
+| Eyeballs | Both eyeballs. The eye openings and lid edges are measured against them. |
+| Lashes | Lashes, and the tear lines over the eyes. Any number of meshes: pick one in the empty field below the list to add it. |
+| Teeth | The teeth and gums, both rows. |
+| Tongue | The tongue. |
+| Mouth Inside | The inside of the mouth (its socket or bag), when it's a mesh of its own. |
+| Tongue Piercing | A piercing through the tongue. |
+| Other Parts | Anything else: brows, makeup, liner, piercings, jewellery, horns, ears, beards, or a second eyeball or teeth mesh. Each is weighted by what it is and where it sits. |
+
+With no Face set, the face tools use the selected meshes and tell their parts apart by themselves. **Fill from Selection** shows what they're taken for.
 
 How the face is weighted:
 
@@ -381,32 +397,36 @@ How the face is weighted:
   - **Lashes** follow the lid they grow from, taking the weights of the skin under their roots, so they stay on it as it closes. Their tips lag slightly, like the game's.
   - **Films and tear lines** over the eye stretch between the lids.
   - **Brows, makeup and liner** on the skin take the skin's weights.
-  - **Teeth and tongue** take the game's mouth weights.
+  - **Teeth and gums** follow the gum bones like the game's: the upper row `j_f_hagukiup`, the lower row `j_f_hagukidn`. The rows are told apart by their shape, not by where the game's teeth are, so they part when the mouth opens even if your teeth sit lower or farther back. Gums of both rows in one piece blend from one bone to the other where they join.
+  - **The tongue** takes the game's tongue weights, matched to the game's tongue from the tip back, so a tongue modelled only to its visible front bends like the front of the game's.
+  - **The inside of the mouth** (a socket or bag) follows the teeth and lips next to it, the upper teeth at its roof and the lower teeth at its floor, never the tongue, so the teeth don't pass through it and it doesn't pass through the face.
+  - **A tongue piercing** moves as one piece with the tongue where it sits, balls and bar together.
   - **Ears, horns, scales, beards and whiskers** take the game's weights for those parts.
-  - **Everything else** (piercings, jewellery) moves as one piece with the skin it's attached to.
-  - Meshes weighted mostly to non-face bones (hair, Viera ears, the body) are left out, and reported.
+  - **Everything else** (piercings, jewellery) moves as one piece with the skin it's attached to, or inside the mouth with the teeth or tongue it's on. A chain lying along the skin follows it link by link; a barbell's balls move with its bar.
+  - Meshes weighted mostly to non-face bones (hair, Viera ears, the body) are left out, and reported. Meshes set as Eyeballs, Lashes, Teeth, Tongue, Mouth Inside or Tongue Piercing never are; Other Parts can be.
 - Only bone weights change, and locked groups are never changed.
 
-The **Face Repairs** fix one thing on a face whose weights are otherwise fine. Select the face and the parts that go with the repair.
+The **Face Repairs** fix one thing on a face whose weights are otherwise fine. They work on the Meshes: on the selected ones among them, or all of them when none is selected (with no Face set, on the selected meshes). Each only changes what goes with it.
 
 | Repair | What it does |
 | --- | --- |
 | Fix Eyelids | Weights the lids like the game's face, meeting in the Shut Eyes expression, with the lashes and films following them. |
-| Snap Lashes | For lashes that float off or sink into the lids: moves them out or in until their roots sit on the lids (plus **Lash Lift** farther out), keeping their shape and where they are along the lid, then weights them. Only lashes far past the lid's edge move along it. Lashes aren't pushed into the skin, at rest or with the eyes shut. Select the face, the lashes and the eyeballs. |
-| Fix Mouth | Weights the lips and mouth like the game's face, with teeth, tongue and lip piercings following. |
-| Attach Parts | Weights the selected parts to follow the face's current weights. The face keeps its weights. |
+| Snap Lashes | For lashes that float off or sink into the lids: moves them out or in until their roots sit on the lids (plus **Lash Lift** farther out), keeping their shape and where they are along the lid, then weights them. Only lashes far past the lid's edge move along it. Lashes aren't pushed into the skin, at rest or with the eyes shut. With no Face set, select the face, the lashes and the eyeballs. |
+| Fix Mouth | Weights the lips and mouth like the game's face, with the teeth, tongue, the inside of the mouth and the piercings in and around it following. |
+| Attach Parts | Weights the parts to follow the face's current weights. The face keeps its weights. |
 | Match Neck | Gives the neck the game's weights, and its opening the game's positions, normals and weights. |
 
 Good to know:
 
 - **Use the face the mod replaces,** the one in its file name. Au Ra and Viera faces 101 to 104 use faces 1 to 4.
-- **Select the eyeballs too,** for the repairs as well. The eye openings and lid edges are measured against them; without them, the report warns. Eyeballs too big for the lids poke through when the eyes are shut, and the report says so.
+- **Set the eyeballs too** (or, with no Face set, select them), for the repairs as well. The eye openings and lid edges are measured against them; without them, the report warns. Eyeballs too big for the lids poke through when the eyes are shut, and the report says so.
 - **Face Weights replaces all bone weights.** Lock the groups you want to keep, or use a repair.
 - **NPC faces:** faces 91 and 92 have no eyeball bones, so eyeballs follow the eye bones. Other NPC faces aren't supported.
 
 | Option | What it does |
 | --- | --- |
 | Game Face | **Detect** finds the game face from names or shape. **Pick** uses the one you choose. |
+| Meshes | The face and its parts (see above). **Fill from Selection** sets them from the selected meshes, the trash can empties them. |
 | Close Eyes | Makes the lids just meet in the game's Shut Eyes expression, without stopping short or sliding past each other. |
 | Match Neck | Gives the neck opening the game's positions, normals and weights. |
 | Max Groups | At most this many bone weights per vertex. |

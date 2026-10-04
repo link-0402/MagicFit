@@ -3,6 +3,7 @@
 import bpy
 from bpy.props import (
     BoolProperty,
+    CollectionProperty,
     EnumProperty,
     FloatProperty,
     FloatVectorProperty,
@@ -16,6 +17,38 @@ def _poll_mesh(_self, obj):
     # The active mesh is offered too: the body is often the one last clicked, and hiding it made the
     # picker look broken. The tools refuse to use the mesh being edited as its own body.
     return obj.type == 'MESH'
+
+
+FACE_LISTS = ("face_lashes", "face_others")
+
+
+def _prune_face_lists(_self, context):
+    # A mesh cleared from a list (its picker's X) leaves the list.
+    settings = context.scene.magic_fit
+    for prop in FACE_LISTS:
+        items = getattr(settings, prop)
+        for index in reversed(range(len(items))):
+            if items[index].object is None:
+                items.remove(index)
+
+
+class FacePart(bpy.types.PropertyGroup):
+    """A mesh in one of the Face panel's lists (Lashes, Other Parts)."""
+    object: PointerProperty(name="Mesh", type=bpy.types.Object, poll=_poll_mesh, update=_prune_face_lists)
+
+
+def _adder(collection, prop):
+    """An update for picker ``prop`` that adds the mesh picked to list ``collection`` and empties itself again, so the
+    list ends in an empty picker for the next mesh."""
+    def update(self, _context):
+        obj = getattr(self, prop)
+        if obj is None:
+            return
+        items = getattr(self, collection)
+        if all(item.object != obj for item in items):
+            items.add().object = obj
+        setattr(self, prop, None)
+    return update
 
 
 # Same curves as Blender's brush falloff presets, see `falloff_weights`.
@@ -551,6 +584,72 @@ class MagicFitSettings(bpy.types.PropertyGroup):
         max=32,
         soft_max=8,
     )
+    # The meshes Face Weights, the repairs, the brush and the Test Poses work on (Face Weights' Meshes). Each picker is
+    # what its mesh is; a mesh may be in several (teeth and tongue in one mesh). The lists take any number of meshes.
+    face_skin: PointerProperty(
+        name="Face",
+        description=(
+            "The face: the mesh with the skin, lips and neck opening. Its loose parts inside the mouth (a mouth "
+            "socket, teeth) are found by themselves"
+        ),
+        type=bpy.types.Object,
+        poll=_poll_mesh,
+    )
+    face_eyeballs: PointerProperty(
+        name="Eyeballs",
+        description="The eyeballs, which follow the eyeball bones. The eye openings and lids are measured against them",
+        type=bpy.types.Object,
+        poll=_poll_mesh,
+    )
+    face_lashes: CollectionProperty(type=FacePart)
+    face_add_lash: PointerProperty(
+        name="Lashes",
+        description="Add a mesh with lashes (or tear lines over the eyes): it follows the lids",
+        type=bpy.types.Object,
+        poll=_poll_mesh,
+        update=_adder("face_lashes", "face_add_lash"),
+    )
+    face_teeth: PointerProperty(
+        name="Teeth",
+        description=(
+            "The teeth and gums. Each row follows its gum bone (j_f_hagukiup above, j_f_hagukidn below), so the rows "
+            "part when the mouth opens. May be the Tongue's mesh too"
+        ),
+        type=bpy.types.Object,
+        poll=_poll_mesh,
+    )
+    face_tongue: PointerProperty(
+        name="Tongue",
+        description="The tongue: it gets the game's tongue weights, fitted to its shape. May be the Teeth's mesh too",
+        type=bpy.types.Object,
+        poll=_poll_mesh,
+    )
+    face_mouth: PointerProperty(
+        name="Mouth Inside",
+        description=(
+            "The inside of the mouth (its socket or bag), when it's a mesh of its own: it follows the teeth and lips "
+            "around it, so they don't pass through it. One that's a loose part of the Face is found by itself"
+        ),
+        type=bpy.types.Object,
+        poll=_poll_mesh,
+    )
+    face_tongue_piercing: PointerProperty(
+        name="Tongue Piercing",
+        description="A piercing through the tongue: it moves as one piece with the tongue, where it sits on it",
+        type=bpy.types.Object,
+        poll=_poll_mesh,
+    )
+    face_others: CollectionProperty(type=FacePart)
+    face_add_other: PointerProperty(
+        name="Other Parts",
+        description=(
+            "Add another part of the face: brows, makeup, piercings, horns, ears, beards. Each is weighted by what it "
+            "is and where it sits"
+        ),
+        type=bpy.types.Object,
+        poll=_poll_mesh,
+        update=_adder("face_others", "face_add_other"),
+    )
     smooth_reach: FloatProperty(
         name="Reach",
         description=(
@@ -1060,6 +1159,7 @@ class ClippingSettings(bpy.types.PropertyGroup):
 
 
 classes = (
+    FacePart,
     MagicFitSettings,
     HairWeightsState,
     BodyFitBrushSettings,
