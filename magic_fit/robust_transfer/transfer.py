@@ -3,7 +3,10 @@
 # Object.magic_fit_transfer, Crease Smoothing trusts each match by how far
 # the mesh floats above the body (weighttransfer.bridge_confidence), a
 # transfer clears the deform groups the body doesn't have, and there's no
-# L/R group balancing.
+# L/R group balancing. 2026-10: normals are compared as each loose part
+# faces the body (weighttransfer.facing_cosines), Crease Smoothing is the
+# only matching (no Max Distance, normal angles, Inpaint Mode or smoothing
+# settings), and fingers and toes are handled on their own (digit_columns).
 import numpy as np
 
 from . import util, seams, weighttransfer
@@ -12,9 +15,9 @@ WRITE_THRESHOLD = 1e-5
 # Rigid weights below this round to nothing in FFXIV's 8-bit vertex weights (half a step), so they're dropped.
 RIGID_THRESHOLD = 0.5 / 255.0
 WEIGHT_TOLERANCE = 1e-7
-# Weak matches are smoothed below this fraction of Max Distance: the farther a
-# garment may sit from the source, the less precise its closest points are.
-SOFT_LENGTH_FACTOR = 0.25
+# How far from the body a match counts, and Partial Reweight reaches. Farther, a vertex only anchors its
+# loose part. 2.5 or 10 cm gave the same weights on every garment tried.
+MAX_DISTANCE = 0.05
 
 
 def armature_key(obj, fallback=None):
@@ -157,51 +160,49 @@ def distance_strength(squared_distances, radius, falloff_percent):
     return 1 - t * t * (3 - 2 * t)
 
 
-def soft_length(settings):
-    """The length below which weak matches are smoothed out: fixed for Crease Smoothing, where it
-    cancels out of the matches' pull, otherwise a share of Max Distance."""
-    if settings.crease_smoothing:
-        return weighttransfer.BRIDGE_SOFT_LENGTH
-    return settings.max_distance * SOFT_LENGTH_FACTOR
-
-
 def weld_distance(settings):
-    """How close vertices must be to be welded for the solve. Crease Smoothing always welds coincident
-    ones, so split seams get the same weights on both sides."""
+    """How close vertices must be to be welded for the solve. Coincident ones always are, so split seams
+    get the same weights on both sides."""
     weld = settings.virtual_merge_distance if settings.virtual_merge else 0.0
-    return max(weld, weighttransfer.BRIDGE_WELD) if settings.crease_smoothing else weld
+    return max(weld, weighttransfer.BRIDGE_WELD)
+
+
+def digit_columns(names):
+    """Which of the body's groups ``names`` are finger or toe bones (weighttransfer.DIGIT_BONE)."""
+    return np.array([bool(weighttransfer.DIGIT_BONE.match(name)) for name in names], dtype=bool)
 
 
 def match_target(target, source_vertices, source_triangles, source_normals,
-                 source_weights, settings, surface_bvh, strides=None):
+                 source_weights, settings, surface_bvh, strides=None, digits=None):
+    """Match ``target`` to the body. ``digits``: which weight columns are finger or toe bones (digit_columns)."""
     match = weighttransfer.match_closest_surface(
-        source_vertices, source_triangles, source_normals,
-        target['vertices'], target['normals'], source_weights,
-        settings.flip_vertex_normal, surface_bvh)
+        source_vertices, source_triangles, source_normals, target['vertices'], source_weights, surface_bvh)
+    # How the normals agree, each loose part turned the way it faces the body: negative where the body
+    # touches the mesh from outside (a thigh against the edge of a leotard's crotch), not under it.
+    cosines = weighttransfer.facing_cosines(target['vertices'], target['triangles'], target['normals'],
+                                            match.normals, match.distances)
     masked = inpaint_mask(target['obj']) if not settings.apply_to_selected else None
-    target.update(weights=match.weights, masked=masked)
-    if settings.crease_smoothing:
-        # Every match is soft, trusted by how high the mesh floats above the body and how well the
-        # normals agree (either way round): where it lies on the body it copies its weights, where it
-        # spans a crease they're inpainted smoothly from both sides. prepare_batch works it out again
-        # over meshes sharing a solve.
-        target.update(distances=match.distances, cosines=np.abs(np.cos(np.radians(match.angles))))
-        bridge_trust([target], settings)
-        if strides is not None:
-            target.update(strides=strides, points=match.points, point_normals=match.normals,
-                          closest_weights=match.weights.copy(),
-                          leg_share=(match.weights @ strides['legs']).max(axis=1))
-    else:
-        max_angle = np.degrees(settings.max_normal_angle_difference)
-        confidence = weighttransfer.match_confidence(
-            match.distances, match.angles, settings.max_distance, max_angle,
-            max(max_angle, np.degrees(settings.soft_normal_limit)))
-        if masked is not None:
-            confidence[masked] = 0
-        target.update(matched=confidence >= 1, confidence=confidence)
+    digit_share = (weighttransfer.digit_share(match.weights, digits) if digits is not None
+                   else np.zeros(len(match.weights)))
+    # Over fingers and toes, Combined doesn't link parts whose outsides face each other, like the plates on
+    # two fingers of a glove.
+    outward = weighttransfer.outward_normals(target['vertices'], target['triangles'], target['normals'],
+                                             match.normals, match.distances)
+    outward *= (digit_share >= weighttransfer.DIGIT_SHARE[0])[:, np.newaxis]
+    # Every match is soft, trusted by how high the mesh floats above the body: where it lies on the body
+    # it copies its weights, where it spans a crease they're inpainted smoothly from both sides.
+    # prepare_batch works it out again over meshes sharing a solve.
+    target.update(weights=match.weights, masked=masked, outward=outward, digit_share=digit_share,
+                  distances=match.distances, cosines=cosines, points=match.points)
+    bridge_trust([target], settings)
+    if strides is not None:
+        # Where the body touches the mesh from outside, there's no leg under it to follow.
+        outside = np.nan_to_num(cosines, nan=0.0) < 0
+        target.update(strides=strides, point_normals=match.normals, closest_weights=match.weights.copy(),
+                      leg_share=np.where(outside, 0.0, (match.weights @ strides['legs']).max(axis=1)))
     if settings.partial_reweight:
         target['strength'] = distance_strength(
-            match.distances ** 2, settings.max_distance, settings.partial_reweight_falloff)
+            match.distances ** 2, MAX_DISTANCE, settings.partial_reweight_falloff)
 
 
 def batches(targets, across, fallback=None):
@@ -218,16 +219,17 @@ def target_confidence(target):
 
 
 def bridge_trust(batch, settings):
-    """Crease Smoothing's trust (weighttransfer.bridge_confidence) of meshes sharing a solve, worked
-    out over all of them, so the seams between them don't count as borders. Vertices without faces
-    keep the body's weights; the Inpaint Mask's vertices are inpainted."""
+    """The trust in the matches (weighttransfer.bridge_confidence) of meshes sharing a solve, worked out
+    over all of them, so the seams between them don't count as borders. Vertices without faces keep the
+    body's weights; the Inpaint Mask's vertices are inpainted."""
     offsets = np.cumsum([0] + [len(t['vertices']) for t in batch])
     confidence = weighttransfer.bridge_confidence(
         np.concatenate([t['vertices'] for t in batch]),
         np.concatenate([t['triangles'] + offset for t, offset in zip(batch, offsets)]),
         np.concatenate([t['distances'] for t in batch]), np.concatenate([t['cosines'] for t in batch]),
-        soft_length(settings), weighttransfer.BRIDGE_SOFTNESS * settings.crease_softness,
-        weld_distance(settings), settings.max_distance)
+        np.concatenate([t['points'] for t in batch]), weighttransfer.BRIDGE_SOFT_LENGTH,
+        weld_distance(settings), MAX_DISTANCE,
+        np.concatenate([t.get('digit_share', np.zeros(len(t['vertices']))) for t in batch]))
     for target, start, end in zip(batch, offsets, offsets[1:]):
         trust = confidence[start:end].copy()
         faceless = np.ones(len(trust), dtype=bool)
@@ -239,7 +241,7 @@ def bridge_trust(batch, settings):
 
 
 def prepare_batch(batch, settings):
-    if settings.crease_smoothing and len(batch) > 1 and all('cosines' in t for t in batch):
+    if len(batch) > 1 and all('cosines' in t for t in batch):
         bridge_trust(batch, settings)
     offsets = np.cumsum([0] + [len(t['vertices']) for t in batch])
     domain = weighttransfer.prepare_inpainting(
@@ -247,10 +249,11 @@ def prepare_batch(batch, settings):
         np.concatenate([t['triangles'] + offset for t, offset in zip(batch, offsets)]),
         np.concatenate([t['weights'] for t in batch]),
         np.concatenate([t['matched'] for t in batch]),
-        settings.inpaint_mode,
+        'COMBINED',
         weld_distance(settings),
         np.concatenate([target_confidence(t) for t in batch]),
-        soft_length(settings),
+        weighttransfer.BRIDGE_SOFT_LENGTH,
+        np.concatenate([t['outward'] for t in batch]) if all('outward' in t for t in batch) else None,
     )
     return domain, offsets
 
@@ -268,13 +271,9 @@ def solve_targets(targets, settings, fallback=None, partial=False):
             if np.any(domain.rejected) and not partial:
                 affected = [t['obj'].name for t, start, end in zip(batch, offsets, offsets[1:])
                             if np.any(domain.rejected[start:end])]
-                if settings.crease_smoothing:
-                    advice = ('. They lie wholly in the Inpaint Mask. Shrink the Inpaint Mask, enable '
-                              'Partial Reweight, or use Select Rejected Loose Parts.')
-                else:
-                    advice = ('. Increase Max Distance or Soft Normal Limit, enable Virtual Merge or '
-                              'Partial Reweight, or use Select Rejected Loose Parts.')
-                raise ValueError('No usable match for loose parts in ' + ', '.join(affected) + advice)
+                raise ValueError('No usable match for loose parts in ' + ', '.join(affected)
+                                 + '. They lie wholly in the Inpaint Mask. Shrink the Inpaint Mask, enable '
+                                 'Partial Reweight, or use Select Rejected Loose Parts.')
             solved = weighttransfer.solve_inpainting(domain, skip_rejected=partial)
         except (RuntimeError, ValueError) as error:
             names = ', '.join(t['obj'].name for t in batch)
@@ -284,8 +283,7 @@ def solve_targets(targets, settings, fallback=None, partial=False):
             target['harmonic_fallback'] = domain.harmonic_fallback
             if partial:
                 target['supported'] = ~domain.rejected[start:end]
-        if settings.crease_smoothing:
-            follow_hems(batch, domain, settings, partial)
+        follow_hems(batch, domain, settings, partial)
 
 
 def follow_hems(batch, domain, settings, partial):
@@ -317,10 +315,10 @@ def follow_hems(batch, domain, settings, partial):
         return
     priors, confidences = [], []
     for target, pull in zip(batch, pulls):
-        # The Inpaint Mask keeps its vertices free, and Max Distance is as far as matches reach.
+        # The Inpaint Mask keeps its vertices free, and MAX_DISTANCE is as far as matches reach.
         pull[target_confidence(target) <= 0] = 0
         if 'distances' in target:
-            pull[target['distances'] > settings.max_distance] = 0
+            pull[target['distances'] > MAX_DISTANCE] = 0
         prior = target.get('closest_weights', target['weights']).astype(np.float64).copy()
         pulled = pull > 1e-3
         if np.any(pulled):
@@ -348,32 +346,12 @@ def follow_hems(batch, domain, settings, partial):
 
 
 def process_weights(target, settings):
-    """Smooth/limit candidates on the supported mesh before mask blending."""
-    obj = target['obj']
+    """Limit the groups of the supported vertices before mask blending. The solve already smoothed what it
+    should; smoothing more would blur the weights where the mesh lies on the body."""
     active = np.flatnonzero(target.get('supported', np.ones(len(target['vertices']), bool)))
-    if not len(active):
-        return
-    weights = target['weights'][active].copy()
-    if settings.crease_smoothing:
-        # The solve already smoothed what it should; smoothing more would blur the weights where the
-        # mesh lies on the body.
-        if settings.enforce_four_bone_limit:
-            weights = weighttransfer.limit_groups_smoothly(weights, settings.num_limit_groups)
-        target['weights'][active] = weights
-        return
-    adjacency = util.get_mesh_adjacency_matrix_sparse(obj.data, include_self=True)[active][:, active]
-    if settings.smoothing_enable:
-        neighbors = [[int(j) for j in adjacency.indices[adjacency.indptr[i]:adjacency.indptr[i + 1]]
-                      if j != i]
-                     for i in range(len(active))]
-        weights = np.asarray(weighttransfer.smooth_weigths(
-            target['vertices'][active], weights, target['matched'][active], adjacency,
-            neighbors, settings.smoothing_repeat, settings.smoothing_factor, settings.max_distance))
-    if settings.enforce_four_bone_limit:
-        weights[weights <= 0.0001] = 0
-        weights *= 1 - weighttransfer.limit_mask(weights, adjacency, limit_num=settings.num_limit_groups)
-        weights[weights <= 0.0001] = 0
-    target['weights'][active] = weights
+    if len(active) and settings.enforce_four_bone_limit:
+        target['weights'][active] = weighttransfer.limit_groups_smoothly(
+            target['weights'][active], settings.num_limit_groups)
 
 
 def stage_weights(target, names, included, apply_mask=False, clear_others=False):

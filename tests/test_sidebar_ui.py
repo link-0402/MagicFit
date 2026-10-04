@@ -131,9 +131,8 @@ def steps():
     check(sidebar.width == 280 and per_row == 3,
           "default sidebar: the tabs take two rows, three in the first ({:d} px, {:d})".format(sidebar.width, per_row))
     fit = scene.body_fit_brush
-    check(fit.mode == 'FIT' and abs(fit.offset - 0.001) < 1e-9 and not fit.lineup_stretch and not fit.resize_use_keys
-          and scene.magic_fit_transfer.inpaint_mode == 'COMBINED',
-          "defaults: Fit at 1 mm, no stretched limbs, no shapekeys, Combined inpainting")
+    check(fit.mode == 'FIT' and abs(fit.offset - 0.001) < 1e-9 and not fit.lineup_stretch and not fit.resize_use_keys,
+          "defaults: Fit at 1 mm, no stretched limbs, no shapekeys")
 
     # --- Every tab and sub-tab shows its own panels, and only those.
     for number, (tab, sub, expected) in enumerate(EXPECTED, 1):

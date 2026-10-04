@@ -48,28 +48,22 @@ If a brush can't work yet (no body picked, a group is missing…), its cursor tu
 
 Each vertex is matched to the closest point on the body. Where the mesh lies on the body, it copies the body's weights. Everywhere else, the weights are *inpainted*: filled in as smoothly as the weights around them allow. This means fabric between the legs, across the cleavage or under the arms blends between both sides, and needs no smoothing afterwards.
 
-**Crease Smoothing** (on by default) decides how much each vertex trusts the body under it:
+There are no matching settings. The transfer decides by itself how much each vertex trusts the body under it:
 
-- **On the skin** (within a few millimetres, facing within about 11° of the body), it copies the body's weights. Poses and Customize+ then move it along with the skin.
-- **Floating higher**, it only loosely shapes the weights around it. From about 1.3 cm up, it only anchors its loose part.
-- **Turning away from the body** (11° to 25°), as where a dress lifts off the butt, it lets go.
-
-So where the mesh spans a crease (the butt cleft, between the legs or breasts, under the bust), the weights of both sides blend smoothly across it. Scaled or posed bones can't fold the fabric into the crease or push the body through it. **Width** (1) sets how far the weights blend. 2 blends twice as far, up to about 4 cm.
+- **On the skin** (within about 1 cm), it copies the body's weights, even where its surface turns away from the skin's: clothing rarely follows the body's curves exactly (seams, plates, low-poly shapes). Poses and Customize+ then move it along with the skin.
+- **Floating higher**, it only loosely shapes the weights around it. From about 2.5 cm up, it only anchors its loose part.
+- **Bridging a crease** (the butt cleft, between the legs or breasts, under the bust), the weights of both sides blend smoothly across it. The transfer finds these bridges where the body under the mesh jumps from one side of a crease to the other while the mesh floats above it, and blends within about 1.5 cm of them. There, a vertex turning away from the body (11° to 25°), as where a dress lifts off the butt, lets go of it, unless it still lies on the skin (within about 2.5 mm): that part of the mesh follows the skin under it, like elsewhere. Scaled or posed bones can't fold the fabric into the crease or push the body through it.
+- **Touched from outside**, like the edges of a leotard's crotch between the thighs, it lets go too: skin pressing on the mesh's outer side isn't the skin it covers. Those edges take the weights of the rest of the strip, so the crotch doesn't pull apart when the legs spread. Each loose part counts as facing the way most of it faces the body, so back-face layers still work.
+- **On fingers and toes**, it copies the body's weights even next to a bridge, like a glove's webbing: each finger of a glove has to follow its own.
 
 - **Hems** trust the body a bit more within 4 cm of a single-layer edge. A hem along a thigh follows the thigh, while a strap across a crease still blends.
 - **Hem Follow** tests hems over the legs in four walking strides, plain and with the thighs and butt scaled up. Where a thigh would poke through the hem, the hem takes more of that leg's weights. It needs the thigh bones `j_asi_a_l` and `j_asi_a_r`.
 
+Weights spread along each loose part, so they don't jump gaps like the one between loose pant legs. Split seams are welded, and separate parts are linked where they touch, like a lining or a belt, so they move together. On the fingers and toes, parts whose outsides face each other aren't linked, like the plates on two fingers of a glove pressed together. A part that nothing anchors takes the weights of whatever is around it.
+
 **Pose and Customize+ don't matter.** Meshes that follow the body's armature are matched in the rest pose, so you get the same weights with Customize+ on or off. Other meshes, like gear on its own skeleton, are matched as shown, without Customize+. **Utilities → Inpaint** works on meshes in the same pose.
 
 **Use Deformed** uses shape keys and modifiers: **Body** for the body, **Meshes** for the meshes you transfer to. Modifiers that change the vertex count (Mirror, Subdivision…) must be applied first, or turn **Meshes** off.
-
-**Inpaint Mode** sets how weights spread where nothing matches:
-
-- **Combined** (default) follows the mesh within each loose part, so weights don't jump gaps like the one between loose pant legs. It welds split seams and links separate parts only where they touch, like a lining or a belt.
-- **Point** lets weights flow between loose parts, but also across narrow gaps within one part, where they bleed over.
-- **Surface** keeps weights within each loose part. It can't fill a loose part that doesn't match the body anywhere.
-
-**Without Crease Smoothing**, a vertex within **Max Distance** whose normal is within **Normal Angle** (30°) of the body's copies the body's weights exactly. **Allow Flipped** also accepts normals facing the other way. Up to **Soft Limit** (90°), vertices pull the weights partway toward the body's. Everything else is inpainted.
 
 ### Masks and Rigid
 
@@ -77,6 +71,7 @@ Each mesh has two masks. **Apply to All Selected** ignores them.
 
 - **Transfer Mask**: only transfer where this vertex group has weight. The arrows invert it.
 - **Inpaint Mask**: vertices in this group (above **Threshold**) are inpainted instead of copied. **Utilities → Inpaint** uses it on its own, to repair a mesh's existing weights.
+  - A thong or a narrow crotch strip lying in the groove between the buttocks or thighs copies the walls on either side, so its halves pull apart when the legs spread wide. In the Inpaint Mask, it blends evenly between both legs instead, but thighs scaled up a lot (with Customize+) then press through it more.
 
 **Rigid** (the checkbox below the masks) is for hard parts like buckles, plates or jewellery. All its vertices get the same weights, so the part moves as one piece when posed or scaled.
 
@@ -91,21 +86,16 @@ Each mesh has two masks. **Apply to All Selected** ignores them.
 - The transfer replaces the mesh's bone weights. Bone groups the body doesn't have (like an imported mod's skirt bones) are cleared where it writes, unless locked.
 - If anything fails, nothing is written.
 
-**If the transfer stops with an error** about loose parts that can't be filled, **Utilities → Select Rejected Loose Parts** (in Edit Mode) selects them. To fix it, raise Max Distance or Soft Limit, turn on **Virtual Merge** or **Partial Reweight**, or switch from Surface to Combined. With Crease Smoothing, this only happens to a loose part that lies wholly in the Inpaint Mask.
+**If the transfer stops with an error** about loose parts that can't be filled, the Inpaint Mask covers the whole mesh, so nothing anchors its weights. Shrink the Inpaint Mask or turn on **Partial Reweight**. **Utilities → Select Rejected Loose Parts** (in Edit Mode) selects those parts.
 
 | Option | What it does |
 | --- | --- |
 | Reset to Defaults | Puts the settings back to their defaults. The body and the masks stay. |
-| Inpaint Mode | Combined (default), Point or Surface. See above. |
+| Partial Reweight | Only replace weights within 5 cm of the body. The transfer fades into the old weights over the outer **Falloff** percent (20 %). |
 | Virtual Merge | Treats loose parts closer than this distance as joined, for the solve only. The mesh isn't changed. |
 | Seam Sync | Gives nearby open edges of separate loose parts the same weights, so they stay together when bones scale. **Across Objects** includes edges between the selected meshes. The meshes must be single-user. |
 | Weights: Normalize | Makes each changed vertex's weights add up to 1. Locked groups are kept. |
 | Subset | **Deform Pose Bones** (only groups of the body's deform bones; the body needs an Armature modifier) or **All Groups**. |
-| Max Distance | How close to the body a vertex must be to match it. |
-| Partial Reweight | Only replace weights near the body. The transfer fades into the old weights over the outer **Falloff** percent (20 %) of Max Distance. |
-| Normal Angle, Soft Limit, Allow Flipped | Only used with Crease Smoothing off. See above. |
-| Crease Smoothing: Width | Higher blends more smoothly over hollows. Lower follows the body's weights more closely. |
-| Smoothing: Repeat, Factor | Smooths the inpainted areas afterwards. Off by default, and only used with Crease Smoothing off. |
 | Limit Groups per Vertex: Max Groups | At most this many groups per vertex, counting locked groups and the old weights a Transfer Mask or Partial Reweight blends with. On by default, at 8 for FFXIV (use 4 for VRChat and Unity). Low limits drop the body's smallest groups first, often physics bones. |
 
 ### Coming from Robust Weight Transfer
@@ -116,7 +106,9 @@ Weight Transfer started as [Robust Weight Transfer](https://jinxxy.com/SentFromS
 - SciPy loads the first time you transfer, which can take a few seconds.
 - There's no Install Dependencies button, since Blender installs SciPy with the add-on.
 - Balance L/R, Smoothed Limit Vertex Groups and Visualize Rejected Weights are gone. The transfer limits groups by itself.
-- New: the **Combined** Inpaint Mode (the default) and **Rigid** meshes.
+- Max Distance, Normal Angle, Soft Limit, Allow Flipped, Smoothing and the Inpaint Mode are gone too: the transfer decides how to treat each part of the mesh by itself (see [How it works](#how-it-works)). It always fills in weights like the old Combined mode.
+- The standalone add-on matches meshes as they're shown, so posing the body first (in a split, say) changes what it gives. Here, meshes on the body's armature are always matched in the rest pose. Where you posed the body to open up a crease, use the Inpaint Mask instead (see [Masks and Rigid](#masks-and-rigid)).
+- New: **Rigid** meshes.
 
 ## Connect Parts
 

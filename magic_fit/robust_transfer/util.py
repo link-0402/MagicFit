@@ -19,7 +19,8 @@
 #
 # Changed for Magic Fit (2026-09): SciPy is imported on first use, so the
 # sidebar and the operators' poll functions can use these helpers without loading it,
-# and there's no draw_debug_vertex_colors (Visualize Rejected Weights).
+# and there's no draw_debug_vertex_colors (Visualize Rejected Weights). 2026-10: no mesh adjacency
+# helpers, which only the standalone add-on's smoothing used.
 
 import numpy as np
 import bpy
@@ -135,33 +136,6 @@ def is_vertex_group_deform_bone(obj, group_name):
         return True
 
     return False
-
-
-def get_mesh_adjacency_matrix_sparse(mesh: bpy.types.Mesh, include_self=False):
-    import scipy as sp
-    edge_data = np.empty((len(mesh.edges), 2), dtype=int)
-    mesh.edges.foreach_get("vertices", edge_data.reshape(-1))
-    num_verts = len(mesh.vertices)
-    rows = np.hstack([edge_data[:, 0], edge_data[:, 1]])
-    cols = np.hstack([edge_data[:, 1], edge_data[:, 0]])
-    data = np.ones(len(rows), dtype=int)  # Corresponding data entries for the CSR matrix
-
-    # Create a symmetric adjacency matrix (since each edge is undirected)
-    adjacency_matrix = sp.sparse.csr_array((data, (rows, cols)), shape=(num_verts, num_verts))
-    if include_self:
-        adjacency_matrix.setdiag(1)
-    return adjacency_matrix
-    
-    
-def get_mesh_adjacency_list(mesh: bpy.types.Mesh):
-    edge_data = np.empty((len(mesh.edges), 2), dtype=int)
-    mesh.edges.foreach_get("vertices", edge_data.reshape(-1))
-    num_verts = len(mesh.vertices)
-    adj_list = [[] for _ in range(num_verts)]
-    for edge in edge_data:
-        adj_list[edge[0]].append(edge[1])
-        adj_list[edge[1]].append(edge[0])
-    return adj_list
 
 
 def is_group_valid(vertex_groups, group_name):
