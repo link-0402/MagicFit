@@ -17,7 +17,7 @@ from mathutils.geometry import intersect_line_line, intersect_line_plane
 from . import (connecting, facedata, facing, fitting, goals, hairing, hairlineup, heeling, lineup, moving, painting,
                relaxing, resizing, skirting, smoothing, straighten)
 from .cplus import rig as cplus_rig
-from .properties import COMING_MODES
+from .properties import COMING_MODES, RESIZE_CHESTS, RESIZE_LEGS
 
 # Cap on dabs per mouse event, so a fast flick can't stall the viewport.
 MAX_DABS_PER_EVENT = 64
@@ -495,16 +495,55 @@ def resize_keys(settings):
     return "", ""
 
 
+def resize_sizes(settings):
+    """The Yet Another Devkit sizes Resize goes to ({setting: number}, see resizing.devkit_state): those
+    picked with Devkit Sizes that drive the To body's (else the From body's) shape keys. None with Devkit
+    Sizes off, or for a body the devkit doesn't drive."""
+    if not settings.resize_use_sizes:
+        return None
+    settings_driving = resizing.devkit_settings(settings.resize_to_object or settings.resize_from_object)
+    if not settings_driving:
+        return None
+    sizes = {
+        "chest_size": RESIZE_CHESTS.index(settings.resize_chest),
+        "leg_size": RESIZE_LEGS.index(settings.resize_legs),
+        "rue": int(settings.resize_rue),
+        "buff": int(settings.resize_buff),
+        "lavabod": int(settings.resize_lavabod),
+    }
+    return {name: value for name, value in sizes.items() if name in settings_driving}
+
+
+def resize_to_values(settings):
+    """The shape key values of the To shape at the Devkit Sizes (see resizing.devkit_values), or None
+    without them. Raises resizing.ResizeError."""
+    sizes = resize_sizes(settings)
+    if sizes is None:
+        return None
+    return resizing.devkit_values(settings.resize_to_object or settings.resize_from_object, sizes)
+
+
 def check_resize_ready(context):
     """Return why Resize can't be used right now, or None when it can."""
     if context.mode not in {'OBJECT', 'EDIT_MESH'}:
         return "Resize in Object or Edit Mode"
     settings = context.scene.body_fit_brush
     body = settings.resize_from_object
+    sizes = resize_sizes(settings)
     if body is not None and settings.resize_to_object in (None, body) and not settings.resize_use_keys:
-        return "Pick a To Body, or turn on Use Shapekeys"
+        if not resizing.devkit_settings(body):
+            return "Pick a To Body, or turn on Use Shapekeys"
+        if sizes is None:
+            return "Pick a To Body, or turn on Devkit Sizes or Use Shapekeys"
     from_key, to_key = resize_keys(settings)
-    problem = resizing.check_shapes(body, from_key, settings.resize_to_object, to_key, settings.resize_match)
+    try:
+        to_values = resize_to_values(settings)
+    except resizing.ResizeError as error:
+        return str(error)
+    if sizes is not None and not to_values and settings.resize_to_object in (None, body) and not (from_key or to_key):
+        return "The devkit shows these sizes now: pick others"
+    problem = resizing.check_shapes(body, from_key, settings.resize_to_object, to_key, settings.resize_match,
+                                    to_values)
     if problem is not None:
         return problem
     targets = resize_targets(context)
@@ -538,7 +577,13 @@ def resize_key_name(context):
         return settings.resize_key_name
     body = settings.resize_from_object
     other = settings.resize_to_object or body
-    label = resizing.shape_label(other, resize_keys(settings)[1], body) if other is not None else ""
+    to_key = resize_keys(settings)[1]
+    label = resizing.shape_label(other, to_key, body) if other is not None else ""
+    sizes = resize_sizes(settings)
+    sizes_label = resizing.devkit_label(sizes, resizing.devkit_state(other)) if sizes else ""
+    if sizes_label:
+        # Named after the sizes that change, after the To Shapekey when there's one too.
+        label = " ".join(word for word in (label if label == to_key else "", sizes_label) if word)
     return label or "Resized"
 
 
@@ -597,12 +642,15 @@ def check_lineup_ready(context):
     if lineup.armature_of(body) is None and not body.vertex_groups:
         return "Body '{:s}' needs an armature".format(body.name)
     meshes, armatures = lineup_model(context)
-    if len(armatures) > 1:
-        return "Line up one model at a time ('{:s}' and '{:s}')".format(armatures[0].name, armatures[1].name)
+    # Copies of one rig (an importer's per mesh, as Cyberpunk 2077's) are one model.
+    other = next((armature for armature in armatures[1:] if not lineup.same_rig(armatures[0], armature)), None)
+    if other is not None:
+        return "Line up one model at a time ('{:s}' and '{:s}')".format(armatures[0].name, other.name)
     if not meshes:
         return "Select the model to line up, its meshes or armature"
-    if armatures and lineup.is_posed(armatures[0]):
-        return "'{:s}' is posed: clear its pose first".format(armatures[0].name)
+    posed = next((armature for armature in armatures if lineup.is_posed(armature)), None)
+    if posed is not None:
+        return "'{:s}' is posed: clear its pose first".format(posed.name)
     return None
 
 
@@ -612,6 +660,10 @@ def lineup_summary(context):
     if not meshes:
         return None
     count = "{:d} meshes".format(len(meshes)) if len(meshes) > 1 else "'{:s}'".format(meshes[0].name)
+    if len(armatures) > 2:
+        return "{:s} of '{:s}' and {:d} copies".format(count, armatures[0].name, len(armatures) - 1)
+    if len(armatures) == 2:
+        return "{:s} of '{:s}' and '{:s}'".format(count, armatures[0].name, armatures[1].name)
     if armatures:
         return "{:s} of '{:s}'".format(count, armatures[0].name)
     return count
@@ -2534,19 +2586,13 @@ class MAGIC_FIT_OT_face_repair(_FaceTool, bpy.types.Operator):
         return self.run(context, label, **args)
 
 
-# What a mesh's parts must all be for it to go into a picker (Fill from Selection), in the order the pickers are
-# filled: a mesh holding anything else goes under Other Parts, where its parts are each told apart.
-_PICKER_KINDS = (
-    ("face_eyeballs", {facing.PART_EYEBALL}),
-    ("face_teeth", {facing.PART_TEETH, facing.PART_TONGUE, facing.PART_MOUTH}),
-    ("face_tongue", {facing.PART_TEETH, facing.PART_TONGUE, facing.PART_MOUTH}),
-    ("face_mouth", {facing.PART_TEETH, facing.PART_TONGUE, facing.PART_MOUTH}),
-    ("face_tongue_piercing", {facing.PART_PIERCING}),
-)
-# ...and which of its kinds put it there (a mesh with teeth and the tongue goes under both).
-_PICKER_KIND = {"face_eyeballs": facing.PART_EYEBALL, "face_teeth": facing.PART_TEETH,
-                "face_tongue": facing.PART_TONGUE, "face_mouth": facing.PART_MOUTH,
-                "face_tongue_piercing": facing.PART_PIERCING}
+# What a mesh's parts must all be for it to go under Lashes or Mouth (Fill from Selection): a mesh holding anything
+# else goes under Other Parts, where its parts are each told apart.
+_LASH_KINDS = {facing.PART_LASH, facing.PART_FILM}
+# ...and what the parts under Mouth were found to be, in the report.
+_MOUTH_WORDS = ((facing.PART_TEETH, "teeth"), (facing.PART_TONGUE, "tongue"),
+                (facing.PART_MOUTH, "inside of the mouth"), (facing.PART_PIERCING, "tongue piercing"))
+_MOUTH_KINDS = {kind for kind, _word in _MOUTH_WORDS}
 
 
 def clear_face_meshes(settings):
@@ -2567,18 +2613,19 @@ def fill_face_meshes(settings, job, kinds):
     for i in job.parts:
         obj = job.objects[i]
         mine = set(kinds.get(i, {}))
-        placed = []
-        for prop, allowed in _PICKER_KINDS:
-            if mine and mine <= allowed and _PICKER_KIND[prop] in mine and getattr(settings, prop) is None:
-                setattr(settings, prop, obj)
-                placed.append(settings.bl_rna.properties[prop].name)
-        if not placed and mine and mine <= {facing.PART_LASH, facing.PART_FILM}:
+        if mine == {facing.PART_EYEBALL} and settings.face_eyeballs is None:
+            settings.face_eyeballs = obj
+            placed = "Eyeballs"
+        elif mine and mine <= _LASH_KINDS:
             settings.face_lashes.add().object = obj
-            placed.append("Lashes")
-        if not placed:
+            placed = "Lashes"
+        elif mine and mine <= _MOUTH_KINDS:
+            settings.face_mouth_parts.add().object = obj
+            placed = "Mouth ({:s})".format(", ".join(word for kind, word in _MOUTH_WORDS if kind in mine))
+        else:
             settings.face_others.add().object = obj
-            placed.append("Other Parts")
-        done.append("'{:s}' as {:s}".format(obj.name, " and ".join(placed)))
+            placed = "Other Parts"
+        done.append("'{:s}' as {:s}".format(obj.name, placed))
     return done
 
 
@@ -2847,6 +2894,7 @@ class MAGIC_FIT_OT_resize(bpy.types.Operator):
         settings = context.scene.body_fit_brush
         body, to_body = settings.resize_from_object, settings.resize_to_object
         from_key, to_key = resize_keys(settings)
+        sizes = resize_sizes(settings)
         name = resize_key_name(context)
         targets = resize_targets(context)
         started = time.perf_counter()
@@ -2859,7 +2907,8 @@ class MAGIC_FIT_OT_resize(bpy.types.Operator):
         window_manager.progress_begin(0, 100)
         try:
             try:
-                bodies = resizing.body_shapes(body, from_key, to_body, to_key, settings.resize_match)
+                to_values = resize_to_values(settings)
+                bodies = resizing.body_shapes(body, from_key, to_body, to_key, settings.resize_match, to_values)
                 change = bodies.change(radius=settings.resize_radius, bridge=settings.resize_bridge)
             except resizing.ResizeError as error:
                 self.report({'ERROR'}, str(error))
@@ -2906,6 +2955,9 @@ class MAGIC_FIT_OT_resize(bpy.types.Operator):
         needed = []
         if context.scene.magic_fit.target != shown:
             needed.append("pick '{:s}' as the Body".format(shown.name))
+        sizes_label = resizing.devkit_label(sizes, resizing.devkit_state(shown)) if sizes else ""
+        if sizes_label:
+            needed.append("set the devkit to {:s}".format(sizes_label))
         if not resizing.shows_to_shape(body, from_key, to_body, to_key):
             needed.append("switch {:s} to the To shape".format("it" if needed else "'{:s}'".format(shown.name)))
         hint = "; to fit against it, " + " and ".join(needed) if needed else ""
@@ -3006,12 +3058,22 @@ class MAGIC_FIT_OT_line_up(bpy.types.Operator):
             self.report({'ERROR'}, str(error))
             return {'CANCELLED'}
         lineup.write_meshes(result)
-        moved = (result.move_armature or bool(result.bone_places)) and self._move_rest_pose(context, result)
+        moved = []
+        if result.move_armature or result.bone_places:
+            # Copies of one rig move alike, each armature data once.
+            for copy in armatures:
+                if all(copy.data != other.data for other in moved):
+                    result.armature = copy
+                    if self._move_rest_pose(context, result):
+                        moved.append(copy)
+            result.armature = armature
 
         solution = result.solution
         what = "{:d} mesh{:s}".format(len(meshes), "es" if len(meshes) != 1 else "")
-        if moved:
-            what += " and '{:s}'".format(armature.name)
+        if len(moved) == 1:
+            what += " and '{:s}'".format(moved[0].name)
+        elif moved:
+            what += " and {:d} armatures".format(len(moved))
         details = ["{:.0f} % of its size".format(100.0 * solution.scale)]
         if solution.half == "upper":
             details.append("only an upper body (no hips), sized by its arms")
