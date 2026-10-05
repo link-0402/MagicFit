@@ -320,7 +320,7 @@ FFXIV hair hangs from **hair bones**. Every body has four (`j_kami_a`, `j_kami_b
    - adds its bones to the hair's armature (or makes a new **Hair Skeleton** armature),
    - and replaces the hair's weights.
 
-   The arrow next to it treats every selected mesh as one hair. You can also do a split hair one mesh at a time: later parts join the earlier parts' armature and skeleton.
+   The arrow next to it treats every selected mesh as one hair. You can also do a split hair one mesh at a time: later parts join the earlier parts' armature and skeleton, and their layers are held to the earlier parts', which keep their weights.
 4. The panel shows the **EST entry** to set and which game hairstyles use it. **Also fitting** lists the next best skeletons; click one to use it instead. **Try Another EST Entry** lets you search any entry by number or hairstyle. **Pick** does the same in the settings.
 5. Set that EST entry in your mod. In Penumbra: **Edit Mod → Meta Manipulations**, add an **Extra Skeleton Parameters** entry for the hair slot, your race and gender and the hair number, with that entry. 0 means no hair skeleton. The entry is also stored on each mesh as `xiv_est_hair` and `xiv_est_race`, for export tools.
 6. To fix a spot, paint with **Paint Hair Weights**. It blends toward the same weights and skeleton.
@@ -331,6 +331,7 @@ How the weights are worked out, in the rest pose:
 - **Which chain** is picked by a score fitted on how modders and the game weight hair. Like most modders, it splits long hair at the ears: the back goes to the back chain, the front locks to `j_kami_f_l/r`. Each strand or card goes to one chain as a whole, so strands don't tear apart.
 - **Down a chain,** bones blend over at least **Joint Blend** (30 cm). When hair is longer than the chain, **Chain Stretch** (0.5) spreads the joints over its length, so the tips swing with the whole chain.
 - **What doesn't hang** is shared between the head, the neck and the upper back. **Neck Weight** (0.3) sets the neck's share.
+- **Layers** of hair lying on each other (cards over cards, strands over a scalp cap, also in separate meshes) within **Layer Range** (1 cm) get the same weights, so they swing together instead of passing through each other, which shows up as spots of the inner layer's shading. Layers farther apart, and strands side by side, keep their own.
 - **Miqo'te ears:** with **Ears** on, hair that has cat ears gives them to the ear bones (`j_mimi_l/r`). Hair without ears stays with the head.
 - **Hair Weights** replaces all weights except locked groups and masks, then removes empty groups. The **Hair brush** only changes bone weights.
 
@@ -353,6 +354,7 @@ Good to know:
 | Neck Weight | Share of the neck and upper back below the head. |
 | Chain Stretch | How far long hair spreads a short chain's joints. |
 | Joint Blend | The least distance over which a chain's bones blend. |
+| Layer Range | Layers of hair this close on each other get the same weights. 0: each weighted on its own. |
 | Ears | Miqo'te: cat ears follow the ear bones. |
 | Max Groups | At most this many bone weights per vertex. |
 

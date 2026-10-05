@@ -250,7 +250,7 @@ def measure(hairs, reference, vanilla_est):
             rig = reference.rig(race, candidate)
             cheap = hairing._features(hair, rig)
             features.append(np.concatenate([cheap[:15], hairing._deformation(hair, rig), cheap[15:]]))
-            names_c, weights_c = hairing.hair_weights(hair.points, hair.tris, rig)
+            names_c, weights_c = hairing.hair_weights(hair.points, hair.tris, rig, layer_range=0.0)
             error = 0.0
             for (axis, degrees), expected in zip(hairing.POSES, truth_posed):
                 posed = hairing.skin(hair.points, names_c, weights_c, hairing.pose(rig, axis, degrees))

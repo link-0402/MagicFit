@@ -38,6 +38,7 @@ def unregister():
         module.unregister()
     painting.clear_cache()
     smoothing.clear_cache()
+    hairing.clear_cache()
     fitting.BodySurface.clear_cache()
     fitting.FitStroke.clear_cache()
     operators.clear_follow_cache()

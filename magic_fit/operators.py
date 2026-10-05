@@ -361,29 +361,6 @@ def hair_targets(context, settings):
     return result
 
 
-def hair_parts(context, targets, armature, race):
-    """The hair's other parts: meshes that aren't ``targets`` but were given hair weights for ``race``
-    before, deformed by ``armature`` or, when the targets have none yet, sharing a collection with them."""
-    data = {target.data.as_pointer() for target in targets}
-    collections = {collection for target in targets for collection in target.users_collection}
-    result = []
-    for obj in context.scene.objects:
-        if obj.type != 'MESH' or obj.data.as_pointer() in data:
-            continue
-        state = getattr(obj, "magic_fit_hair", None)
-        if state is None or state.race != race or state.skeleton < 0:
-            continue
-        own = hairing.weighted_armature(obj)
-        if own is None:
-            continue
-        if armature is not None and own != armature:
-            continue
-        if armature is None and not collections.intersection(obj.users_collection):
-            continue
-        result.append(obj)
-    return result
-
-
 def check_hair_weights_ready(context):
     """Why the Hair Weights button can't be used right now, or None when it can."""
     if context.mode not in {'OBJECT', 'PAINT_WEIGHT'}:
@@ -1998,17 +1975,18 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
         armature = next((found for found in map(hairing.weighted_armature, targets) if found is not None), None)
         # One hair has one EST entry: parts of it weighted before (on its armature, or in its collection
         # while this part has none yet) are matched along, and lend it their armature.
-        parts = hair_parts(context, targets, armature, race)
+        parts = hairing.hair_parts(context, targets, armature, race)
         if armature is None and parts:
             armature = hairing.weighted_armature(parts[0])
         offset = hairing.armature_offset(armature, reference.rig(race, 0))
         rests = straighten.rest_geometry(context, targets, ('INDEXED',) * len(targets))
+        part_rests = straighten.rest_geometry(context, parts, ('INDEXED',) * len(parts)) if parts else []
         matches = None
         best = self.skeleton < 0 and settings.hair_skeleton_mode != 'PICK'
         # A picked skeleton still gets the best matches, for the panel to suggest, unless the hair has them.
         if best or any(target.magic_fit_hair.race != race or not target.magic_fit_hair.matches
                        for target in targets):
-            whole = rests + (straighten.rest_geometry(context, parts, ('INDEXED',) * len(parts)) if parts else [])
+            whole = rests + part_rests
             points = np.concatenate([rest.co for rest in whole])
             starts = np.cumsum([0] + [len(rest.co) for rest in whole[:-1]])
             tris = np.concatenate([rest.tris + start for rest, start in zip(whole, starts)])
@@ -2057,12 +2035,25 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
             if straighten.deforming_armature(obj) is None:
                 hairing.add_armature_modifier(obj, armature)
         params = hairing.stroke_params(settings)
+        # The meshes are weighted as one hair, their layers held together, and held to the layers of its
+        # parts weighted before with the same skeleton, which keep their weights.
+        starts = np.cumsum([0] + [len(rest.co) for rest in rests])
+        points = np.concatenate([rest.co for rest in rests])
+        tris = np.concatenate([np.asarray(rest.tris, dtype=np.int64).reshape(-1, 3) + start
+                               for rest, start in zip(rests, starts)])
+        fixed = None
+        if settings.hair_layer_range > 0.0:
+            same = [k for k, part in enumerate(parts) if part.magic_fit_hair.skeleton == number]
+            fixed = hairing.fixed_parts([part_rests[k] for k in same], [parts[k] for k in same],
+                                        [bone.name for bone in rig.bones])
+        names, weights = hairing.hair_weights(points, tris, rig, fixed=fixed, **hairing.weight_params(settings))
         changed = 0
         removed = []
-        for obj, rest in zip(targets, rests):
+        for obj, rest, start in zip(targets, rests, starts.tolist()):
             # The hair weights replace the old ones: other bones' weights (such as an earlier skeleton's)
             # are taken off, and so are the groups left empty.
-            stroke = hairing.HairStroke(obj, rest.co, rest.tris, rig, replace=True, **params)
+            stroke = hairing.HairStroke(obj, rest.co, rest.tris, rig, replace=True,
+                                        weights=(names, weights[start:start + len(rest.co)]), **params)
             masked = context.mode == 'PAINT_WEIGHT' and obj == context.object
             verts = _unhidden_vertices(obj.data, masked)
             stroke.apply(verts, np.ones(len(verts)))
