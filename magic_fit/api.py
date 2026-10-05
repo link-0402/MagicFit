@@ -28,7 +28,9 @@ size, as the Resize button does: each size becomes a shape key of each mesh, kep
 neither the mesh nor the body changes, so a key fixed by hand stays as it is. Meshes whose shape keys follow the
 sizes' settings, a devkit's body parts (the YAB devkit's Torso, Waist, Hands and Feet), aren't resized:
 `SizedMeshes.shown` sets their keys as the body's would be at that size, and turns the clothing's key for the size
-on, until the ``with`` block ends. Everything else (Smoothing, Bridge Creases...) is as set in the Resize panel.
+on, until the ``with`` block ends. At the size the body shows, the clothing shows the shape it fits the body in,
+even while it shows another size's key. Everything else (Smoothing, Bridge Creases...) is as set in the Resize
+panel.
 
 Errors meant for the user raise ResizeError.
 """
@@ -185,12 +187,15 @@ def rigid_parts(obj, co, size):
 
 class SizeRun:
     """What resize_meshes did for one size: ``keys`` ({mesh: its key's name, None where it's shown as it is}),
-    how many keys it ``made`` and ``kept``, the meshes' ``rigid`` parts, and from the resize: its ``steps``, how the
-    bodies were matched (``how``, see resizing.BodyShapes), the ShapeMatch (``match``) when by shape, and the keys
-    that still shape a mesh on top of its new one (``stuck``, {mesh: key names}: driven ones)."""
+    ``own`` ({mesh shown as it is: the key values giving it the shape it fits the From body in, see
+    resizing.from_values}), how many keys it ``made`` and ``kept``, the meshes' ``rigid`` parts, and from the
+    resize: its ``steps``, how the bodies were matched (``how``, see resizing.BodyShapes), the ShapeMatch
+    (``match``) when by shape, and the keys that still shape a mesh on top of its new one (``stuck``, {mesh: key
+    names}: driven ones)."""
 
     def __init__(self):
         self.keys = {}
+        self.own = {}
         self.made = self.kept = self.steps = self.rigid = 0
         self.how = None
         self.match = None
@@ -217,6 +222,8 @@ def resize_meshes(meshes, sizes, job, labels, show=False, progress=None):
         shape, mix = resizing.from_shape(obj, from_print)
         shapes.append(shape)
         mixes.append(mix)
+    # The key values showing each mesh as it fits the From body, while it may be showing a size.
+    own = {obj: resizing.from_values(obj, from_print)[0] for obj in meshes}
     shape_prints = [resizing.fingerprint(shape) for shape in shapes]
     # Rigid parts are numbered across all meshes, and Keep Close spreads its corrections along the meshes' edges,
     # numbered across them too.
@@ -248,6 +255,7 @@ def resize_meshes(meshes, sizes, job, labels, show=False, progress=None):
         target = resizing._transform(resizing.rest_shape(other, job.target_values(to_values)), other.matrix_world)
         if other == body and np.array_equal(target, source):
             run.keys = {obj: None for obj in meshes}
+            run.own = dict(own)
             step(1.0)
             continue
         inputs = resizing.fingerprint(source, target, job.options())
@@ -261,6 +269,7 @@ def resize_meshes(meshes, sizes, job, labels, show=False, progress=None):
             run.steps, run.how, run.match = change.steps, bodies.how, bodies.match
             if change.largest <= 0.0:
                 run.keys = {obj: None for obj in meshes}
+                run.own = dict(own)
                 step(1.0)
                 continue
             moved = change.apply(np.concatenate(shapes), rigid=rigid, edges=edges, progress=step)
@@ -292,11 +301,13 @@ def resize_meshes(meshes, sizes, job, labels, show=False, progress=None):
 class SizedMeshes:
     """The meshes resize_collection resized, at one size: ``name`` (for the size's file or mod option), ``size``
     (Size; None for the To shape without sizes), ``keys`` ({clothing mesh: the name of its key for the size, None
-    where it stays as it is}), ``parts`` ({body part: {key name: value}}: the body parts' keys at the size) and
-    ``notes`` (messages for the user)."""
+    where it stays as it is}), ``parts`` ({body part: {key name: value}}: the body parts' keys at the size),
+    ``notes`` (messages for the user) and ``own`` ({clothing mesh staying as it is: the key values that show it
+    so, see SizeRun})."""
 
-    def __init__(self, name, size, keys, parts, notes):
+    def __init__(self, name, size, keys, parts, notes, own=None):
         self.name, self.size, self.keys, self.parts, self.notes = name, size, keys, parts, notes
+        self.own = own or {}
 
     def __repr__(self):
         return "SizedMeshes({!r}, {:d} resized, {:d} body parts)".format(
@@ -305,13 +316,22 @@ class SizedMeshes:
     @contextlib.contextmanager
     def shown(self):
         """Show the meshes at this size until the ``with`` block ends: each clothing mesh's key for the size fully
-        on and its other keys off, the body parts' keys set as the size has them. Drivers of the keys set are
-        muted meanwhile; everything is put back afterwards, whatever happens."""
+        on and its other keys off, or for one staying as it is, the shape it fits the From body in (not a size it
+        shows); the body parts' keys set as the size has them. Drivers of the keys set are muted meanwhile;
+        everything is put back afterwards, whatever happens."""
         undo = []
         try:
             for obj, name in self.keys.items():
-                keys = obj.data.shape_keys if name is not None else None
-                if keys is None or keys.key_blocks.get(name) is None:
+                keys = obj.data.shape_keys
+                if keys is None:
+                    continue
+                if name is None:
+                    for own_name, value in self.own.get(obj, {}).items():
+                        block = keys.key_blocks.get(own_name)
+                        if block is not None and (0.0 if block.mute else block.value) != value:
+                            _set_key(keys, block, value, undo)
+                    continue
+                if keys.key_blocks.get(name) is None:
                     continue
                 for block in keys.key_blocks:
                     if block == keys.reference_key:
@@ -426,7 +446,7 @@ def resize_collection(target, sizes=None, *, scene=None, body=None, progress=Non
             changes = sizing.size_values(part, size.values, values) if size is not None else {}
             if changes:
                 part_values[part] = changes
-        results.append(SizedMeshes(label, size, dict(run.keys), part_values, list(notes)))
+        results.append(SizedMeshes(label, size, dict(run.keys), part_values, list(notes), dict(run.own)))
     if results:
         results[0].notes.append("Resized {:d} mesh(es) to {:d} size(s) in {:.1f} s".format(
             len(clothing), len(sizes), time.perf_counter() - started))
