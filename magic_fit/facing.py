@@ -3359,71 +3359,62 @@ def encloses(part, center):
 
 
 def sort_mouth(candidates, fit, skin_index):
-    """What each part inside the mouth (``candidates``, FoundParts whose ``detail`` holds the kinds they may be: one
-    when their mesh was set as that part, PART_TEETH, PART_TONGUE and PART_MOUTH when it wasn't) is: a kind each, or
-    None for one of the skin's own loose parts that's none of them (it keeps the skin's weights).
+    """What each part inside the mouth (``candidates``, FoundParts) is: a kind each, or None for one of the skin's own
+    loose parts that's none of them (it keeps the skin's weights).
 
-    The tongue is the part set as the tongue, else the one at least MOUTH_SIZE across with the most surface along the
-    tongue bones for its size (`tongue_area`: along² / area) that lies under them (`under_tongue_line`, TONGUE_UNDER)
-    and has at least TONGUE_VOTE as much of its surface along them as the game's tongue has (a mesh set as the tongue
-    and something else has one: the best of its parts under the bones, or of all). The mouth's inside is the part set as
-    that, else the biggest part around the tongue (or the other parts; `encloses`) that holds no teeth (none set in it)
-    and isn't the game's own teeth (`on_game_teeth`). The rest are teeth, but for the skin's own loose parts, which are
-    teeth only when they lie on the game's."""
+    The tongue is the part at least MOUTH_SIZE across with the most surface along the tongue bones for its size
+    (`tongue_area`: along² / area) that lies under them (`under_tongue_line`, TONGUE_UNDER) and has at least TONGUE_VOTE
+    as much of its surface along them as the game's tongue has. The mouth's inside is the biggest part around the
+    tongue (or the other parts; `encloses`) that holds no teeth and isn't the game's own teeth (`on_game_teeth`). The
+    rest are teeth, but for the skin's own loose parts found by themselves, which are teeth only when they lie on the
+    game's."""
     kinds = [None] * len(candidates)
+    game = fit.reference.mouth()[3]
+    game_share = 0.0
+    if game is not None:
+        along, area = tongue_area(game[0], game[1], fit)
+        game_share = along / max(area, 1e-12)
+    best = None
     for k, f in enumerate(candidates):
-        if len(f.detail) == 1:
-            kinds[k] = next(iter(f.detail))
-    if PART_TONGUE not in kinds:
-        game = fit.reference.mouth()[3]
-        game_share = 0.0
-        if game is not None:
-            along, area = tongue_area(game[0], game[1], fit)
-            game_share = along / max(area, 1e-12)
-        best = None
-        for k, f in enumerate(candidates):
-            if kinds[k] is not None or PART_TONGUE not in f.detail or np.ptp(f.points, axis=0).max() < MOUTH_SIZE:
-                continue
-            along, area = tongue_area(f.points, f.tris, fit)
-            if along <= 0.0:
-                continue
-            share = along / max(area, 1e-12) / game_share if game_share > 0.0 else 1.0
-            like = tongue_like(f, share, fit)
-            # A mesh set as the tongue (and something else) has one: its most tongue-like part, else its best.
-            if not like and len(f.detail) == 3:
-                continue
-            score = (like, along * along / max(area, 1e-12))
-            if best is None or score > best[0]:
-                best = (score, k)
-        if best is not None:
-            kinds[best[1]] = PART_TONGUE
-    if PART_MOUTH not in kinds:
-        tongue = [candidates[k].points for k in range(len(candidates)) if kinds[k] == PART_TONGUE]
-        small = [k for k, f in enumerate(candidates)
-                 if kinds[k] != PART_TONGUE and np.ptp(f.points, axis=0).max() < RIGID_SIZE]
-        best = None
-        for k, f in enumerate(candidates):
-            if kinds[k] is not None or PART_MOUTH not in f.detail or k in small:
-                continue
-            others = tongue or [g.points for j, g in enumerate(candidates) if j != k]
-            if not others or not encloses(f, np.vstack(others).mean(0)):
-                continue
-            # Single teeth are set in their gums (their triangles cross them or touch them): a part holding a third
-            # of them is gums, however much of the mouth it surrounds.
-            held = sum(touching(candidates[j], f) for j in small)
-            if (small and held >= max(1.0, len(small) / 3.0)) or on_game_teeth(f, fit):
-                continue
-            size = float(np.prod(np.ptp(f.points, axis=0)))
-            if best is None or size > best[0]:
-                best = (size, k)
-        if best is not None:
-            kinds[best[1]] = PART_MOUTH
+        if np.ptp(f.points, axis=0).max() < MOUTH_SIZE:
+            continue
+        along, area = tongue_area(f.points, f.tris, fit)
+        if along <= 0.0:
+            continue
+        share = along / max(area, 1e-12) / game_share if game_share > 0.0 else 1.0
+        if not tongue_like(f, share, fit):
+            continue
+        score = along * along / max(area, 1e-12)
+        if best is None or score > best[0]:
+            best = (score, k)
+    if best is not None:
+        kinds[best[1]] = PART_TONGUE
+    tongue = [candidates[k].points for k in range(len(candidates)) if kinds[k] == PART_TONGUE]
+    small = [k for k, f in enumerate(candidates)
+             if kinds[k] != PART_TONGUE and np.ptp(f.points, axis=0).max() < RIGID_SIZE]
+    best = None
+    for k, f in enumerate(candidates):
+        if kinds[k] is not None or k in small:
+            continue
+        others = tongue or [g.points for j, g in enumerate(candidates) if j != k]
+        if not others or not encloses(f, np.vstack(others).mean(0)):
+            continue
+        # Single teeth are set in their gums (their triangles cross them or touch them): a part holding a third
+        # of them is gums, however much of the mouth it surrounds.
+        held = sum(touching(candidates[j], f) for j in small)
+        if (small and held >= max(1.0, len(small) / 3.0)) or on_game_teeth(f, fit):
+            continue
+        size = float(np.prod(np.ptp(f.points, axis=0)))
+        if best is None or size > best[0]:
+            best = (size, k)
+    if best is not None:
+        kinds[best[1]] = PART_MOUTH
     for k, f in enumerate(candidates):
         if kinds[k] is None:
             if f.mesh == skin_index and f.auto:
                 kinds[k] = PART_TEETH if on_game_teeth(f, fit) else None
             else:
-                kinds[k] = next(kind for kind in (PART_TEETH, PART_MOUTH, PART_TONGUE) if kind in f.detail)
+                kinds[k] = PART_TEETH
     return kinds
 
 
@@ -3890,9 +3881,7 @@ PART_CHOICES = {
     'NONE': (set(), set()),
 }
 # What a mesh can be set as on the Face panel (Face Weights' Meshes; see `part_kinds`), besides the face itself.
-ROLE_EYEBALLS, ROLE_LASHES, ROLE_MOUTH, ROLE_TEETH, ROLE_TONGUE, ROLE_PIERCING, ROLE_OTHER = (
-    "EYEBALLS", "LASHES", "MOUTH", "TEETH", "TONGUE", "TONGUE_PIERCING", "OTHER")
-ROLE_KINDS = {ROLE_MOUTH: PART_MOUTH, ROLE_TEETH: PART_TEETH, ROLE_TONGUE: PART_TONGUE}
+ROLE_EYEBALLS, ROLE_LASHES, ROLE_MOUTH, ROLE_OTHER = "EYEBALLS", "LASHES", "MOUTH", "OTHER"
 
 
 class FoundPart:
@@ -3945,13 +3934,12 @@ def part_kinds(meshes, skin_index, part_meshes, fit, roles, wanted, skin_mouth=F
     """Every loose part of the meshes ``part_meshes`` (and with ``skin_mouth`` the skin's own loose parts inside the
     mouth, besides its main part) as FoundParts. A mesh's ``roles`` (a set of ROLE_*) decide what its parts are:
     EYEBALLS: eyeballs (with other roles: the parts shaped like one); LASHES: lashes or films over the eye (or brows and
-    makeup when they lie on the skin); MOUTH, TEETH, TONGUE: the inside of the mouth, teeth and gums, the tongue (a
-    mesh set as several is sorted among them); TONGUE_PIERCING: a piercing on the tongue (with mouth roles: its small
-    parts on the tongue). Other meshes' parts are told apart by their place and shape (`classify_part`). Parts inside
-    the mouth are then sorted into teeth, tongue and the mouth's inside (`sort_mouth`); small ones on the tongue, away
-    from the teeth, are piercings, and small ones that aren't one of a set of teeth (TEETH_SET) studs moving as one
-    piece. Kinds not ``wanted`` aren't sorted out. With ``focus`` (mesh indices), only those meshes are looked at in
-    full; of the others only the parts by the mouth, which parts inside it may attach to."""
+    makeup when they lie on the skin); MOUTH: inside the mouth, wherever they are. Other meshes' parts are told apart by
+    their place and shape (`classify_part`). Parts inside the mouth are then sorted into teeth, tongue and the mouth's
+    inside (`sort_mouth`); small ones on the tongue, away from the teeth, are piercings, and small ones that aren't one
+    of a set of teeth (TEETH_SET) studs moving as one piece. Kinds not ``wanted`` aren't sorted out. With ``focus``
+    (mesh indices), only those meshes are looked at in full; of the others only the parts by the mouth, which parts
+    inside it may attach to."""
     skeleton = fit.reference.skeleton
     features = fit.features
     middle = features.mouth_center
@@ -3967,7 +3955,6 @@ def part_kinds(meshes, skin_index, part_meshes, fit, roles, wanted, skin_mouth=F
     def make(i, verts, bvh, mine):
         mesh = meshes[i]
         pts = mesh.points[verts]
-        mouth = {ROLE_KINDS[role] for role in mine if role in ROLE_KINDS}
         auto, extra, pierce = False, None, False
         side = None
         if ROLE_EYEBALLS in mine:
@@ -3976,14 +3963,9 @@ def part_kinds(meshes, skin_index, part_meshes, fit, roles, wanted, skin_mouth=F
                 side = nearest_eye(pts, skeleton)
         if side is not None:
             kind, detail = PART_EYEBALL, side
-        elif mine & {ROLE_PIERCING} and not mouth:
-            kind, detail = PART_PIERCING, None
-        elif mouth:
-            kind, detail, pierce = PART_INSIDE, mouth, ROLE_PIERCING in mine
-            if mine & {ROLE_TONGUE, ROLE_PIERCING} and np.ptp(pts, axis=0).max() < PIERCING_SIZE:
-                # A small part of the tongue's mesh may be its piercing (the barbell joined into it): sorted out
-                # with the rest, then tested as one.
-                detail, pierce = mouth | {PART_TEETH}, True
+        elif ROLE_MOUTH in mine:
+            # Sorted like the parts found inside the mouth by their place: what each is goes by its shape.
+            kind, detail, auto, pierce = PART_INSIDE, set(MOUTH_KINDS), True, True
         else:
             kind, detail = classify_part(pts, bvh, features, skeleton, mesh.names, mesh.weights[verts], mesh.label)
             if ROLE_LASHES in mine:
@@ -4015,14 +3997,14 @@ def part_kinds(meshes, skin_index, part_meshes, fit, roles, wanted, skin_mouth=F
         sizes = np.bincount(mesh.parts, minlength=mesh.part_count)
         main = int(np.argmax(sizes)) if len(sizes) else 0
         face_bvh = bvh_of(mesh.points, mesh.tris[np.all(mesh.parts[mesh.tris] == main, axis=1)])
-        # The Face set as a mouth part too says what its parts inside the mouth are; its other loose parts stay skin.
-        mine = {ROLE_KINDS[role] for role in roles.get(skin_index, set()) if role in ROLE_KINDS}
+        # The Face set under Mouth too has teeth among its parts inside the mouth, wherever the game's are; its other
+        # loose parts stay skin.
+        mine = ROLE_MOUTH in roles.get(skin_index, set())
         for k in range(mesh.part_count):
             if k != main:
                 part = make(skin_index, np.flatnonzero(mesh.parts == k), face_bvh, set())
                 if part.kind == PART_INSIDE:
-                    if mine:
-                        part.detail, part.auto, part.pierce = mine, False, False
+                    part.auto = part.auto and not mine
                     found.append(part)
     if not set(MOUTH_KINDS) & wanted:
         return [f for f in found if f.kind != PART_INSIDE]
@@ -4797,9 +4779,8 @@ def find_parts(job):
 
 
 # The Face panel's pickers (Face Weights' Meshes): (setting, what its mesh is); and its lists.
-PICKERS = (("face_eyeballs", ROLE_EYEBALLS), ("face_teeth", ROLE_TEETH), ("face_tongue", ROLE_TONGUE),
-           ("face_mouth", ROLE_MOUTH), ("face_tongue_piercing", ROLE_PIERCING))
-LISTS = (("face_lashes", ROLE_LASHES), ("face_others", ROLE_OTHER))
+PICKERS = (("face_eyeballs", ROLE_EYEBALLS),)
+LISTS = (("face_lashes", ROLE_LASHES), ("face_mouth_parts", ROLE_MOUTH), ("face_others", ROLE_OTHER))
 
 
 def picked_meshes(settings):

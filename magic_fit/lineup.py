@@ -13,7 +13,9 @@ each finger. Bones are sorted into parts by their names, as the common naming sc
 and VRChat, Mixamo, Unreal, 3ds Max Biped, Rigify, DAZ, MMD, The Sims, FFXIV..., and The Sims' names hashed,
 bone_1b82d8b2); bones whose names say nothing (jiggle, skirt, tail bones...) join their parent's part. A
 finger's bones are numbered from the hand out. A part's joint is the head of its main bone, the one the next
-part hangs from. A model without a usable armature is sorted by the names of its vertex groups instead, and
+part hangs from. A rig whose bones hang from none (Cyberpunk 2077's imports) is sorted by the names and
+places of its bones instead (`flat_parts`), and copies of one rig on several armatures are one model. A
+model without a usable armature is sorted by the names of its vertex groups instead, and
 its joints are estimated from its weights, where one part's weight hands over to the next. When the names
 say nothing at all (bone_00, bone_01...), the groups are sorted by how they overlap and where they lie on
 either side of the model's midline.
@@ -342,6 +344,8 @@ def finger_of(name):
     tokens = words(name)
     if any(token in _PALM_WORDS for token in tokens):
         return None
+    if "inhand" in (a + b for a, b in zip(tokens, tokens[1:])) and "thumb" not in tokens:
+        return None  # Cyberpunk's LeftInHandIndex: in the palm (the thumb's is its first segment)
     for finger, keys in _FINGER_WORDS:
         if any(key in tokens for key in keys):
             return finger
@@ -483,6 +487,196 @@ def main_bones(parts, parents):
         if part not in best or key < best[part][0]:
             best[part] = (key, name)
     return {part: name for part, (_key, name) in best.items()}
+
+
+# -----------------------------------------------------------------------------
+# Rigs without a hierarchy
+
+# A bone named after a limb part goes with the part before or after it when it lies at most this share as far
+# from that part's segment as from its own: a twist bone named after the joint it leads to (Cyberpunk's
+# l_Wrist_0_JNT lies along the forearm)...
+FLAT_NEARER = 0.5
+# ...and a bone whose name says nothing goes with a segment it lies along, at most this share of the segment's
+# length off its line (a twist bone), else with the part its weights or its place say.
+FLAT_OFF_LINE = 0.25
+
+
+def is_flat(parents):
+    """Whether a rig (``parents``: bone name -> parent name or None) has no hierarchy to tell its parts by: no
+    bone hangs from one that hangs from another. Importers make such rigs from meshes that store only their
+    bones' names and places, as Cyberpunk 2077's do."""
+    return len(parents) > 1 and not any(parents.get(parent) is not None
+                                        for parent in parents.values() if parent is not None)
+
+
+_FINGER_KEYS = frozenset(key for _finger, keys in _FINGER_WORDS for key in keys)
+_KNOWN_WORDS = frozenset(key for _kind, keys in _KIND_WORDS for key in keys) | _FINGER_KEYS | {"inhand"}
+
+
+def _extra_words(name):
+    """How many words of a bone name say neither its side nor its part: a part's main bone has the plainest
+    name (LeftForeArm, against l_elbow_bend_A_mscl_JNT or l_Wrist_0_JNT)."""
+    tokens = [token for token in words(unhashed(name)) if token not in _SIDE_WORDS]
+    known = set()
+    for k, (a, b) in enumerate(zip(tokens, tokens[1:])):
+        if a + b in _KNOWN_WORDS:
+            known.update((k, k + 1))
+    return sum(1 for k, token in enumerate(tokens) if k not in known and token not in _KNOWN_WORDS)
+
+
+def _off_segment(point, start, end):
+    """(along, off): where ``point`` lies along the segment from ``start`` to ``end`` (0 at its start, 1 at its
+    end) and how far it is from the segment's nearest point."""
+    axis = end - start
+    length = float(np.dot(axis, axis))
+    along = float(np.dot(point - start, axis)) / length if length > 1e-12 else 0.0
+    return along, float(np.linalg.norm(start + np.clip(along, 0.0, 1.0) * axis - point))
+
+
+def flat_parts(names, heads):
+    """Parts of the bones of a rig without a hierarchy (``names``; ``heads``: name -> head position), from
+    their names and places. Returns (part of every bone, main bone of each part, the bones whose part was
+    only guessed from their place).
+
+    Each part's main bone is the one with the plainest name (LeftUpLeg, not l_thigh_0_JNT), and on a tie the
+    nearest to the main bone of the part above (the thigh's is LeftUpLeg, nearer the hips than LeftLeg, which
+    is then the shin's). A finger's plainest bones are its segments, numbered from the hand out. Each part
+    reaches from its main bone's head to the next part's (a hand to its knuckles). The other bones keep the
+    part their names say, unless they lie clearly nearer the part before or after it (twist bones named after
+    the next joint), and other bones of a finger go with the nearest of its segments or the hand. A bone whose
+    name says nothing goes with the segment it lies along (a twist bone), else is only guessed: with the
+    nearest part."""
+    kinds = {name: classify(name) for name in names}
+    extras = {name: _extra_words(name) for name in names}
+    fingers = {name: finger_of(name) for name in names if kinds[name][0] == "hand" and kinds[name][1] is not None}
+    fingers = {name: finger for name, finger in fingers.items() if finger is not None}
+    # Bones of the palm named after a finger (LeftInHandIndex) aren't the hand's main bone either.
+    fingered = {name for name in names if _FINGER_KEYS & set(words(unhashed(name)))}
+
+    def candidates(part):
+        """Bones named after ``part`` (thighs and shins: also those named "leg"), and whether exactly."""
+        if part in (TORSO, NECK, HEAD):
+            return [(name, True) for name in names if kinds[name][0] == part]
+        kind, side = part.rsplit("_", 1)
+        found = []
+        for name in names:
+            own, own_side = kinds[name]
+            if own_side != side or name in fingered:
+                continue
+            if own == kind:
+                found.append((name, True))
+            elif own == "leg" and kind in ("thigh", "shin"):
+                found.append((name, False))
+        return found
+
+    main = {}
+    for part in PARTS:
+        if part in DIGIT_PARTS:
+            continue
+        found = [(name, exact) for name, exact in candidates(part) if name not in main.values()]
+        if not found:
+            continue
+        if part == TORSO:
+            # Nearest the hips: the middle of the bones named after the thighs, if any.
+            thighs = [heads[name] for side in SIDES for name, _exact in candidates(part_name("thigh", side))]
+            near = np.mean(thighs, axis=0) if thighs else None
+        else:
+            above = PARENT[part]
+            while above != TORSO and above not in main:
+                above = PARENT[above]
+            near = heads[main[above]] if above in main else None
+        main[part] = min(found, key=lambda item: (
+            extras[item[0]], not item[1],
+            0.0 if near is None else float(np.linalg.norm(heads[item[0]] - near)), item[0]))[0]
+    for side in SIDES:
+        hand = part_name("hand", side)
+        if hand not in main:
+            continue
+        for finger in FINGERS:
+            own = [name for name, which in fingers.items() if which == finger and kinds[name][1] == side]
+            if not own:
+                continue
+            plainest = min(extras[name] for name in own)
+            segments = sorted((name for name in own if extras[name] == plainest),
+                              key=lambda name: float(np.linalg.norm(heads[name] - heads[main[hand]])))
+            for rank, name in enumerate(segments):
+                part = digit_name(finger, min(rank + 1, DIGITS), side)
+                main.setdefault(part, name)
+
+    # Each part's segment: from its main bone's head to the next part's, a hand's to its knuckles.
+    joints = {part: np.asarray(heads[name], dtype=np.float64) for part, name in main.items()}
+    ends = {}
+    for part, joint in joints.items():
+        aim = _aim(joints, part)
+        ends[part] = joint if aim is None else joint + aim
+    if TORSO in joints and NECK in joints:
+        ends[TORSO] = joints[NECK]
+
+    def nearest(point, parts):
+        return min(parts, key=lambda part: _off_segment(point, joints[part], ends[part])[1])
+
+    parts = {name: part for part, name in main.items()}
+    guessed = set()
+    limbs = set(ARM + LEG)
+    for name in names:
+        if name in parts:
+            continue
+        point = np.asarray(heads[name], dtype=np.float64)
+        kind, side = kinds[name]
+        if kind in (TORSO, NECK, HEAD):
+            parts[name] = kind
+            continue
+        if name in fingers:
+            own = [digit_name(fingers[name], k, side) for k in range(1, DIGITS + 1)] + [part_name("hand", side)]
+            own = [part for part in own if part in joints]
+            if own:
+                parts[name] = nearest(point, own)
+                continue
+        if side is not None and (kind in limbs or kind == "leg"):
+            own = [part_name(k, side) for k in (("thigh", "shin") if kind == "leg" else (kind,))]
+            own = [part for part in own if part in joints]
+            if own:
+                part = nearest(point, own)
+                distance = _off_segment(point, joints[part], ends[part])[1]
+                others = [other for other in (PARENT[part], NEXT.get(part)) if other in joints and other != TORSO]
+                if others:
+                    other = nearest(point, others)
+                    if _off_segment(point, joints[other], ends[other])[1] < FLAT_NEARER * distance:
+                        part = other
+                parts[name] = part
+                continue
+            parts[name] = part_name(kind, side) if kind != "leg" else part_name("thigh", side)
+            continue
+        # A name that says nothing: the segment it lies along, else the nearest part, only guessed.
+        along = []
+        for part, joint in joints.items():
+            length = np.linalg.norm(ends[part] - joint)
+            if part in (TORSO, NECK, HEAD) or length <= 1e-9:
+                continue
+            share, off = _off_segment(point, joint, ends[part])
+            if 0.0 <= share <= 1.0 and off <= FLAT_OFF_LINE * length:
+                along.append((off / length, part))
+        if along:
+            parts[name] = min(along)[1]
+        else:
+            parts[name] = nearest(point, list(joints)) if joints else TORSO
+            guessed.add(name)
+    return parts, main, guessed
+
+
+def settle_guessed(group_parts, guessed, weights):
+    """Give the vertex groups of ``guessed`` bones (see `flat_parts`) the part they share the most weight with,
+    as the groups of a model without an armature do (``group_parts``: group name -> part; ``weights`` over
+    its groups). Returns the changed parts (group name -> part)."""
+    known = {name: part for name, part in group_parts.items() if name not in guessed}
+    if not known:
+        return {}
+    shared = weights.shared(weights.by_part(known))
+    changed = {}
+    for index, name in enumerate(weights.names):
+        if name in guessed and shared[index].max() > 0.0:
+            changed[name] = PARTS[int(np.argmax(shared[index]))]
+    return changed
 
 
 def group_parts_by_name(names, weights=None):
@@ -1964,18 +2158,61 @@ def _deform_bones(armature):
     return names or [bone.name for bone in armature.data.bones]
 
 
+def rig_parts(armature):
+    """Parts of an armature's bones, by its hierarchy, or without one by where its bones are (see
+    `flat_parts`). Returns (part of every bone, part of each deform bone, main deform bone of each part, the
+    bones whose part was only guessed from their place)."""
+    bones = armature.data.bones
+    names = [bone.name for bone in bones]
+    parents = {bone.name: bone.parent.name if bone.parent is not None else None for bone in bones}
+    heads = {bone.name: np.array(bone.head_local, dtype=np.float64) for bone in bones}
+    spot = np.array(list(heads.values())).reshape(-1, 3)
+    # Bones all at one spot (The Sims') say nothing by their places: their names alone do.
+    if is_flat(parents) and np.ptp(spot, axis=0).max() > 1e-6 * (1.0 + np.abs(spot).max()):
+        deforming = _deform_bones(armature)
+        parts, main, guessed = flat_parts(deforming, heads)
+        if len(deforming) < len(names):
+            others, _main, unsure = flat_parts(names, heads)
+            parts = dict(others, **parts)
+            guessed |= unsure - set(deforming)
+        return parts, {name: parts[name] for name in deforming}, main, guessed
+    parts = bone_parts(names, parents)
+    deform = {name: parts[name] for name in _deform_bones(armature)}
+    return parts, deform, main_bones(deform, parents), set()
+
+
+def same_rig(first, second):
+    """Whether two armatures are copies of one rig: the same bones, hanging from the same bones, with their
+    heads and tails in the same places at rest. Importers give each mesh of some games its own copy
+    (Cyberpunk 2077's), and their meshes line up as one model."""
+    bones, others = first.data.bones, second.data.bones
+    if {bone.name for bone in bones} != {bone.name for bone in others}:
+        return False
+    pairs = [(bone, others[bone.name]) for bone in bones]
+    if not pairs:
+        return True
+
+    def parent(bone):
+        return bone.parent.name if bone.parent is not None else None
+
+    if any(parent(a) != parent(b) for a, b in pairs):
+        return False
+    ends = apply_matrix(_matrix(first), np.array([(a.head_local, a.tail_local) for a, _b in pairs]).reshape(-1, 3))
+    copies = apply_matrix(_matrix(second), np.array([(b.head_local, b.tail_local) for _a, b in pairs]).reshape(-1, 3))
+    size = max(float(np.ptp(ends, axis=0).max()), 1e-9)
+    return float(np.abs(ends - copies).max()) <= 1e-4 * size
+
+
 def armature_rig(armature, depsgraph=None):
     """Parts of an armature's bones and joints of its parts. Returns (part of every bone, part of each
     deform bone, part -> joint in world space). The joints are the heads of the parts' main deform bones:
     as posed with a ``depsgraph``, else at rest."""
     bones = armature.data.bones
-    parents = {bone.name: bone.parent.name if bone.parent is not None else None for bone in bones}
-    parts = bone_parts([bone.name for bone in bones], parents)
-    deform = {name: parts[name] for name in _deform_bones(armature)}
+    parts, deform, main, _guessed = rig_parts(armature)
     matrix = _matrix(armature)
     pose = armature.evaluated_get(depsgraph).pose if depsgraph is not None else None
     joints = {}
-    for part, name in main_bones(deform, parents).items():
+    for part, name in main.items():
         head = np.array(pose.bones[name].head if pose is not None else bones[name].head_local)
         joints[part] = matrix[:3, :3] @ head + matrix[:3, 3]
     return parts, deform, joints
@@ -2114,10 +2351,11 @@ def plan(meshes, armature, body, depsgraph, stretch=True, fit=False):
     result.target_joints = target
     surface = None
 
-    all_parts, deforming = {}, None
+    all_parts, deforming, guessed = {}, None, set()
     bone_joints = {}
     if armature is not None:
         all_parts, deforming, bone_joints = armature_rig(armature)
+        guessed = rig_parts(armature)[3]
     named_bones = deforming is not None and has_half(deforming)
     if named_bones:
         names = sorted({group.name for obj in meshes for group in obj.vertex_groups if group.name in deforming})
@@ -2137,6 +2375,11 @@ def plan(meshes, armature, body, depsgraph, stretch=True, fit=False):
     if named_bones:
         group_parts = {name: deforming[name] for name in names}
         result.how = "bones"
+        if guessed:
+            # A rig without a hierarchy: bones whose names and places say nothing go where their weights do.
+            settled = settle_guessed(group_parts, guessed, weights)
+            group_parts.update(settled)
+            all_parts = dict(all_parts, **settled)
         if not spread_out(bone_joints):
             # Bones at one spot (The Sims') may not hang from each other either: number each finger's segments
             # by where their groups lie instead.

@@ -718,6 +718,144 @@ def test_sims_hashed_names():
           "Sims hashes: joints land within {:s}".format(mm(max(errors.values()))))
 
 
+# Bones of a Cyberpunk 2077 import (left side and middle, heads as the game's female body has them), which hang
+# from none: Mixamo's names, twist bones along the limbs, muscle bones.
+CP_HEADS = {
+    "Hips": (0.0, -0.041, 1.013), "Spine": (0.0, -0.054, 1.082), "Spine1": (0.0, -0.039, 1.16),
+    "Spine2": (0.0, -0.041, 1.247), "Spine3": (0.0, -0.072, 1.364), "Neck": (0.0, -0.076, 1.509),
+    "Neck1": (0.0, -0.055, 1.568), "Head": (0.0, -0.04, 1.64),
+    "LeftShoulder": (-0.018, -0.009, 1.492), "LeftArm": (-0.142, -0.062, 1.477), "l_SHL_0_JNT": (-0.205, -0.049, 1.413),
+    "l_SHL_1_JNT": (-0.267, -0.036, 1.349), "LeftForeArm": (-0.33, -0.023, 1.286),
+    "l_Wrist_0_JNT": (-0.363, 0.04, 1.238), "l_Wrist_1_JNT": (-0.397, 0.102, 1.19),
+    "l_Wrist_2_JNT": (-0.428, 0.161, 1.146), "LeftHand": (-0.43, 0.165, 1.143),
+    "LeftInHandThumb": (-0.418, 0.188, 1.128), "LeftHandThumb1": (-0.404, 0.224, 1.115),
+    "LeftHandThumb2": (-0.4, 0.246, 1.087), "LeftInHandIndex": (-0.429, 0.189, 1.139),
+    "LeftHandIndex1": (-0.452, 0.238, 1.103), "LeftHandIndex2": (-0.457, 0.264, 1.073),
+    "LeftHandIndex3": (-0.449, 0.271, 1.052), "LeftInHandMiddle": (-0.437, 0.184, 1.136),
+    "LeftHandMiddle1": (-0.467, 0.222, 1.097), "LeftHandMiddle2": (-0.477, 0.248, 1.061),
+    "LeftHandMiddle3": (-0.465, 0.255, 1.037), "LeftHandRing1": (-0.473, 0.203, 1.09),
+    "LeftHandRing2": (-0.482, 0.221, 1.056), "l_ring_knuckle_top_mscl_JNT": (-0.486, 0.204, 1.098),
+    "LeftUpLeg": (-0.077, -0.041, 1.013), "LeftLeg": (-0.115, -0.053, 0.584), "LeftFoot": (-0.157, -0.086, 0.118),
+    "LeftToeBase": (-0.16, 0.022, 0.018), "l_thigh_0_JNT": (-0.089, -0.045, 0.87),
+    "l_calf_0_JNT": (-0.146, -0.078, 0.234),
+    "l_leg_buttock_mscl_JNT": (-0.07, -0.098, 1.027), "l_leg_back_A_mscl_JNT": (-0.139, -0.063, 0.706),
+    "l_lowLeg_back_A_mscl_JNT": (-0.163, -0.117, 0.38), "l_knee_mscl_JNT": (-0.114, 0.017, 0.58),
+    "l_deltoid_top_top_out_JNT": (-0.136, -0.059, 1.507), "l_triceps_mscl_JNT": (-0.267, -0.046, 1.352),
+    "l_elbow_bend_A_mscl_JNT": (-0.323, 0.005, 1.301), "l_wrist_A_mscl_JNT": (-0.435, 0.182, 1.165),
+    "l_scapula_A_bot_out_JNT": (-0.14, -0.111, 1.43), "l_chest_front_C_top_out_JNT": (-0.047, 0.044, 1.37),
+    "l_latissimusDorsi_mscl_JNT": (-0.127, -0.107, 1.409), "l_butterfly_top_CRV_bot_out_JNT": (-0.102, -0.064, 1.524),
+}
+
+
+def test_flat_rig():
+    # A rig whose bones hang from none (Cyberpunk 2077's imports): main bones by the plainest names, the thigh's
+    # nearest the hips; twist and muscle bones with the segment they lie along; fingers numbered from the hand.
+    check(lineup.is_flat({"a": None, "b": None, "c": None}) and lineup.is_flat({"root": None, "a": "root", "b": "root"})
+          and not lineup.is_flat({"a": None, "b": "a", "c": "b"}), "flat: rigs without a hierarchy told apart")
+    check(lineup.finger_of("LeftInHandIndex") is None and lineup.finger_of("LeftInHandThumb") == "thumb" and
+          lineup.finger_of("LeftHandIndex2") == "index",
+          "flat: Cyberpunk's in-hand bones are the palm's, but the thumb's")
+    heads = {name: np.array(head) for name, head in CP_HEADS.items()}
+    heads.update({name.replace("Left", "Right").replace("l_", "r_", 1): head * (-1.0, 1.0, 1.0)
+                  for name, head in list(heads.items()) if name.startswith(("Left", "l_"))})
+    parts, main, guessed = lineup.flat_parts(list(heads), heads)
+    wanted = {"torso": "Hips", "neck": "Neck", "head": "Head", "clavicle_l": "LeftShoulder", "upperarm_l": "LeftArm",
+              "forearm_l": "LeftForeArm", "hand_l": "LeftHand", "thigh_l": "LeftUpLeg", "shin_l": "LeftLeg",
+              "foot_l": "LeftFoot", "thigh_r": "RightUpLeg", "shin_r": "RightLeg", "thumb1_l": "LeftInHandThumb",
+              "thumb2_l": "LeftHandThumb1", "index1_l": "LeftHandIndex1", "index3_l": "LeftHandIndex3",
+              "middle2_l": "LeftHandMiddle2"}
+    wrong = {part: main.get(part) for part, name in wanted.items() if main.get(part) != name}
+    check(not wrong, "flat: main bones by their plainest names ({})".format(wrong or "all right"))
+    wanted = {"l_SHL_0_JNT": "upperarm_l", "l_SHL_1_JNT": "upperarm_l", "l_Wrist_0_JNT": "forearm_l",
+              "l_Wrist_1_JNT": "forearm_l", "l_thigh_0_JNT": "thigh_l", "l_calf_0_JNT": "shin_l",
+              "l_leg_buttock_mscl_JNT": "thigh_l", "l_leg_back_A_mscl_JNT": "thigh_l",
+              "l_lowLeg_back_A_mscl_JNT": "shin_l", "l_knee_mscl_JNT": "shin_l", "LeftToeBase": "foot_l",
+              "LeftInHandIndex": "hand_l", "l_wrist_A_mscl_JNT": "hand_l", "l_deltoid_top_top_out_JNT": "upperarm_l",
+              "l_triceps_mscl_JNT": "upperarm_l",
+              "l_elbow_bend_A_mscl_JNT": "forearm_l", "l_scapula_A_bot_out_JNT": "clavicle_l",
+              "l_chest_front_C_top_out_JNT": "torso", "Neck1": "neck", "Spine3": "torso",
+              "r_Wrist_0_JNT": "forearm_r", "r_SHL_0_JNT": "upperarm_r"}
+    wrong = {name: parts.get(name) for name, part in wanted.items() if parts.get(name) != part}
+    check(not wrong, "flat: twist and muscle bones go with the segment they lie along ({})".format(
+        wrong or "all right"))
+    check(parts["l_ring_knuckle_top_mscl_JNT"] in ("hand_l", "ring1_l") and main.get("ring1_l") == "LeftHandRing1" and
+          {"l_latissimusDorsi_mscl_JNT", "l_butterfly_top_CRV_bot_out_JNT"} <= guessed and "l_SHL_0_JNT" not in guessed,
+          "flat: a finger's other bones near the hand, bones whose names say nothing only guessed off the segments")
+    # Guessed groups go where their weights do: the back muscle with the torso it shares its weight with.
+    weights = lineup.Weights(3, ["Spine3", "l_latissimusDorsi_mscl_JNT", "LeftArm"], [0, 0, 1, 1, 2], [0, 1, 0, 1, 2],
+                             [0.6, 0.4, 0.7, 0.3, 1.0])
+    guesses = {"Spine3": "torso", "l_latissimusDorsi_mscl_JNT": "upperarm_l", "LeftArm": "upperarm_l"}
+    settled = lineup.settle_guessed(guesses, {"l_latissimusDorsi_mscl_JNT"}, weights)
+    check(settled == {"l_latissimusDorsi_mscl_JNT": "torso"}, "flat: a guessed group takes the part its weights share")
+
+
+def test_flat_armature():
+    # A Cyberpunk 2077 import, facing +Y on an armature without a hierarchy: lined up by its bones, every joint
+    # lands on the body's, and its forearms' twist bones carry their weight along the forearm, not the hand.
+    scene = fresh()
+    (model,), (armature,), joints, (markers,) = fixture.build_cyberpunk()
+    twist = model.vertex_groups["l_Wrist_0_JNT"].index
+    twisted = np.array([any(g.group == twist and g.weight > 0.0 for g in vert.groups) for vert in model.data.vertices])
+    before = fixture.world_positions(model)[twisted]
+    elbow, wrist = joints["elbow_l"], joints["wrist_l"]
+    axis = (wrist - elbow) / np.linalg.norm(wrist - elbow)
+    off_before = np.linalg.norm(np.cross(before - elbow, axis), axis=1)
+    fixture.select([model])
+    check(operators.check_lineup_ready(bpy.context) is None, "flat armature: ready")
+    result = lineup.plan([model], armature, scene["body"], bpy.context.evaluated_depsgraph_get())
+    check(result.how == "bones" and abs(abs(result.solution.turn) - 180.0) < 1.0 and
+          result.bone_parts.get("l_latissimusDorsi_mscl_JNT") == "torso",
+          "flat armature: joints from its bones, turned {:.0f}°, the back muscle with the torso".format(
+              result.solution.turn))
+    outcome = bpy.ops.magic_fit.line_up()
+    errors = fixture.marker_errors(model, markers, scene["body_joints"])
+    check(outcome == {'FINISHED'} and max(errors.values()) < 1e-5,
+          "flat armature: every joint on the body's ({:s} at most)".format(mm(max(errors.values()))))
+    body = scene["body_joints"]
+    elbow, wrist = body["elbow_l"], body["wrist_l"]
+    axis = (wrist - elbow) / np.linalg.norm(wrist - elbow)
+    after = fixture.world_positions(model)[twisted]
+    off_after = np.linalg.norm(np.cross(after - elbow, axis), axis=1)
+    along = (after - elbow) @ axis / np.linalg.norm(wrist - elbow)
+    scale = 1.0 / fixture.CP_JOINTS["scale"]
+    check(np.abs(off_after - off_before * scale).max() < 1e-3 and along.min() > 0.4 and along.max() < 1.0,
+          "flat armature: the forearm's twist weights stay on the forearm ({:s} off its girth)".format(
+              mm(np.abs(off_after - off_before * scale).max())))
+    heads = {name: np.array(armature.matrix_world @ bone.head_local) for name, bone in armature.data.bones.items()}
+    bone_errors = [np.linalg.norm(heads[name] - body[joint]) for name, joint in
+                   (("LeftArm", "shoulder_l"), ("RightForeArm", "elbow_r"), ("LeftLeg", "knee_l"),
+                    ("RightFoot", "ankle_r"))]
+    check(max(bone_errors) < 1e-5, "flat armature: its bones moved onto the body's joints ({:s})".format(
+        mm(max(bone_errors))))
+
+
+def test_rig_copies():
+    # Meshes on copies of one rig (Cyberpunk's importer gives each its own) line up together, as one model; two
+    # different rigs are still refused.
+    scene = fresh()
+    meshes, armatures, _joints, markers = fixture.build_cyberpunk(copies=True)
+    check(lineup.same_rig(*armatures) and not lineup.same_rig(armatures[0], scene["vrc_armature"]),
+          "copies: told from another rig")
+    fixture.select(meshes)
+    check(operators.check_lineup_ready(bpy.context) is None and
+          operators.lineup_summary(bpy.context) == "2 meshes of 'CP Armature' and 'CP Armature Copy'",
+          "copies: ready, and named ({})".format(operators.lineup_summary(bpy.context)))
+    fixture.select([meshes[0], scene["vrc"]])
+    check("one model at a time" in (operators.check_lineup_ready(bpy.context) or ""),
+          "copies: other rigs still refused")
+    fixture.select([meshes[1]])
+    check(operators.lineup_model(bpy.context)[0] == [meshes[1]], "copies: one mesh alone is still a model")
+    fixture.select(meshes)
+    outcome = bpy.ops.magic_fit.line_up()
+    errors = [max(fixture.marker_errors(mesh, marks, scene["body_joints"]).values())
+              for mesh, marks in zip(meshes, markers)]
+    check(outcome == {'FINISHED'} and max(errors) < 1e-5,
+          "copies: every joint of both meshes on the body's ({:s} at most)".format(mm(max(errors))))
+    check(lineup.same_rig(*armatures), "copies: both armatures moved alike")
+    shown = [np.abs(fixture.displayed_positions(mesh) - fixture.world_positions(mesh)).max() for mesh in meshes]
+    check(max(shown) < 1e-5, "copies: at rest each armature leaves its mesh where it is")
+
+
 def test_half_shapes():
     # Half a body must be shaped like one: a bottom reaches up past its hips, a top doesn't hang far below its
     # shoulders. A skirt piece starting below the hips, or a bodice whose hanging bits looked like legs, isn't.

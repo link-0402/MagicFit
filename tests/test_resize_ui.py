@@ -153,6 +153,30 @@ def steps():
     check(result == {'FINISHED'} and keys_of(bpy.data.objects["Suit"])[-1] == "Shape",
           "shape: added the key, the bodies matched by shape")
 
+    # --- A devkit body: other sizes, without switching the devkit.
+    body, _garments = resize.devkit_body()
+    settings = bpy.context.scene.body_fit_brush
+    for prop in ("resize_to_object", "resize_match", "resize_key_name"):
+        settings.property_unset(prop)
+    settings.resize_use_keys = False
+    settings.resize_from_object = body
+    settings.resize_use_sizes = True
+    settings.resize_chest = 'MEDIUM'
+    settings.resize_rue = True
+    for area in env.window.screen.areas:
+        area.tag_redraw()
+    yield 0.3
+    check(operators.check_resize_ready(bpy.context) is None, "sizes: ready with Devkit Sizes")
+    env.screenshot("resize_05_devkit_sizes.png")
+    keys_before = [(block.value, block.mute) for block in body.data.shape_keys.key_blocks]
+    with env.override(sidebar):
+        result = bpy.ops.magic_fit.resize('EXEC_DEFAULT', True)
+    yield 0.5
+    check(result == {'FINISHED'} and keys_of(bpy.data.objects["Suit"])[-1] == "Medium Rue",
+          "sizes: added the key, named after the sizes")
+    check([(block.value, block.mute) for block in body.data.shape_keys.key_blocks] == keys_before,
+          "sizes: the devkit body wasn't switched")
+
 
 def run():
     magic_fit.register()

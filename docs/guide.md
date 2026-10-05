@@ -374,17 +374,14 @@ FFXIV moves faces with a **face skeleton**: bones for the eyelids, eyeballs, bro
 6. Check the result with the **Test Poses**: **Blink**, **Shut Eyes** (the game's Shut Eyes expression, which the Bow emote's face uses too), **Talk**, **Shout**, **Angry**, **Clench**, **Ouch**, **Die** and **Salute**. **Rest** puts the bones back.
 7. To fix a spot, paint with **Paint Face Weights**. To paint a part, it must be under Meshes (or, with no Face set, select the face too).
 
-**Meshes** says which mesh is what. Only the Face is needed, but parts not set here aren't weighted (the report names any that are selected). A mesh may be set as two parts, like teeth and tongue in one mesh.
+**Meshes** says which mesh is what. Only the Face is needed, but parts not set here aren't weighted (the report names any that are selected).
 
 | Mesh | What it is |
 | --- | --- |
 | Face | The skin, with the lips and the neck opening. Loose parts of it inside the mouth (a mouth socket, teeth) are found by themselves. |
 | Eyeballs | Both eyeballs. The eye openings and lid edges are measured against them. |
 | Lashes | Lashes, and the tear lines over the eyes. Any number of meshes: pick one in the empty field below the list to add it. |
-| Teeth | The teeth and gums, both rows. |
-| Tongue | The tongue. |
-| Mouth Inside | The inside of the mouth (its socket or bag), when it's a mesh of its own. |
-| Tongue Piercing | A piercing through the tongue. |
+| Mouth | What's inside the mouth: teeth and gums, the tongue, the mouth's socket or bag, a tongue piercing. Any number of meshes, each holding any of them: each loose part is told apart by its shape, and **Fill from Selection** reports what it found in each mesh. |
 | Other Parts | Anything else: brows, makeup, liner, piercings, jewellery, horns, ears, beards, or a second eyeball or teeth mesh. Each is weighted by what it is and where it sits. |
 
 With no Face set, the face tools use the selected meshes and tell their parts apart by themselves. **Fill from Selection** shows what they're taken for.
@@ -405,7 +402,7 @@ How the face is weighted:
   - **A tongue piercing** moves as one piece with the tongue where it sits, balls and bar together.
   - **Ears, horns, scales, beards and whiskers** take the game's weights for those parts.
   - **Everything else** (piercings, jewellery) moves as one piece with the skin it's attached to, or inside the mouth with the teeth or tongue it's on. A chain lying along the skin follows it link by link; a barbell's balls move with its bar.
-  - Meshes weighted mostly to non-face bones (hair, Viera ears, the body) are left out, and reported. Meshes set as Eyeballs, Lashes, Teeth, Tongue, Mouth Inside or Tongue Piercing never are; Other Parts can be.
+  - Meshes weighted mostly to non-face bones (hair, Viera ears, the body) are left out, and reported. Meshes set as Eyeballs, Lashes or Mouth never are; Other Parts can be.
 - Only bone weights change, and locked groups are never changed.
 
 The **Face Repairs** fix one thing on a face whose weights are otherwise fine. They work on the Meshes: on the selected ones among them, or all of them when none is selected (with no Face set, on the selected meshes). Each only changes what goes with it.
@@ -555,11 +552,11 @@ How it differs from Blender's Move:
 
 ## Resize
 
-**Resize** moves clothing from one body to another and adds the result to each mesh as a shape key. The bodies can be two shape keys of one devkit body, like the Yet Another Devkit Mannequin's Rue, Lava or Buff keys. They can also be two different bodies: another body mod with the same UV layout, like the RueXB devkit's body and the Mannequin, or any body the clothing was made on, like an outfit's own body from another game.
+**Resize** moves clothing from one body to another and adds the result to each mesh as a shape key. The bodies can be two shape keys of one devkit body, like the Yet Another Devkit Mannequin's Rue, Lava or Buff keys, or that body at other sizes picked like in the devkit ([Devkit Sizes](#devkit-sizes)). They can also be two different bodies: another body mod with the same UV layout, like the RueXB devkit's body and the Mannequin, or any body the clothing was made on, like an outfit's own body from another game.
 
 1. In the **Resize** panel on the **Body Fit** tab, pick the **From Body**, the body the clothing fits now.
 2. Pick the **To Body**. Leave it empty to go to another shape key of the From Body.
-3. To start from or go to a shape key, turn on **Use Shapekeys** and pick **From Shapekey** and **To Shapekey**.
+3. To start from or go to a shape key, turn on **Use Shapekeys** and pick **From Shapekey** and **To Shapekey**. For other sizes of the Yet Another Devkit's Mannequin, use [Devkit Sizes](#devkit-sizes) instead.
 4. Select all of the clothing's meshes, so its parts stay together, and click **Resize**.
 
 Examples:
@@ -572,7 +569,7 @@ Examples:
 | Rue to YAB | Mannequin | `Rue` | | |
 | Another game's outfit to YAB | The outfit's own body, lined up with it | | Mannequin | |
 
-Bring in bodies from other files with **File → Append**. The other shape keys of the bodies count as they're set: for Rue with a medium chest, set the Mannequin to Medium first.
+Bring in bodies from other files with **File → Append**. The other shape keys of the bodies count as they're set: for Rue with a medium chest, set the Mannequin to Medium first, or pick both with Devkit Sizes.
 
 **The result** is a new shape key on each mesh, named after the To Shapekey (or **Key Name**). It's turned on, and the mesh's other keys are turned off. Turn it off to compare, set it halfway for an in-between size, or keep fitting it with Body Fit. Resize doesn't change Body Fit's body for you: its report says what to set to check the fit, then fix what still clips with [Body Fit](#body-fit).
 
@@ -607,6 +604,8 @@ Good to know:
 | From Body | The body the clothing fits now. |
 | To Body | The body to fit to. Empty: the From Body. |
 | Match By | How different bodies are matched: Auto, Vertices, UV Map or Shape. |
+| Devkit Sizes | Resize to other sizes of a Yet Another Devkit body, without switching the devkit. Only shown for such a body. |
+| Chest, Legs, Body | The devkit sizes to resize to: the chest and leg size, Rue, Buff and Lavabod. |
 | Use Shapekeys | Resize from or to shape keys. Off by default. |
 | From Shapekey | The From Body's key the clothing fits. Empty: the body as its keys show it. |
 | To Shapekey | The To Body's key to fit to. Empty: the body as its keys show it. |
@@ -614,14 +613,28 @@ Good to know:
 | Bridge Creases | Clothing spans creases a ball this size can't roll into. 0 follows the skin everywhere. |
 | Rigid Parts | Loose parts smaller than this keep their shape. 0 turns it off. |
 | Keep Close | Brings tight clothing back to its old distance from the body afterwards. |
-| Key Name | Name of the new shape key. Empty: the To Shapekey's name, the To Body's, or "Resized". |
+| Key Name | Name of the new shape key. Empty: the To Shapekey's name, the devkit sizes that change, the To Body's, or "Resized". |
+
+### Devkit Sizes
+
+**Devkit Sizes** resizes to the Yet Another Devkit's other sizes without switching the devkit, so the Mannequin keeps showing the size the clothing fits. There's no need to copy the Mannequin and set its shape keys by hand. It shows up when the devkit's settings drive the To Body's shape keys (or the From Body's, without a To Body), like the Mannequin's.
+
+1. Set the devkit to the size the clothing fits, as usual, and pick the Mannequin as the **From Body**. Leave the **To Body** empty.
+2. Turn on **Devkit Sizes**. It starts from the sizes the devkit shows now.
+3. Pick the **Chest** (Large, Medium, Small or Masc; with Lavabod, Omoi, Teardrop or Cupcake), the **Legs** (Melon, Skull, Yanilla, Masc, Lavabod or Mini) and the **Body** (Rue, Buff, Lavabod), then click **Resize**.
+
+The new key is named after what changes, like `Medium Rue`. For more sizes, pick the next one and click **Resize** again.
+
+The sizes come out as the devkit would show them: it switches along what goes with them, like the Rue/Buff and Rue/Lava corrections, the hip dips, and each chest size's own shape keys (Squeeze, Push-Up…) as they're set. The devkit's other settings (genitals, butt, nails, hands, feet) stay as it shows them. To check the fit afterwards, set the devkit to those sizes; the report says which.
+
+Devkit Sizes needs the devkit's script running, as the devkit's own panel does. If Blender didn't run it when opening the file, Resize says which setting it can't read.
 
 ### Clothing from another game
 
 Clothing ripped from another game usually comes with the body it was made on. Resize from that body:
 
 1. Join the outfit's body into one mesh, if it comes in pieces.
-2. [Line Up](#line-up) the outfit and its body together, so both sit on the Mannequin. Selecting one mesh is enough when they share an armature.
+2. [Line Up](#line-up) the outfit and its body together, so both sit on the Mannequin. Selecting one mesh is enough when they share an armature. When each mesh came with its own copy of the armature (Cyberpunk 2077), select them all.
 3. In **Resize**, pick the outfit's body as the **From Body** and the Mannequin as the **To Body**, select the outfit's meshes and click **Resize**. **Auto** matches the bodies by shape.
 
 The clothing keeps how it sat on its own body: loose parts stay as loose, and tight ones end up as close to the Mannequin as they were to their own body. Clipping drops to about what the outfit already had on its own body. Delete the outfit's body afterwards, or keep it for another resize.
@@ -687,7 +700,8 @@ How Fit Shape reshapes it:
 
 How it finds the joints:
 
-- **From bone names.** It knows Unity/VRChat, Mixamo, Unreal, 3ds Max Biped, Rigify, DAZ, VRoid, MMD, The Sims and FFXIV, fingers included. It also reads The Sims' bone names from the hashes some exports name their groups after (bone_1B82D8B2). Extra bones (jiggle, skirt, tail…) go with the bone they hang from.
+- **From bone names.** It knows Unity/VRChat, Mixamo, Unreal, 3ds Max Biped, Rigify, DAZ, VRoid, MMD, The Sims, Cyberpunk 2077 and FFXIV, fingers included. It also reads The Sims' bone names from the hashes some exports name their groups after (bone_1B82D8B2). Extra bones (jiggle, skirt, tail…) go with the bone they hang from.
+- **Bones that hang from none,** as Cyberpunk 2077's imports have them, are sorted by their names and places. Each part's main bone is the one with the plainest name (LeftUpLeg, not l_thigh_0_JNT), so knees aren't taken for hips. Twist bones go with the limb they lie along, even when named after the next joint (l_Wrist_0_JNT along the forearm), and bones whose names say nothing go where their weights are.
 - **From vertex groups,** when there's no usable armature. This is a few centimetres less exact, so for bodies and skin-tight models, the joints are then checked against the body's shape.
 - **Unnamed groups** (bone_00, bone_01…) are sorted by where they lie. Each branch off a hand is a finger: the thumb is the one starting nearest the wrist. The model must stand upright, facing the front or +X. Long skirts weighted to the legs, even unevenly, still sort right, but can pull the hips a few centimetres off.
 
@@ -697,7 +711,7 @@ Good to know:
 - **Bones all at one spot,** as in The Sims' exports, are put where their vertex groups are, so the armature fits the lined-up model.
 - **Rigs place joints differently,** so knees can end up a little off.
 - **A posed armature is refused.** Clear its pose first (Pose Mode: **Pose → Clear Transform → All**).
-- **One model at a time.** Meshes on two armatures are refused.
+- **One model at a time.** Meshes on two armatures are refused, unless the armatures are copies of one rig: Cyberpunk 2077's importer gives each mesh its own. Select all the meshes and they line up together, as one model, and every copy of the armature moves along.
 - **It needs both arms or both legs.** A piece with neither (a corset on spine bones only), or one not shaped like a top or a bottom (a gown's separate skirt starting below the hips), can't be lined up on its own.
 - **Objects parented to a bone** follow it, but aren't scaled.
 - **Fit Shape changes the model's build** toward the body's: a slim model's hips and thighs fill out, a thick one's slim down where they're close. Up close, it keeps its own look. Turn Fit Shape off to keep the model's own shape.

@@ -17,6 +17,10 @@ joint when the model is lined up (with Stretch Limbs on).
   meshes.
 - "Anon" is a model whose vertex groups say nothing (bone_00, bone_01..., shuffled), like The Sims'
   exports, on an armature whose bones all sit at the origin, without feet, in an A-pose of its own.
+- "CP" (`build_cyberpunk`, not in `build`) is a Cyberpunk 2077 import: Mixamo's bone names (LeftUpLeg,
+  LeftLeg, LeftForeArm...) on an armature without a hierarchy, facing +Y, with twist bones along the upper
+  arms and forearms (l_SHL_0_JNT, l_Wrist_0_JNT) and muscle bones on the back and buttocks; optionally in
+  two meshes, each on its own copy of the armature, as the game's importer makes them.
 
 Humanoids can have fingers (`build_humanoid(fingers=...)`): five tubes off the end of each hand, spread
 across it with the thumb forward, three bones each (Thumb1_L... Little3_L), bent by a given curl.
@@ -73,6 +77,11 @@ BIPED_BONES = {
     "clavicle": "Bip001-{S}-Clavicle", "shoulder": "Bip001-{S}-UpperArm", "elbow": "Bip001-{S}-Forearm",
     "wrist": "Bip001-{S}-Hand",
 }
+CP_BONES = {
+    "hips": "Hips", "spine_b": "Spine1", "spine_c": "Spine3", "neck": "Neck", "head": "Head",
+    "hip": "{Side}UpLeg", "knee": "{Side}Leg", "ankle": "{Side}Foot", "toe": "{Side}ToeBase",
+    "clavicle": "{Side}Shoulder", "shoulder": "{Side}Arm", "elbow": "{Side}ForeArm", "wrist": "{Side}Hand",
+}
 TORSO_CHAIN = ("hips", "spine_b", "spine_c", "neck", "head")
 LEG_CHAIN = ("hip", "knee", "ankle", "toe")
 ARM_CHAIN = ("clavicle", "shoulder", "elbow", "wrist")
@@ -99,6 +108,14 @@ def mirror(joints):
         if name.endswith("_l"):
             result[name[:-2] + "_r"] = (-point[0], point[1], point[2])
     return result
+
+
+def sided(name, side):
+    """Bone name ``name`` for ``side``: "{s}" stands for "l" or "r", "{S}" for "L" or "R", "{Side}" for "Left" or
+    "Right"."""
+    if side is None:
+        return name
+    return name.replace("{s}", side).replace("{S}", side.upper()).replace("{Side}", "Left" if side == "l" else "Right")
 
 
 def model_joints(scale=1.0, leg_scale=1.0, arm_angle=45.0, offset=(0.0, 0.0, 0.0), turn=0.0, feet=True):
@@ -234,10 +251,7 @@ def build_humanoid(joints, bone_names, sides=("l", "r"), torso_only_head=False, 
     every tube's radius."""
     radii = {key: radius * thickness for key, radius in RADII.items()}
     def bone(key, side=None):
-        name = bone_names[key]
-        if side is not None:
-            name = name.replace("{s}", side).replace("{S}", side.upper())
-        return name
+        return sided(bone_names[key], side)
 
     vertices, faces, weights, markers = [], [], [], {}
 
@@ -342,8 +356,7 @@ def armature_object(name, joints, bone_names, bone_list, collection=None, at_ori
 def bone_list(joints, names, sides=("l", "r"), extra=()):
     """Bones of a humanoid: (name, parent name, head, tail) in hierarchy order."""
     def bone(key, side=None):
-        name = names[key]
-        return name if side is None else name.replace("{s}", side).replace("{S}", side.upper())
+        return sided(names[key], side)
 
     result = []
     torso = list(TORSO_CHAIN)
@@ -558,6 +571,64 @@ def build_anon(seed=3, fingers=None, skirt_bias=None, half=None):
     real_parts = lineup.bone_parts(real, parents)
     truth = {rename[name]: real_parts[name] for name in real}
     return model, armature, joints, markers, truth
+
+
+CP_JOINTS = dict(scale=1.08, leg_scale=1.05, arm_angle=30.0, turn=180.0)
+
+
+def build_cyberpunk(copies=False):
+    """The Cyberpunk 2077 import "CP Body" on armature "CP Armature", whose bones hang from none (see the
+    module's notes); with ``copies``, its arms are a second mesh "CP Arms" on a copy of the armature, "CP
+    Armature Copy". Returns (meshes, armatures, joints, markers per mesh)."""
+    collection = bpy.data.collections.new("CP")
+    bpy.context.scene.collection.children.link(collection)
+    joints = model_joints(**CP_JOINTS)
+    vertices, faces, weights, markers = build_humanoid(joints, CP_BONES)
+    halfway = {}
+    for side in ("l", "r"):
+        for start, end, segment, twist in (("shoulder", "elbow", "{Side}Arm", "{s}_SHL_0_JNT"),
+                                           ("elbow", "wrist", "{Side}ForeArm", "{s}_Wrist_0_JNT")):
+            halfway[sided(twist, side)] = (sided(segment, side), joints[start + "_" + side], joints[end + "_" + side])
+    muscles = {}
+    for side in ("l", "r"):
+        # On the back below the shoulder blade (the model faces +Y), and on the buttock.
+        outward = np.sign(joints["shoulder_" + side][0])
+        muscles[sided("{s}_latissimusDorsi_mscl_JNT", side)] = joints["spine_c"] + np.array((outward * 0.08, -0.1, 0.0))
+        muscles[sided("{s}_leg_buttock_mscl_JNT", side)] = joints["hip_" + side] + np.array((0.0, -0.08, 0.03))
+    torso = {sided(CP_BONES[key], None) for key in TORSO_CHAIN}
+    for index, weight in enumerate(weights):
+        point = vertices[index]
+        for twist, (segment, start, end) in halfway.items():
+            along = np.dot(point - start, end - start) / np.dot(end - start, end - start)
+            if weight.get(segment, 0.0) == 1.0 and 0.5 < along < 1.0 - 0.03 / np.linalg.norm(end - start):
+                weights[index] = {segment: 0.5, twist: 0.5}
+        for muscle, place in muscles.items():
+            bone = next(iter(weight))
+            if len(weight) == 1 and bone in torso and np.linalg.norm(point - place) < 0.06:
+                weights[index] = {bone: 0.6, muscle: 0.4}
+    extra = [(twist, None, (start + end) / 2.0, end) for twist, (_segment, start, end) in halfway.items()]
+    extra += [(muscle, None, place, place + np.array((0.0, -0.03, 0.0))) for muscle, place in muscles.items()]
+    bones = [(name, None, head, tail) for name, _parent, head, tail in bone_list(joints, CP_BONES, extra=extra)]
+    parts = [(vertices, faces, weights, markers)]
+    if copies:
+        arm = np.array([any(name.endswith(("Arm", "ForeArm", "Hand", "Shoulder", "_JNT")) and "latissimus" not in name
+                            and "buttock" not in name for name in w) for w in weights])
+        parts = []
+        for keep in (~arm, arm):
+            index = np.flatnonzero(keep)
+            remap = {int(old): new for new, old in enumerate(index)}
+            kept = [tuple(remap[i] for i in face) for face in faces if all(i in remap for i in face)]
+            parts.append((vertices[index], kept, [weights[i] for i in index],
+                          {remap[v]: joint for v, joint in markers.items() if v in remap}))
+    meshes, armatures = [], []
+    for (v, f, w, _m), name, rig in zip(parts, ("CP Body", "CP Arms"), ("CP Armature", "CP Armature Copy")):
+        model = mesh_object(name, v, f, w, collection)
+        armature = armature_object(rig, joints, CP_BONES, bones, collection)
+        modifier = model.modifiers.new("Armature", 'ARMATURE')
+        modifier.object = armature
+        meshes.append(model)
+        armatures.append(armature)
+    return meshes, armatures, joints, [m for _v, _f, _w, m in parts]
 
 
 def build():

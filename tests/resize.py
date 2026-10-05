@@ -14,10 +14,14 @@ Garments, all fitted to the large breasts:
 - "Strap": two layers 3 and 7 mm off the left breast, split into two objects along x = -0.06 with
   their edge vertices at the same spots.
 - "Pendant": a 2 cm cube hanging 6 cm in front of the cleavage.
+
+`devkit_body` builds the same scene with the body's keys driven like Yet Another Devkit's Mannequin, by
+stand-ins for the devkit's settings.
 """
 
 import bpy
 import numpy as np
+from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, PointerProperty
 
 RADIUS = 0.065
 CENTERS = ((-0.07, -0.075, 0.0), (0.07, -0.075, 0.0))  # the torso front is at y = -0.09
@@ -239,3 +243,106 @@ def stretch(before, after, edge_list):
     return float(max(ratio.max(), 1.0 / max(ratio.min(), 1e-12)))
 
 
+# -----------------------------------------------------------------------------
+# A Yet Another Devkit body
+
+# Stand-ins for the devkit's settings (its script registers Scene.ya_devkit_props), with the same names and
+# numbering. Its chest sizes are listed by a function, so a driver reads them by number from their names.
+_CHESTS = [(str(index), name, "") for index, name in enumerate(("Large", "Medium", "Small", "Masc"))]
+
+
+def _chest_items(_self, _context):
+    return _CHESTS
+
+
+class DevkitKeptKey(bpy.types.PropertyGroup):
+    value: FloatProperty()
+
+
+class DevkitState(bpy.types.PropertyGroup):
+    chest_size: EnumProperty(items=_chest_items)
+    leg_size: EnumProperty(items=[(str(index), name, "") for index, name in enumerate(
+        ("Melon", "Skull", "Yanilla", "Masc", "Lavabod", "Mini"))])
+    rue: BoolProperty()
+    buff: BoolProperty()
+    lavabod: BoolProperty()
+    alt_hips: BoolProperty()
+    yab_keys: CollectionProperty(type=DevkitKeptKey)
+    lava_keys: CollectionProperty(type=DevkitKeptKey)
+
+
+class DevkitProps(bpy.types.PropertyGroup):
+    mannequin_state: PointerProperty(type=DevkitState)
+
+
+def register_devkit():
+    if hasattr(bpy.types.Scene, "ya_devkit_props"):
+        return
+    for cls in (DevkitKeptKey, DevkitState, DevkitProps):
+        bpy.utils.register_class(cls)
+    bpy.types.Scene.ya_devkit_props = PointerProperty(type=DevkitProps)
+
+
+def drive(keys, name, prop, expression, variables, kind='SCRIPTED'):
+    """Drive ``prop`` of shape key ``name`` of ``keys`` (a Key) with ``expression`` over ``variables``: (name,
+    devkit setting) pairs, or (name, key) to read another key's value."""
+    driver = keys.key_blocks[name].driver_add(prop).driver
+    driver.type = kind
+    driver.expression = expression
+    for var_name, source in variables:
+        var = driver.variables.new()
+        var.name = var_name
+        var.type = 'SINGLE_PROP'
+        target = var.targets[0]
+        if source in keys.key_blocks:
+            target.id_type = 'KEY'
+            target.id = keys
+            target.data_path = 'key_blocks["{:s}"].value'.format(source)
+        else:
+            target.id_type = 'SCENE'
+            target.id = bpy.context.scene
+            target.data_path = "ya_devkit_props.mannequin_state." + source
+
+
+def devkit_body():
+    """Build the scene with the body's keys driven by the devkit's settings, all off (Large, Melon): MEDIUM
+    (the "Small" breasts) by the chest size, which mutes the Large sub-key "- Squeeze" (at 0.3) for other
+    sizes; Rue, Buff, Lavabod and Skull Crushers; the corrections Rue/Buff and Hip Dips (for YAB); and
+    Rue/Follow, which follows the Rue key. Returns (body, garments)."""
+    register_devkit()
+    body, garments = build()
+    state = bpy.context.scene.ya_devkit_props.mannequin_state
+    for prop in ("chest_size", "leg_size", "rue", "buff", "lavabod", "alt_hips"):
+        state.property_unset(prop)
+    state.yab_keys.clear()
+    state.lava_keys.clear()
+    large, small, _quads = body_shapes()
+    x, z = large[:, :1], large[:, 2:]
+    front = np.array((0.0, -1.0, 0.0))
+    shapes = {
+        "MEDIUM": small,
+        "- Squeeze": large + 0.2 * (large - small),
+        "Rue": large + 0.006 * np.clip(-z / 0.1, 0.0, 1.0) * front,
+        "Buff": large + 0.02 * x * (1.0, 0.0, 0.0),
+        "Lavabod": large + 0.004 * np.clip(z / 0.1, 0.0, 1.0) * front,
+        "Rue/Buff": large + (0.0, 0.0, 0.001),
+        "Skull Crushers": large + 0.003 * np.clip(-z / 0.1, 0.0, 1.0) * np.abs(x) / 0.17 * front,
+        "Hip Dips (for YAB)": large - 0.002 * np.clip(-z / 0.1, 0.0, 1.0) * front,
+        "Rue/Follow": large + (0.0, 0.0, -0.001),
+    }
+    for name, co in shapes.items():
+        block = body.shape_key_add(name=name, from_mix=False)
+        block.data.foreach_set("co", np.asarray(co).astype(np.float32).ravel())
+        block.value = 0.0
+    keys = body.data.shape_keys
+    keys.key_blocks["- Squeeze"].value = 0.3
+    drive(keys, "MEDIUM", 'value', "size == 1 and lava == 0", (("size", "chest_size"), ("lava", "lavabod")))
+    drive(keys, "- Squeeze", 'mute', "size != 0", (("size", "chest_size"),))
+    for name, setting in (("Rue", "rue"), ("Buff", "buff"), ("Lavabod", "lavabod")):
+        drive(keys, name, 'value', "option == 1", (("option", setting),))
+    drive(keys, "Rue/Buff", 'value', "buff == 1 and rue == 1", (("buff", "buff"), ("rue", "rue")))
+    drive(keys, "Skull Crushers", 'value', "legs == 1", (("legs", "leg_size"),))
+    drive(keys, "Hip Dips (for YAB)", 'value', "legs <= 2 and alt_hips == 1 and rue == 0",
+          (("legs", "leg_size"), ("alt_hips", "alt_hips"), ("rue", "rue")))
+    drive(keys, "Rue/Follow", 'value', "", (("value", "Rue"),), kind='AVERAGE')
+    return body, garments

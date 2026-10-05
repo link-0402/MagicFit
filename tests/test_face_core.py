@@ -51,10 +51,9 @@ def set_meshes(settings, objects, socket=True):
     settings.face_skin = objects["skin"]
     settings.face_eyeballs = objects["eye_l"]
     settings.face_others.add().object = objects["eye_r"]
-    settings.face_teeth = objects["teeth"]
-    settings.face_tongue = objects["tongue"]
-    settings.face_mouth = objects["socket"] if socket else None
-    settings.face_tongue_piercing = objects["piercing"]
+    for key in ("teeth", "tongue", "socket", "piercing"):
+        if key != "socket" or socket:
+            settings.face_add_mouth = objects[key]
 
 
 def check_mouth(objects, info, what, race=face.RACE, number=face.NUMBER, welded=False):
@@ -174,6 +173,7 @@ def test_mouth():
             ("mouth, set as Meshes", True, {}, face.RACE),
             ("mouth, teeth and tongue in one mesh", True, dict(joined=True), face.RACE),
             ("mouth, the box in the face's mesh", False, dict(socket_in_skin=True), face.RACE),
+            ("mouth, the box in the face's mesh, set as Meshes", True, dict(socket_in_skin=True), face.RACE),
             ("mouth, rows in one piece, tongue resculpted", False,
              dict(welded=True, tongue_move=(0.0, 0.003, -0.001), tongue_scale=1.15), face.RACE),
             ("mouth, Hyur male", False, {}, "c0101"),
@@ -192,8 +192,8 @@ def test_mouth():
 
 
 def test_mouth_cases():
-    """Without a tongue, no row of teeth is taken for one; a barbell joined into the tongue's mesh, set as the Tongue
-    and the Tongue Piercing, still moves as one piece on the tongue, which keeps the game's tongue weights."""
+    """Without a tongue, no row of teeth is taken for one; a barbell joined into the tongue's mesh, under Mouth, still
+    moves as one piece on the tongue, which keeps the game's tongue weights."""
     for race in (face.RACE, "c1101"):
         face.clear_scene()
         use_settings()
@@ -280,10 +280,10 @@ def test_fill_meshes():
     face.select(objects.values(), objects["eye_l"])
     check(bpy.ops.magic_fit.face_meshes_from_selection() == {'FINISHED'}, "fill: runs")
     others = [item.object for item in settings.face_others]
-    check(settings.face_skin == objects["skin"] and settings.face_teeth == objects["teeth"]
-          and settings.face_tongue == objects["tongue"] and settings.face_mouth == objects["socket"]
-          and settings.face_tongue_piercing == objects["piercing"],
-          "fill: the face, teeth, tongue, the mouth's inside and the tongue piercing each where they belong")
+    mouth = [item.object for item in settings.face_mouth_parts]
+    check(settings.face_skin == objects["skin"] and len(mouth) == 4
+          and set(mouth) == {objects[key] for key in ("teeth", "tongue", "socket", "piercing")},
+          "fill: the face, and the teeth, tongue, the mouth's inside and the tongue piercing under Mouth")
     check({settings.face_eyeballs, *others} == {objects["eye_l"], objects["eye_r"]} and len(others) == 1,
           "fill: one eyeball under Eyeballs, the other under Other Parts")
     face.clear_scene()
@@ -291,9 +291,9 @@ def test_fill_meshes():
     objects, _info = face.build_mouth(joined=True, socket_in_skin=True)
     face.select(objects.values(), objects["skin"])
     check(bpy.ops.magic_fit.face_meshes_from_selection() == {'FINISHED'}, "fill: runs again")
-    check(settings.face_teeth == objects["teeth"] and settings.face_tongue == objects["teeth"]
-          and settings.face_mouth is None,
-          "fill: a mesh with teeth and tongue goes under both; a box in the face's mesh stays with the face")
+    mouth = [item.object for item in settings.face_mouth_parts]
+    check(len(mouth) == 2 and set(mouth) == {objects["teeth"], objects["piercing"]},
+          "fill: a mesh with teeth and tongue goes under Mouth once; a box in the face's mesh stays with the face")
     other = objects["piercing"]
     settings.face_add_lash = other
     settings.face_add_lash = other
@@ -302,7 +302,7 @@ def test_fill_meshes():
     settings.face_lashes[0].object = None
     check(not settings.face_lashes, "lists: clearing a mesh takes it off the list")
     check(bpy.ops.magic_fit.face_meshes_clear() == {'FINISHED'} and settings.face_skin is None
-          and settings.face_teeth is None and not settings.face_others, "clear: empties the Meshes")
+          and not settings.face_mouth_parts and not settings.face_others, "clear: empties the Meshes")
 
 
 def armature_of(obj):

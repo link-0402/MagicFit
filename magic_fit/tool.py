@@ -8,7 +8,7 @@ import bpy
 import gpu
 from gpu.types import GPUBatch, GPUVertBuf, GPUVertFormat
 
-from . import clipping, facing, hairing, tabs
+from . import clipping, facing, hairing, resizing, tabs
 from .operators import (
     FACE_REPAIRS,
     MAGIC_FIT_OT_body_fit,
@@ -314,10 +314,7 @@ def _draw_face_meshes(layout, settings):
     col.prop(settings, "face_eyeballs")
     _draw_face_list(col, settings, "face_lashes", "face_add_lash", "Lashes")
     col.separator(factor=0.5)
-    col.prop(settings, "face_teeth")
-    col.prop(settings, "face_tongue")
-    col.prop(settings, "face_mouth")
-    col.prop(settings, "face_tongue_piercing")
+    _draw_face_list(col, settings, "face_mouth_parts", "face_add_mouth", "Mouth")
     col.separator(factor=0.5)
     _draw_face_list(col, settings, "face_others", "face_add_other", "Other Parts")
     row = col.row(align=True)
@@ -1070,6 +1067,24 @@ def _draw_key_search(layout, settings, prop, obj, text):
         layout.prop_search(settings, prop, keys, "key_blocks", text=text, icon='SHAPEKEY_DATA')
 
 
+def _draw_devkit_sizes(layout, settings, driving):
+    """Devkit Sizes, for a To body whose shape keys Yet Another Devkit's settings ``driving`` drive."""
+    if not driving:
+        return
+    layout.prop(settings, "resize_use_sizes")
+    if not settings.resize_use_sizes:
+        return
+    if "chest_size" in driving:
+        layout.prop(settings, "resize_chest")
+    if "leg_size" in driving:
+        layout.prop(settings, "resize_legs")
+    switches = [name for name in ("rue", "buff", "lavabod") if name in driving]
+    if switches:
+        col = layout.column(heading="Body", align=True)
+        for name in switches:
+            col.prop(settings, "resize_" + name)
+
+
 # UILayout.prop takes a placeholder from Blender 4.1 on.
 _HAS_PLACEHOLDER = 'placeholder' in bpy.types.UILayout.bl_rna.functions['prop'].parameters.keys()
 
@@ -1092,6 +1107,7 @@ class VIEW3D_PT_resize_sidebar(tabs.TabPanel, bpy.types.Panel):
         row = col.row()
         row.active = settings.resize_to_object not in (None, body)
         row.prop(settings, "resize_match")
+        _draw_devkit_sizes(col, settings, resizing.devkit_settings(settings.resize_to_object or body))
         col.prop(settings, "resize_use_keys")
         if settings.resize_use_keys:
             _draw_key_search(col, settings, "resize_from_key", body, "From Shapekey")
