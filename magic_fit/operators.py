@@ -536,14 +536,14 @@ def check_resize_ready(context):
         if sizes is None:
             return "Pick a To Body, or turn on Devkit Sizes or Use Shapekeys"
     from_key, to_key = resize_keys(settings)
-    try:
-        to_values = resize_to_values(settings)
-    except resizing.ResizeError as error:
-        return str(error)
-    if sizes is not None and not to_values and settings.resize_to_object in (None, body) and not (from_key or to_key):
+    # Which sizes change takes only the devkit's settings: the drivers are worked out when Resize runs (they can
+    # be hundreds, and this runs on every redraw).
+    sizes_change = bool(sizes) and bool(resizing.devkit_label(
+        sizes, resizing.devkit_state(settings.resize_to_object or body)))
+    if sizes is not None and not sizes_change and settings.resize_to_object in (None, body) and not (from_key or to_key):
         return "The devkit shows these sizes now: pick others"
     problem = resizing.check_shapes(body, from_key, settings.resize_to_object, to_key, settings.resize_match,
-                                    to_values)
+                                    sizes_change)
     if problem is not None:
         return problem
     targets = resize_targets(context)
@@ -2092,13 +2092,17 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
         if armature is None and parts:
             armature = hairing.weighted_armature(parts[0])
         offset = hairing.armature_offset(armature, reference.rig(race, 0))
-        rests = straighten.rest_geometry(context, targets, ('INDEXED',) * len(targets))
-        part_rests = straighten.rest_geometry(context, parts, ('INDEXED',) * len(parts)) if parts else []
         matches = None
         best = self.skeleton < 0 and settings.hair_skeleton_mode != 'PICK'
         # A picked skeleton still gets the best matches, for the panel to suggest, unless the hair has them.
-        if best or any(target.magic_fit_hair.race != race or not target.magic_fit_hair.matches
-                       for target in targets):
+        matching = best or any(target.magic_fit_hair.race != race or not target.magic_fit_hair.matches
+                               for target in targets)
+        # The other parts are read only to be matched along or held to, together with the targets: each read puts
+        # posed armatures in their rest position and back, evaluating the scene twice.
+        read = parts if matching or settings.hair_layer_range > 0.0 else []
+        rests = straighten.rest_geometry(context, targets + read, ('INDEXED',) * (len(targets) + len(read)))
+        rests, part_rests = rests[:len(targets)], rests[len(targets):]
+        if matching:
             whole = rests + part_rests
             points = np.concatenate([rest.co for rest in whole])
             starts = np.cumsum([0] + [len(rest.co) for rest in whole[:-1]])
@@ -3004,6 +3008,39 @@ def _missing_note(missing):
     return ", ".join(kinds)
 
 
+def edit_rest_pose(operator, context, armature, move):
+    """Call ``move`` (no arguments) with ``armature`` in Edit Mode, to move its rest pose, then put the mode,
+    selection, active object and hiding back. Returns whether it could (``operator`` reports why not)."""
+    view_layer = context.view_layer
+    active = view_layer.objects.active
+    selected = list(context.selected_objects)
+    hidden = armature.hide_get(), armature.hide_viewport
+    armature.hide_set(False)
+    armature.hide_viewport = False
+    try:
+        if not armature.visible_get() or armature.library is not None or armature.data.library is not None:
+            operator.report({'WARNING'}, "Couldn't edit '{:s}' (hidden in a hidden collection, or linked): its "
+                                         "rest pose wasn't moved along".format(armature.name))
+            return False
+        for obj in selected:
+            obj.select_set(False)
+        view_layer.objects.active = armature
+        armature.select_set(True)
+        bpy.ops.object.mode_set(mode='EDIT')
+        try:
+            move()
+        finally:
+            bpy.ops.object.mode_set(mode='OBJECT')
+        return True
+    finally:
+        armature.select_set(False)
+        for obj in selected:
+            obj.select_set(True)
+        view_layer.objects.active = active
+        armature.hide_set(hidden[0])
+        armature.hide_viewport = hidden[1]
+
+
 class MAGIC_FIT_OT_line_up(bpy.types.Operator):
     """Scale, turn and pose the selected model and its armature so its hips, shoulders and joints line up
     with the body"""
@@ -3112,38 +3149,8 @@ class MAGIC_FIT_OT_line_up(bpy.types.Operator):
     def _move_rest_pose(self, context, result):
         """Move the armature's rest pose along, or put its bones where their vertex groups are, in its Edit
         Mode. Returns whether it could."""
-        armature = result.armature
-        view_layer = context.view_layer
-        active = view_layer.objects.active
-        selected = list(context.selected_objects)
-        hidden = armature.hide_get(), armature.hide_viewport
-        armature.hide_set(False)
-        armature.hide_viewport = False
-        try:
-            if not armature.visible_get() or armature.library is not None or armature.data.library is not None:
-                self.report({'WARNING'}, "Couldn't edit '{:s}' (hidden in a hidden collection, or linked): its "
-                                         "rest pose wasn't moved along".format(armature.name))
-                return False
-            for obj in selected:
-                obj.select_set(False)
-            view_layer.objects.active = armature
-            armature.select_set(True)
-            bpy.ops.object.mode_set(mode='EDIT')
-            try:
-                if result.move_armature:
-                    lineup.move_rest_pose(result)
-                else:
-                    lineup.place_bones(result)
-            finally:
-                bpy.ops.object.mode_set(mode='OBJECT')
-            return True
-        finally:
-            armature.select_set(False)
-            for obj in selected:
-                obj.select_set(True)
-            view_layer.objects.active = active
-            armature.hide_set(hidden[0])
-            armature.hide_viewport = hidden[1]
+        move = lineup.move_rest_pose if result.move_armature else lineup.place_bones
+        return edit_rest_pose(self, context, result.armature, lambda: move(result))
 
 
 class MAGIC_FIT_OT_line_up_hair(bpy.types.Operator):
@@ -3207,7 +3214,8 @@ class MAGIC_FIT_OT_line_up_hair(bpy.types.Operator):
             self.report({'ERROR'}, str(error))
             return {'CANCELLED'}
         hairlineup.write_meshes(result)
-        moved = [armature.name for armature in result.armatures if self._move_rest_pose(context, result, armature)]
+        moved = [armature.name for armature in result.armatures if edit_rest_pose(
+            self, context, armature, lambda armature=armature: hairlineup.move_rest_pose(result, armature))]
         hairlineup.remember(meshes, head, self.push_out or (keep and before[0]), self.distance)
 
         what = "{:d} mesh{:s}".format(len(meshes), "es" if len(meshes) != 1 else "")
@@ -3225,38 +3233,6 @@ class MAGIC_FIT_OT_line_up_hair(bpy.types.Operator):
         self.report({'INFO'}, "Lined up {:s} on '{:s}' in {:.1f} s: {:s}".format(
             what, head.name, time.perf_counter() - started, ", ".join(details)))
         return {'FINISHED'}
-
-    def _move_rest_pose(self, context, result, armature):
-        """Move the rest pose of ``armature`` along with the hair, in its Edit Mode. Returns whether it could."""
-        view_layer = context.view_layer
-        active = view_layer.objects.active
-        selected = list(context.selected_objects)
-        hidden = armature.hide_get(), armature.hide_viewport
-        armature.hide_set(False)
-        armature.hide_viewport = False
-        try:
-            if not armature.visible_get() or armature.library is not None or armature.data.library is not None:
-                self.report({'WARNING'}, "Couldn't edit '{:s}' (hidden in a hidden collection, or linked): its "
-                                         "rest pose wasn't moved along".format(armature.name))
-                return False
-            for obj in selected:
-                obj.select_set(False)
-            view_layer.objects.active = armature
-            armature.select_set(True)
-            bpy.ops.object.mode_set(mode='EDIT')
-            try:
-                hairlineup.move_rest_pose(result, armature)
-            finally:
-                bpy.ops.object.mode_set(mode='OBJECT')
-            return True
-        finally:
-            armature.select_set(False)
-            for obj in selected:
-                obj.select_set(True)
-            view_layer.objects.active = active
-            armature.hide_set(hidden[0])
-            armature.hide_viewport = hidden[1]
-
 
 class MAGIC_FIT_OT_use_tool(bpy.types.Operator):
     """Switch the active mesh to this brush's mode and pick the brush"""

@@ -1063,7 +1063,7 @@ def _key_name(obj, name):
 def check_shapes(body, from_key, to_body, to_key, match='AUTO', to_values=None):
     """Why the From and To shapes can't be used, or None when they can. ``to_body`` None means ``body``;
     ``match`` is how different bodies are matched (see `matching`); ``to_values`` are key values of the To
-    shape, as for `body_shapes`."""
+    shape, as for `body_shapes` (or just true when there are some)."""
     if body is None:
         return "Pick the From Body"
     if body.type != 'MESH':

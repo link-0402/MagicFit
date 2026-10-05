@@ -55,6 +55,18 @@ def strip(profile, height=HEIGHT, edge=EDGE):
     return co, quads
 
 
+def double_sided(piece, other_diagonal=False):
+    """A piece (co, quads) made double-sided as game models are: each quad copied the other way round, on
+    vertices of its own at the same spots (welded, every triangle is there twice). The copy starts at the
+    same corner, so Blender splits it along the same diagonal; with ``other_diagonal`` it is the quad fully
+    reversed, starting at its last corner, so Blender splits it along the other one and no triangle of the
+    back is a copy of one of the front."""
+    co, quads = piece
+    order = (3, 2, 1, 0) if other_diagonal else (0, 3, 2, 1)
+    back = [tuple(quad[k] + len(co) for k in order) for quad in quads]
+    return np.concatenate((co, co)), list(quads) + back
+
+
 def build(parts=((0.0, 0.1), (0.1005, 0.2005)), edge=EDGE, height=HEIGHT, weights=None, armature=True,
           groups=BONES, name="Sheet", pieces=None):
     """Build the scene (replacing everything): the rig and a sheet with a part for each (x0, x1) of

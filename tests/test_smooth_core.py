@@ -259,6 +259,41 @@ def test_bend_is_not_a_fold():
                   "bend: bent back gently, one smooth sheet is left apart ({:.3f})".format(gap))
 
 
+def test_double_sided():
+    # Double-sided parts have each triangle twice, the other way round, on the same welded vertices: every
+    # edge inside them joins four triangles, and an edge of more than two joined nothing, so each triangle
+    # was a sheet of its own. A part's own triangles counted as other sheets: nodes linked to the copies
+    # around them and one smooth sheet to itself. Front and back are now one sheet, linked as one side is.
+    # So are they with the back split along the quads' other diagonals (each copied fully reversed), whose
+    # triangles aren't copies of the front's: four on an edge again, two on each side of it, which joined
+    # nothing either (the seam linked 80 times, the strip bent back gently 1,804 times, and folded with
+    # sharp corners its layers stayed apart, 0.991).
+    for other in (False, True):
+        name = "double-sided, other diagonals" if other else "double-sided"
+        pieces = [smooth.double_sided(smooth.grid(x0, x1, smooth.HEIGHT, smooth.EDGE), other)
+                  for x0, x1 in ((0.0, 0.1), (0.1005, 0.2005))]
+        _rig, sheet, _owner = smooth.build(pieces=pieces)
+        links = new_stroke(sheet, merge_range=0.002).graph.links
+        check(links == 22, "{:s}: each node of the seam links to the other part once, as with one side ({:d})".format(
+            name, links))
+        apart = 0.012
+        for sharp in (False, True):
+            piece = smooth.double_sided(smooth.strip(folded(apart, sharp=sharp, steps=24)), other)
+            _rig, sheet, _owner = smooth.build(pieces=[piece], weights=by_layer(apart))
+            lower, upper = layers_at(sheet, 0.06, apart)
+            stroke = new_stroke(sheet, merge_range=0.015, reach=0.005)
+            smooth.apply_all(stroke, sheet)
+            after = smooth.by_name(sheet)
+            gap = abs(after["j_a"][lower] - after["j_a"][upper])
+            if sharp:
+                check(stroke.graph.links > 0 and gap < 0.05,
+                      "{:s}: folded with sharp corners, the layers end up alike ({:.3f})".format(name, gap))
+            else:
+                check(stroke.graph.links == 0 and gap > 0.8,
+                      "{:s}: bent back gently, one smooth sheet is left apart ({:.3f}, {:d} links)".format(
+                          name, gap, stroke.graph.links))
+
+
 def test_dense_over_coarse():
     # A fine layer (2.5 mm cells) half a millimetre over a coarse one (2 cm cells), its vertices nowhere
     # near the coarse one's: every one of them still holds on to the surface under it.

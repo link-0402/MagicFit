@@ -4348,8 +4348,9 @@ def plan_face(meshes, skin_index, reference, *, skin='ALL', parts='ALL', targets
                     onto = on_tongue or with_mouth
                 else:
                     onto = with_mouth if any(f.inside for f in members) else face
+                weights = piece_weights(members, onto, whole=kind == PART_PIERCING)
                 for f in members:
-                    goals[i][f.verts] = piece_weights(members, onto, whole=kind == PART_PIERCING)[id(f)]
+                    goals[i][f.verts] = weights[id(f)]
     for i, goal in goals.items():
         if i == skin_index:
             if skin_index in plan.goals:

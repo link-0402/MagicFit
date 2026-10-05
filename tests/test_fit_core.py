@@ -588,11 +588,29 @@ def stroke_down_the_gap(stroke):
                     stroke.dab(np.array([s * (LEG_GAP / 2.0 + 0.001), y, z]), 0.02, 0.5)
 
 
-def fit_trousers(layer_radius=0.02, mode='FIT', thickness=0.0, smooth=0.5):
-    """Fit `trouser_legs` onto `legs` down both sides of the gap, with their triangles. Returns the
-    body, the positions before and after, and each vertex's leg, angle from the gap and layer."""
+def flipped_quads(tris):
+    """A back for triangles split from quads along their first diagonal, (a, b, c) and (a, c, d) as `tube`'s
+    are: each quad the other way round, split along its other diagonal, (d, c, b) and (d, b, a), as Blender
+    splits a quad copied fully reversed. None of its triangles is a copy of one of ``tris``."""
+    starting = {(a, b): k for k, (a, b, _c) in enumerate(tris.tolist())}
+    back = []
+    for a, b, c in tris.tolist():
+        k = starting.get((a, c))
+        if k is not None:
+            d = int(tris[k, 2])
+            back += [(d, c, b), (d, b, a)]
+    return np.array(back, dtype=np.int64)
+
+
+def fit_trousers(layer_radius=0.02, mode='FIT', thickness=0.0, smooth=0.5, double_sided=False, other_diagonal=False):
+    """Fit `trouser_legs` onto `legs` down both sides of the gap, with their triangles (each twice, the
+    other way round, when ``double_sided``; the back split along the quads' other diagonals with
+    ``other_diagonal``). Returns the body, the positions before and after, and each vertex's leg, angle
+    from the gap and layer."""
     body = legs()
     co, edges, tris, side, angle, layer = trouser_legs(thickness)
+    if double_sided:
+        tris = np.concatenate((tris, flipped_quads(tris) if other_diagonal else tris[:, ::-1]))
     start = co.copy()
     stroke = fitting.FitStroke(body, co, np.ones(len(co), bool), mode=mode, offset=0.001, layer_radius=layer_radius,
                                max_distance=0.05, edges=edges, tris=tris, smooth=smooth)
@@ -657,6 +675,57 @@ def test_leg_gap_two_layers():
           "two layers in the gap: thickness kept (off by {:.3f} mm at most)".format(np.abs(thickness - 0.003).max() * 1000))
     check(inner.mean() < 0.0005, "two layers in the gap: inner layer at the offset ({:.2f} mm off)".format(inner.mean() * 1000))
     check(crossed == 0, "two layers in the gap: the outer layer stayed over its own leg ({} crossed)".format(crossed))
+
+
+def test_double_sided():
+    # A double-sided mesh has each triangle twice on the same vertices, the other way round, so every edge
+    # inside it joins four triangles. That joined nothing: every triangle was a sheet of its own and voted
+    # alone on which way it faces. With every garment of these tests double-sided, 14 checks failed (the
+    # two layers in the gap 5.7 mm off their thickness, 14 vertices over the other leg). Its front and back
+    # are now a sheet each, as if they lay apart, and it fits as one side does. Smooth takes both as one.
+    # So it does with the back split along the quads' other diagonals (each copied fully reversed): no
+    # triangle is a copy of another, so that joined nothing either: every quad's front and back was a sheet
+    # (3,584 for these legs), and the legs fitted up to 8 mm off.
+    co, edges, tris, side, angle, layer = trouser_legs(0.003)
+    sheet, count = fitting.mesh_sheets(co, tris)
+    at = np.zeros(len(co), dtype=np.int64)
+    at[tris] = sheet[:, None]
+    one_side = fit_trousers(thickness=0.003)[2]
+    for other in (False, True):
+        name = "double-sided, other diagonals" if other else "double-sided"
+        both = np.concatenate((tris, flipped_quads(tris) if other else tris[:, ::-1]))
+        merged, merged_count = fitting.mesh_sheets(co, both)
+        check(len(both) == 2 * len(tris) and count == 4 and merged_count == count and np.array_equal(merged, at[both[:, 0]]),
+              "{}: front and back are one of Smooth's sheets ({} and {})".format(name, count, merged_count))
+        stroke = fitting.FitStroke(legs(), co.copy(), np.ones(len(co), bool), mode='FIT', offset=0.001, layer_radius=0.02,
+                                   max_distance=0.05, edges=edges, tris=both, smooth=0.5)
+        check(len(stroke.sheet_sign) == 2 * count, "{}: front and back are sheets of their own for Body Fit "
+              "({} for {} triangles)".format(name, len(stroke.sheet_sign), len(both)))
+        two_sides = fit_trousers(thickness=0.003, double_sided=True, other_diagonal=other)[2]
+        apart = np.linalg.norm(two_sides - one_side, axis=1).max()
+        check(apart < 1e-5, "{}: fitted as one side is ({:.4f} mm apart at most)".format(name, apart * 1000))
+
+
+def test_crowded_edges():
+    # Where more than two triangles share an edge, only a double-sided surface's front and back join across
+    # it: each triangle to the one going on its way (along the edge the other way), whether the back's
+    # triangles are copies of the front's or, split along other diagonals, lie a little off them. Two
+    # sheets crossing there, a fin standing on a sheet, or two layers lying together facing the same way
+    # join nothing there, as Body Fit keeps parts touching along an edge apart.
+    co = np.array([(0.0, 0.0, 0.0), (0.0, 0.01, 0.0), (0.01, 0.0, 0.0), (-0.01, 0.0, 0.0), (0.0, 0.0, 0.01),
+                   (0.0, 0.0, -0.01), (0.01, 0.0, 0.0005), (-0.01, 0.0, 0.0005)])
+    cases = {"a double-sided sheet": ([(0, 1, 2), (1, 0, 6), (1, 0, 3), (0, 1, 7)], {(0, 2), (1, 3)}),
+             "two sheets crossing": ([(0, 1, 2), (1, 0, 3), (0, 1, 4), (1, 0, 5)], set()),
+             "a fin": ([(0, 1, 2), (1, 0, 3), (0, 1, 4)], set()),
+             "two layers facing one way": ([(0, 1, 2), (1, 0, 3), (0, 1, 6), (1, 0, 7)], set())}
+    for name, (tris, expected) in cases.items():
+        tris = np.array(tris)
+        a, b, c = (co[tris[:, k]] for k in range(3))
+        normals = np.cross(b - a, c - a)
+        unit = normals / np.linalg.norm(normals, axis=1, keepdims=True)
+        one, other = fitting.sheet_joins(unit, (a + b + c) / 3.0, co, tris)[:2]
+        joined = {tuple(sorted(pair)) for pair in zip(one.tolist(), other.tolist())}
+        check(joined == expected, "crowded edge, {}: joins {}".format(name, sorted(joined)))
 
 
 def test_modes_keep_to_their_side():
