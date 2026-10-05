@@ -33,6 +33,11 @@ Hair Weights needs no weights and no armature:
   (j_sebo_c) below the neck (Neck Weight). The game's Miqo'te hair has the cat ears: a hair that has
   them (a part standing out along an ear bone) gives them to the ear bones (Ears); hair that only
   covers the scalp there stays with the head.
+- Hair lying on hair (cards over cards, strands over a scalp cap, a card folded over, the hair's other
+  meshes) is held together: each vertex is held to where it lies on another layer, along its normal
+  within Layer Range, and the weights are smoothed a little along the mesh (see `hold_layers`). Weighted
+  each by its own distance from the scalp and chains, layers a few millimetres apart would swing apart
+  and pass through each other, showing the inner layer's shading in spots.
 
 The best skeleton for a hair is found by a score of how its chains fit the hair: how close the hanging
 hair is to a chain and how far it hangs past one, how much of it each bone would move, how many bones
@@ -48,6 +53,7 @@ import os
 
 import numpy as np
 from mathutils import Matrix, Vector
+from mathutils.bvhtree import BVHTree
 from mathutils.kdtree import KDTree
 
 from . import fitting, goals, straighten
@@ -117,6 +123,22 @@ HAIR_LENGTH_SHARE = 0.98
 BONE_LENGTH = 0.05
 # Shares below this don't count.
 SHARE_EPSILON = 1e-6
+# Layers (hair lying on hair: cards over cards, strands over a scalp cap) within LAYER_RANGE of each other
+# are held together as hard as LAYER_BIND times the area around a vertex, so they end up with the same
+# weights (to within about 1 / (1 + 2 * LAYER_BIND)), and the weights are smoothed over LAYER_SMOOTH along
+# the mesh (see `hold_layers`). Weights below LAYER_CUTOFF are dropped then, as Smooth does.
+LAYER_RANGE = 0.01
+LAYER_BIND = 50.0
+LAYER_SMOOTH = 0.01
+LAYER_CUTOFF = 0.002
+# Looking for the layer a vertex lies on, a ray passes at most this many triangles of its own sheets, each
+# by this much.
+LAYER_HITS = 4
+LAYER_STEP = 1e-5
+# Holding layers together is solved by conjugate gradients: at most this many steps, until the square of what's
+# left is this share of where it started (weights within about 1e-4; real hair takes 90 to 300 steps).
+LAYER_SOLVE_ITERATIONS = 1000
+LAYER_SOLVE_TOLERANCE = 1e-8
 # The score looks at this many triangles of the hair at most (picked at random, by area).
 SCORE_TRIANGLES = 8000
 
@@ -558,12 +580,14 @@ def ear_shares(points, tris, rig):
 
 
 def hair_weights(points, tris, rig, *, hang_start=0.025, hang_length=0.07, neck_weight=0.3,
-                 chain_stretch=0.5, joint_blend=0.30, ears=True, weld=None):
+                 chain_stretch=0.5, joint_blend=0.30, ears=True, layer_range=LAYER_RANGE, fixed=None, weld=None):
     """Bone weights of hair ``points`` (world space, rest pose, (n, 3)) with triangles ``tris``: (bone
     names, (n, len(names)) weights adding up to 1 per vertex).
 
-    ``weld`` (vertex -> welded group) joins vertices sharing a position into loose parts; by default
-    they are found here."""
+    Layers within ``layer_range`` of each other are held together (see `hold_layers`), also to ``fixed``:
+    (points, triangles, weights in the columns of the names) of the hair's other parts, weighted before,
+    which keep their weights. ``weld`` (vertex -> welded group) joins vertices sharing a position into
+    loose parts; by default they are found here."""
     points = np.asarray(points, dtype=np.float64)
     tris = np.asarray(tris, dtype=np.int64).reshape(-1, 3)
     model = rig.model(points)
@@ -624,7 +648,198 @@ def hair_weights(points, tris, rig, *, hang_start=0.025, hang_length=0.07, neck_
     weights[:, column[HEAD]] += rest * head
     weights[:, column[NECK]] += rest * neck
     weights[:, column[UPPER_BACK]] += rest * back
+    if layer_range > 0.0:
+        weights = hold_layers(points, tris, weights, layer_range, fixed=fixed)
     return names, weights
+
+
+# -----------------------------------------------------------------------------
+# Layers
+
+def unique_triangles(tris):
+    """``tris`` without repeats (any order of the same corners), without those missing a corner, in their
+    order: double-sided hair has a copy of each triangle facing the other way, on the same vertices."""
+    tris = np.asarray(tris, dtype=np.int64).reshape(-1, 3)
+    tris = tris[(tris[:, 0] != tris[:, 1]) & (tris[:, 1] != tris[:, 2]) & (tris[:, 2] != tris[:, 0])]
+    if not len(tris):
+        return tris
+    return tris[np.sort(np.unique(np.sort(tris, axis=1), axis=0, return_index=True)[1])]
+
+
+def vertex_normals(points, tris):
+    """Each point's normal, whichever way round its triangles face ((n, 3); zero without triangles): the
+    direction its triangles' normals (weighted by area) lie closest to."""
+    a, b, c = (points[tris[:, k]] for k in range(3))
+    normal = np.cross(b - a, c - a)
+    outer = np.einsum("ij,ik->ijk", normal, normal) / np.maximum(np.linalg.norm(normal, axis=1), 1e-30)[:, None, None]
+    total = np.zeros((len(points), 3, 3))
+    for k in range(3):
+        np.add.at(total, tris[:, k], outer)
+    values, vectors = np.linalg.eigh(total)
+    result = vectors[:, :, 2]
+    result[values[:, 2] <= 1e-20] = 0.0
+    return result
+
+
+def layer_links(points, tris, reach):
+    """The layers each of ``points`` (welded) lies on, with triangles ``tris`` (`unique_triangles`): the
+    first triangle hit going from it along its normal, each way, within ``reach``, that isn't of a sheet
+    it lies on (see `fitting.mesh_sheets`; a card, or a layer of a folded one). Returns (points, the hit
+    triangles' corners (k, 3), barycentric coordinates there (k, 3), distances)."""
+    empty = (np.zeros(0, dtype=np.int64), np.zeros((0, 3), dtype=np.int64), np.zeros((0, 3)), np.zeros(0))
+    if not len(tris) or reach <= 0.0:
+        return empty
+    sheet, sheets = fitting.mesh_sheets(points, tris)
+    lying_on = set((tris.T.reshape(-1) * sheets + np.tile(sheet, 3)).tolist())
+    sheet = sheet.tolist()
+    normals = vertex_normals(points, tris)
+    tree = BVHTree.FromPolygons(points.tolist(), tris.tolist(), all_triangles=True)
+    cast = tree.ray_cast
+    found, hits, locations, distances = [], [], [], []
+    for node, (point, normal) in enumerate(zip(points.tolist(), normals.tolist())):
+        if normal == [0.0, 0.0, 0.0]:
+            continue
+        for sign in (1.0, -1.0):
+            ray = (sign * normal[0], sign * normal[1], sign * normal[2])
+            # From just off the point, not to hit its own triangles there, then past the point's own sheets
+            # (where a card curves or ends at the point).
+            origin = (point[0] + LAYER_STEP * ray[0], point[1] + LAYER_STEP * ray[1], point[2] + LAYER_STEP * ray[2])
+            travelled = LAYER_STEP
+            for _ in range(LAYER_HITS):
+                hit, _normal, index, distance = cast(origin, ray, reach - travelled)
+                if hit is None:
+                    break
+                travelled += distance
+                if node * sheets + sheet[index] not in lying_on:
+                    found.append(node)
+                    hits.append(index)
+                    locations.append(hit)
+                    distances.append(travelled)
+                    break
+                travelled += LAYER_STEP
+                if travelled >= reach:
+                    break
+                origin = (hit[0] + LAYER_STEP * ray[0], hit[1] + LAYER_STEP * ray[1], hit[2] + LAYER_STEP * ray[2])
+    if not found:
+        return empty
+    found = np.array(found, dtype=np.int64)
+    corners = tris[np.array(hits, dtype=np.int64)]
+    bary = fitting._barycentric(np.array(locations), *(points[corners[:, k]] for k in range(3)))
+    bary = np.clip(bary, 0.0, None)
+    bary /= np.maximum(bary.sum(1, keepdims=True), 1e-12)
+    return found, corners, bary, np.array(distances)
+
+
+def hold_layers(points, tris, weights, layer_range, *, fixed=None):
+    """``weights`` ((n, k), rows adding up to 1) of hair ``points`` with triangles ``tris``, its layers
+    held together: each vertex is held to the layers it lies on (`layer_links`) within ``layer_range``
+    (letting go a little farther, as Smooth's links do) as hard as `LAYER_BIND` times the area around
+    it, and the weights are smoothed along the mesh over about `LAYER_SMOOTH`, so that they change
+    gradually where one layer stops lying on another. Layers lying on each other end up with about the
+    same weights, so they move together and don't pass through each other as the bones swing; elsewhere
+    the weights change little.
+
+    ``fixed`` (points, triangles, weights) are the hair's other parts: layers lying on them take their
+    weights, and they keep theirs. Weights below `LAYER_CUTOFF` are dropped."""
+    from . import smoothing
+    points = np.asarray(points, dtype=np.float64)
+    weights = np.asarray(weights, dtype=np.float64)
+    count = len(points)
+    tris = np.asarray(tris, dtype=np.int64).reshape(-1, 3)
+    known = np.zeros(count, dtype=bool)
+    if fixed is not None and len(fixed[0]):
+        fixed_points, fixed_tris, fixed_weights = fixed
+        points = np.concatenate((points, np.asarray(fixed_points, dtype=np.float64)))
+        tris = np.concatenate((tris, np.asarray(fixed_tris, dtype=np.int64).reshape(-1, 3) + count))
+        weights = np.concatenate((weights, np.asarray(fixed_weights, dtype=np.float64)))
+        known = np.concatenate((known, np.ones(len(fixed_points), dtype=bool)))
+    weld, nodes = fitting.weld_groups(points, fitting.WELD_DISTANCE)
+    rest = np.zeros((nodes, 3))
+    rest[weld] = points
+    t = unique_triangles(weld[tris])
+    # Each welded vertex's weights: those it's fixed at (a vertex of another part where a mesh was split),
+    # else the mean of its vertices'.
+    fixed_node = np.zeros(nodes, dtype=bool)
+    fixed_node[weld[known]] = True
+    use = known == fixed_node[weld]
+    values = np.zeros((nodes, weights.shape[1]))
+    np.add.at(values, weld[use], weights[use])
+    values /= np.maximum(np.bincount(weld[use], minlength=nodes), 1)[:, None]
+    if not len(t) or fixed_node.all():
+        return values[weld[:count]]
+
+    area = vertex_areas(rest, t)
+    mass = np.maximum(area, smoothing.MIN_MASS * (float(np.median(area[area > 0.0])) if (area > 0.0).any() else 1e-6))
+    found, corners, bary, distance = layer_links(rest, t, layer_range * (1.0 + smoothing.FADE))
+    hold = LAYER_BIND * mass[found] * smoothing._fade(distance, layer_range)
+    # The weights x minimise the sum of: mass * (x - values)^2 at each welded vertex; hold * (x at a vertex -
+    # x where it lies on another layer, by the barycentric coordinates there)^2 for each link (holding it to
+    # that point, not to each corner: that would even out the whole triangle, spreading weights as far as
+    # the triangles are wide); and the smoothing, LAYER_SMOOTH^2 * the cotangent weight * (x at one end of
+    # an edge - x at the other)^2. Each term's matrix entries:
+    ends = np.column_stack((found, corners))
+    factor = np.column_stack((np.ones(len(found)), -bary))
+    rows = [np.arange(nodes), np.repeat(ends, 4, axis=1).reshape(-1)]
+    columns = [np.arange(nodes), np.tile(ends, (1, 4)).reshape(-1)]
+    entries = [mass, (hold[:, None, None] * factor[:, :, None] * factor[:, None, :]).reshape(-1)]
+    edges, conductance = straighten.cotangent_weights(rest, t)
+    if len(conductance):
+        mean = float(conductance.mean())
+        conductance = LAYER_SMOOTH * LAYER_SMOOTH * np.clip(
+            conductance, smoothing.MIN_CONDUCTANCE * mean, smoothing.MAX_CONDUCTANCE * mean)
+        a, b = edges[:, 0], edges[:, 1]
+        rows += [a, b, a, b]
+        columns += [a, b, b, a]
+        entries += [conductance, conductance, -conductance, -conductance]
+    rows, columns, entries = np.concatenate(rows), np.concatenate(columns), np.concatenate(entries)
+
+    # Solved for the welded vertices that aren't fixed (the fixed ones' terms move to the right-hand side),
+    # and only for the bones the hair has weights for (the rig has the whole body's).
+    used = np.flatnonzero(values.any(axis=0))
+    free = np.flatnonzero(~fixed_node)
+    local = np.full(nodes, -1, dtype=np.int64)
+    local[free] = np.arange(len(free))
+    mine = local[rows] >= 0
+    rhs = mass[free, None] * values[np.ix_(free, used)]
+    border = mine & (local[columns] < 0)
+    np.add.at(rhs, local[rows[border]], -entries[border, None] * values[np.ix_(columns[border], used)])
+    inside = mine & ~border
+    values[np.ix_(free, used)] = _solve(len(free), local[rows[inside]], local[columns[inside]], entries[inside],
+                                        rhs, values[np.ix_(free, used)])
+
+    values = np.maximum(values[weld[:count]], 0.0)
+    largest = values.argmax(1)
+    values[values < LAYER_CUTOFF] = 0.0
+    values[np.arange(count), largest] = np.maximum(values[np.arange(count), largest], LAYER_CUTOFF)
+    return values / values.sum(1, keepdims=True)
+
+
+def _solve(size, rows, columns, entries, rhs, guess):
+    """Solve A x = ``rhs`` for each of its columns, A being the symmetric positive definite ``size`` square
+    matrix with ``entries`` at ``rows``, ``columns`` (repeats adding up), by conjugate gradients from
+    ``guess``, multiplying by A with SciPy where it's there. (A sparse LU fills in badly once layers link
+    the mesh across: 30 s on a hair of 90,000 vertices, where this takes 2 s.)"""
+    from . import smoothing
+    diagonal = np.bincount(rows[rows == columns], entries[rows == columns], minlength=size)
+    solver = smoothing._direct_solver()
+    if solver is not None:
+        matrix = solver[0].csr_matrix((entries, (rows, columns)), shape=(size, size))
+
+        def multiply(x):
+            return matrix @ x
+    else:
+        order = np.argsort(rows, kind='stable')
+        rows, columns, entries = rows[order], columns[order], entries[order]
+        starts = np.flatnonzero(np.diff(rows, prepend=-1))
+
+        def multiply(x):
+            product = np.zeros_like(x)
+            if len(rows):
+                product[rows[starts]] = np.add.reduceat(x[columns] * entries[:, None], starts, axis=0)
+            return product
+
+    return straighten._conjugate_gradient(multiply, rhs, guess, 1.0 / diagonal, LAYER_SOLVE_ITERATIONS,
+                                          LAYER_SOLVE_TOLERANCE)
 
 
 # -----------------------------------------------------------------------------
@@ -773,7 +988,8 @@ class _Hair:
 def _deformation(hair, rig):
     """(stretch, lag) of the hair with ``rig``'s hair weights in POSES: how much its edges stretch, and
     how far its hanging part lags behind the head."""
-    names, weights = hair_weights(hair.points, hair.tris, rig, joint_blend=SCORE_JOINT_BLEND)
+    # As fitted: on a sample of the hair's triangles, whose layers don't hold together.
+    names, weights = hair_weights(hair.points, hair.tris, rig, joint_blend=SCORE_JOINT_BLEND, layer_range=0.0)
     mass = hair.area * hair.hanging
     total = max(mass.sum(), 1e-12)
     stretch = []
@@ -1041,22 +1257,31 @@ class HairStroke(goals.GoalStroke):
     """Blends a mesh's weights toward its hair weights, dab by dab.
 
     ``rest_co`` and ``tris`` are the mesh in the rest pose (world space) and ``rig`` the `HairRig` of the
-    hair's race and skeleton, moved to its armature. See `goals.GoalStroke` for how the weights change
+    hair's race and skeleton, moved to its armature. The hair weights are ``weights`` (bone names, a row per
+    vertex) when they were worked out already (for several meshes at once), else they're worked out here,
+    held to the ``fixed`` parts (see `hair_weights`). See `goals.GoalStroke` for how the weights change
     (``replace``: the hair weights replace all the old ones, as the Hair Weights button does).
     """
 
-    def __init__(self, obj, rest_co, tris, rig, *, hang_start=0.025, hang_length=0.07, neck_weight=0.3,
-                 chain_stretch=0.5, joint_blend=0.30, ears=True, max_groups=DEFAULT_MAX_GROUPS, group_mode='ALL',
-                 replace=False):
+    def __init__(self, obj, rest_co, tris, rig, *, weights=None, fixed=None, hang_start=0.025, hang_length=0.07,
+                 neck_weight=0.3, chain_stretch=0.5, joint_blend=0.30, ears=True, layer_range=LAYER_RANGE,
+                 max_groups=DEFAULT_MAX_GROUPS, group_mode='ALL', replace=False):
         super().__init__(obj, rest_co, max_groups=max_groups, group_mode=group_mode, replace=replace)
         self.rig = rig
-        tris = np.asarray(tris, dtype=np.int64).reshape(-1, 3)
-        welded_tris = self.weld[tris] if len(tris) else tris
-        names, weights = hair_weights(
-            self.rest, welded_tris, rig, hang_start=hang_start, hang_length=hang_length,
-            neck_weight=neck_weight, chain_stretch=chain_stretch, joint_blend=joint_blend, ears=ears,
-            weld=np.arange(self.weld_count),
-        )
+        if weights is None:
+            tris = np.asarray(tris, dtype=np.int64).reshape(-1, 3)
+            welded_tris = self.weld[tris] if len(tris) else tris
+            names, weights = hair_weights(
+                self.rest, welded_tris, rig, hang_start=hang_start, hang_length=hang_length,
+                neck_weight=neck_weight, chain_stretch=chain_stretch, joint_blend=joint_blend, ears=ears,
+                layer_range=layer_range, fixed=fixed, weld=np.arange(self.weld_count),
+            )
+        else:
+            # One goal per welded vertex: the mean of its vertices' (alike but for rounding).
+            names, per_vertex = weights
+            weights = np.zeros((self.weld_count, len(names)))
+            np.add.at(weights, self.weld, per_vertex)
+            weights /= np.maximum(np.bincount(self.weld, minlength=self.weld_count), 1)[:, None]
         self.goal_names = names
         self.goal_weights = weights
         self.hair_names = {bone.name for bone in rig.bones}
@@ -1090,8 +1315,8 @@ class HairStroke(goals.GoalStroke):
 # -----------------------------------------------------------------------------
 # Setting up
 
-def stroke_params(settings):
-    """`HairStroke` keyword arguments from the brush settings (`Scene.magic_fit`)."""
+def weight_params(settings):
+    """`hair_weights` keyword arguments from the settings (`Scene.magic_fit`)."""
     return dict(
         hang_start=settings.hair_hang_start,
         hang_length=settings.hair_hang_length,
@@ -1099,9 +1324,74 @@ def stroke_params(settings):
         chain_stretch=settings.hair_chain_stretch,
         joint_blend=settings.hair_joint_blend,
         ears=settings.hair_ears,
-        max_groups=settings.hair_max_groups,
-        group_mode=settings.group_mode,
+        layer_range=settings.hair_layer_range,
     )
+
+
+def stroke_params(settings):
+    """`HairStroke` keyword arguments from the brush settings (`Scene.magic_fit`)."""
+    return dict(weight_params(settings), max_groups=settings.hair_max_groups, group_mode=settings.group_mode)
+
+
+def hair_parts(context, targets, armature, race):
+    """The hair's other parts: meshes that aren't ``targets`` but were given hair weights for ``race``
+    before, deformed by ``armature`` or, when the targets have none yet, sharing a collection with them."""
+    data = {target.data.as_pointer() for target in targets}
+    collections = {collection for target in targets for collection in target.users_collection}
+    result = []
+    for obj in context.scene.objects:
+        if obj.type != 'MESH' or obj.data.as_pointer() in data:
+            continue
+        state = getattr(obj, "magic_fit_hair", None)
+        if state is None or state.race != race or state.skeleton < 0:
+            continue
+        own = weighted_armature(obj)
+        if own is None:
+            continue
+        if armature is not None and own != armature:
+            continue
+        if armature is None and not collections.intersection(obj.users_collection):
+            continue
+        result.append(obj)
+    return result
+
+
+def bone_weights(obj, names):
+    """The weights of ``obj``'s vertices on the bones ``names`` ((n, len(names)), each row adding up to 1),
+    and which vertices have any."""
+    column = {group.index: names.index(group.name) for group in obj.vertex_groups if group.name in names}
+    weights = np.zeros((len(obj.data.vertices), len(names)))
+    for vert in obj.data.vertices:
+        for elem in vert.groups:
+            k = column.get(elem.group)
+            if k is not None and elem.weight > 0.0:
+                weights[vert.index, k] += elem.weight
+    total = weights.sum(1)
+    has = total > 1e-6
+    weights[has] /= total[has, None]
+    return weights, has
+
+
+def fixed_parts(rests, parts, names):
+    """The hair's other ``parts`` (meshes, weighted before) as `hair_weights`' ``fixed``: their vertices
+    with weights on the bones ``names``, the triangles between them and those weights; their rest pose
+    geometry is ``rests`` (`straighten.rest_geometry`). None when there's nothing."""
+    points, tris, weights = [], [], []
+    start = 0
+    for obj, rest in zip(parts, rests):
+        part_weights, has = bone_weights(obj, names)
+        if len(part_weights) != len(rest.co) or not has.any():
+            continue
+        index = np.cumsum(has) - 1
+        part_tris = np.asarray(rest.tris, dtype=np.int64).reshape(-1, 3)
+        part_tris = part_tris[has[part_tris].all(1)]
+        points.append(np.asarray(rest.co, dtype=np.float64)[has])
+        tris.append(index[part_tris] + start)
+        weights.append(part_weights[has])
+        start += int(has.sum())
+    if not points:
+        return None
+    return np.concatenate(points), np.concatenate(tris), np.concatenate(weights)
 
 
 # The custom properties Hair Weights puts on each hair mesh with a hair skeleton, for exporters (such as
@@ -1157,5 +1447,38 @@ def build_stroke(context, obj, settings):
     if missing:
         raise HairError("Armature '{:s}' lacks the hair bones of {:s}: give the hair Hair Weights first".format(
             modifier.object.name, skeleton_label(number)))
+    params = stroke_params(settings)
     rest, = straighten.rest_geometry(context, (obj,), ('INDEXED',))
-    return HairStroke(obj, rest.co, rest.tris, rig, **stroke_params(settings))
+    fixed = None
+    if params["layer_range"] > 0.0:
+        parts = [part for part in hair_parts(context, (obj,), weighted_armature(obj), race)
+                 if part.magic_fit_hair.skeleton == number]
+        if parts:
+            fixed = fixed_parts(straighten.rest_geometry(context, parts, ('INDEXED',) * len(parts)), parts,
+                                [bone.name for bone in rig.bones])
+    weight_kwargs = weight_params(settings)
+    key = (obj.data.as_pointer(), race, number, tuple(rig.offset.tolist()), tuple(sorted(weight_kwargs.items())))
+    arrays = [rest.co, rest.tris] + (list(fixed) if fixed is not None else [])
+    weights = _brush_weights(key, arrays, lambda: hair_weights(rest.co, rest.tris, rig, fixed=fixed, **weight_kwargs))
+    return HairStroke(obj, rest.co, rest.tris, rig, weights=weights, **params)
+
+
+# The hair weights the brush worked out last, kept for the next stroke on the same hair, until the hair, its
+# other parts' weights or the settings change: holding the layers together takes a moment.
+_brush_cache = None
+
+
+def _brush_weights(key, arrays, work_out):
+    global _brush_cache
+    entry = _brush_cache
+    if (entry is not None and entry[0] == key and len(entry[1]) == len(arrays)
+            and all(np.array_equal(old, new) for old, new in zip(entry[1], arrays))):
+        return entry[2]
+    weights = work_out()
+    _brush_cache = (key, [np.array(array, copy=True) for array in arrays], weights)
+    return weights
+
+
+def clear_cache():
+    global _brush_cache
+    _brush_cache = None

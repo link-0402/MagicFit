@@ -36,7 +36,8 @@ def use_settings(**values):
     settings = bpy.context.scene.magic_fit
     defaults = dict(hair_race='c0201', hair_skeleton_mode='AUTO', hair_skeleton=0, hair_hang_start=0.025,
                     hair_hang_length=0.07, hair_neck_weight=0.3, hair_chain_stretch=0.5, hair_joint_blend=0.30,
-                    hair_ears=True, hair_max_groups=8, hair_apply_to_selected=False, group_mode='ALL', mode='HAIR')
+                    hair_layer_range=0.01, hair_ears=True, hair_max_groups=8, hair_apply_to_selected=False,
+                    group_mode='ALL', mode='HAIR')
     defaults.update(values)
     for key, value in defaults.items():
         setattr(settings, key, value)
@@ -169,6 +170,90 @@ def test_chains():
     check(weights[tip, names.index('j_kami_f_l')].mean() > 0.8 and bangs < 0.05,
           "chains: a front lock curving in toward the chest stays on j_kami_f_l, not the bangs bone ({:.2f})".format(
               weights[tip, names.index('j_kami_f_l')].mean()))
+
+
+def layer_strips(gap):
+    """Two strips of hair hanging down the back of the head, the outer one ``gap`` off the inner one along
+    their normal: (inner, outer), each (vertices, quads), the vertices matching."""
+    top, bottom = np.array((0.0, 0.11, 1.57)), np.array((0.0, 0.13, 1.27))
+    inner = hair.strip(top, bottom, 0.04, (1.0, 0.0, 0.0), rows=16)
+    normal = np.cross((1.0, 0.0, 0.0), bottom - top)
+    normal /= np.linalg.norm(normal)
+    return inner, (inner[0] + gap * normal, inner[1])
+
+
+def strips_object(name, strip):
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata([tuple(p) for p in strip[0]], [], [tuple(q) for q in strip[1]])
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    return obj
+
+
+def test_layers():
+    ref = hairing.Reference.get()
+    rig = ref.rig('c0201', 210)
+    # Two layers 6 mm apart: on its own, each would hang by its own distance from the head, so they'd
+    # swing differently and pass through each other. Held together, they weigh alike.
+    inner, outer = layer_strips(0.006)
+    co, tris, (a, b) = join([inner, outer])
+    _n, apart = hairing.hair_weights(co, tris, rig, layer_range=0.0)
+    names, held = hairing.hair_weights(co, tris, rig)
+    before = np.abs(apart[a] - apart[b]).sum(1).max()
+    after = np.abs(held[a] - held[b]).sum(1).max()
+    check(before > 0.08 and after < 0.01,
+          "layers: layers 6 mm apart weigh alike (at most {:.3f} apart, {:.3f} each on its own)".format(after, before))
+    check(np.allclose(held.sum(1), 1.0) and held.min() >= 0.0, "layers: weights add up to 1, none negative")
+    # Double-sided hair (each triangle twice, facing both ways) comes out the same.
+    _n, double = hairing.hair_weights(co, np.vstack([tris, tris[:, ::-1]]), rig)
+    check(np.abs(double - held).max() < 1e-6, "layers: double-sided hair weighs the same")
+    # Layers farther apart than Layer Range move on their own: the same as when nothing is held (only
+    # smoothed along each layer, as everywhere).
+    inner, far = layer_strips(0.03)
+    co, tris, (a, b) = join([inner, far])
+    _n, apart = hairing.hair_weights(co, tris, rig, layer_range=1e-6)
+    _n, held = hairing.hair_weights(co, tris, rig)
+    _n, raw = hairing.hair_weights(co, tris, rig, layer_range=0.0)
+    check(np.abs(held - apart).max() < 1e-9 and np.abs(held[a] - held[b]).sum(1).max() > 0.1,
+          "layers: layers 3 cm apart keep their own weights")
+    check(np.abs(held - raw).sum(1).mean() < 0.05, "layers: ...smoothed a little along each ({:.3f} on average)".format(
+        np.abs(held - raw).sum(1).mean()))
+
+    # Layers in separate meshes: weighted together (Apply to All Selected), or one after the other, where
+    # the later one is held to the earlier one, which keeps its weights.
+    inner, outer = layer_strips(0.006)
+    for together in (True, False):
+        hair.clear_scene()
+        use_settings(hair_skeleton_mode='PICK', hair_skeleton=210, hair_apply_to_selected=together)
+        first = strips_object("Inner", inner)
+        second = strips_object("Outer", outer)
+        bpy.context.view_layer.objects.active = first
+        first.select_set(True)
+        second.select_set(together)
+        bpy.ops.magic_fit.hair_weights()
+        kept = hair.by_name(first)
+        if not together:
+            first.select_set(False)
+            second.select_set(True)
+            bpy.context.view_layer.objects.active = second
+            bpy.ops.magic_fit.hair_weights()
+        w1, w2 = hair.by_name(first), hair.by_name(second)
+        bones = sorted(set(w1) | set(w2))
+        zero = np.zeros(len(first.data.vertices))
+        gap = max(float(np.abs(w1.get(n, zero) - w2.get(n, zero)).max()) for n in bones)
+        check(gap < 0.01, "layers: layers in two meshes weighted {:s} weigh alike (at most {:.3f} apart)".format(
+            "together" if together else "one after the other", gap))
+        if not together:
+            check(max(float(np.abs(w1[n] - kept[n]).max()) for n in kept) < 1e-6,
+                  "layers: ...and the mesh weighted first keeps its weights")
+            # The brush paints the same weights on the second mesh: held to the first one too.
+            stroke = hairing.build_stroke(bpy.context, second, bpy.context.scene.magic_fit)
+            count = len(second.data.vertices)
+            stroke.apply(list(range(count)), [1.0] * count)
+            second.data.update()
+            painted = hair.by_name(second)
+            check(max(float(np.abs(painted[n] - w2[n]).max()) for n in w2) < 1e-4,
+                  "layers: the brush paints the same weights, held to the other mesh")
 
 
 def bangs_mesh(name="Bangs"):
@@ -631,7 +716,7 @@ def test_readiness():
 def main():
     magic_fit.register()
     try:
-        for test in (test_reference, test_weights, test_chains, test_ears, test_matching, test_button,
+        for test in (test_reference, test_weights, test_chains, test_layers, test_ears, test_matching, test_button,
                      test_existing_armature, test_customize_plus, test_armature_out_of_view_layer, test_parts,
                      test_selected, test_replace, test_masks, test_pick, test_brush, test_readiness):
             print("==", test.__name__)

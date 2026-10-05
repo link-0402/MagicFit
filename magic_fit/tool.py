@@ -251,9 +251,10 @@ def _draw_hair_main(layout, settings):
 
 
 def _draw_hair_more(layout, settings):
-    """The other Hair settings: how chains share long hair, the group limit."""
+    """The other Hair settings: how chains share long hair, how layers hold together, the group limit."""
     layout.prop(settings, "hair_chain_stretch", slider=True)
     layout.prop(settings, "hair_joint_blend")
+    layout.prop(settings, "hair_layer_range")
     if settings.hair_race in hairing.EAR_RACES:
         layout.prop(settings, "hair_ears")
     layout.prop(settings, "hair_max_groups")

@@ -504,6 +504,19 @@ class MagicFitSettings(bpy.types.PropertyGroup):
         soft_max=0.5,
         precision=3,
     )
+    hair_layer_range: FloatProperty(
+        name="Layer Range",
+        description=(
+            "Layers of hair lying this close on each other (and on the hair's parts weighted before) get the "
+            "same weights, so they move together and don't pass through each other. 0: each layer weighted "
+            "on its own"
+        ),
+        subtype='DISTANCE',
+        default=0.01,
+        min=0.0,
+        soft_max=0.03,
+        precision=3,
+    )
     hair_ears: BoolProperty(
         name="Ears",
         description=(
