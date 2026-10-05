@@ -8,7 +8,7 @@ import bpy
 import gpu
 from gpu.types import GPUBatch, GPUVertBuf, GPUVertFormat
 
-from . import clipping, facing, hairing, resizing, tabs
+from . import clipping, facing, hairing, sizing, tabs
 from .operators import (
     FACE_REPAIRS,
     MAGIC_FIT_OT_body_fit,
@@ -28,6 +28,8 @@ from .operators import (
     MAGIC_FIT_OT_pick_face,
     MAGIC_FIT_OT_pick_hair_skeleton,
     MAGIC_FIT_OT_resize,
+    MAGIC_FIT_OT_resize_pick,
+    MAGIC_FIT_OT_resize_sizes_read,
     MAGIC_FIT_OT_skirt_weights,
     MAGIC_FIT_OT_texture_relax,
     MAGIC_FIT_OT_use_tool,
@@ -49,8 +51,9 @@ from .operators import (
     lineup_summary,
     parse_matches,
     resize_key_name,
+    resize_sizes,
 )
-from .properties import COMING_MODES, WEIGHTS_TABS
+from .properties import COMING_MODES, WEIGHTS_TABS, picked_of
 
 WEIGHT_TOOL_IDNAME = "magic_fit.tool"
 FIT_TOOL_IDNAME = "magic_fit.body_fit_tool"
@@ -1067,22 +1070,103 @@ def _draw_key_search(layout, settings, prop, obj, text):
         layout.prop_search(settings, prop, keys, "key_blocks", text=text, icon='SHAPEKEY_DATA')
 
 
-def _draw_devkit_sizes(layout, settings, driving):
-    """Devkit Sizes, for a To body whose shape keys Yet Another Devkit's settings ``driving`` drive."""
-    if not driving:
+# Of a size setting's row, the share its label takes, as Blender's labels left of a value (property split).
+SIZE_LABEL_SHARE = 0.4
+
+
+def _draw_size_setting(context, layout, item, labels):
+    """A size setting's row: its label, and a button per option, in as many rows as their labels need."""
+    split = layout.split(factor=SIZE_LABEL_SHARE)
+    split.alignment = 'RIGHT'
+    split.label(text=item.label)
+    room = (context.region.width - SIDEBAR_MARGIN * context.preferences.system.ui_scale) * (1.0 - SIZE_LABEL_SHARE)
+    widths = _label_widths(context, labels)
+    # Spread evenly over the fewest rows they fit in.
+    for rows in range(1, len(labels) + 1):
+        per_row = math.ceil(len(labels) / rows)
+        if all(sum(widths[first:first + per_row]) <= room for first in range(0, len(labels), per_row)):
+            break
+    column = split.column(align=True)
+    for first in range(0, len(labels), per_row):
+        row = column.row(align=True)
+        for index in range(first, min(first + per_row, len(labels))):
+            button = row.operator(MAGIC_FIT_OT_resize_pick.bl_idname, text=labels[index],
+                                  depress=bool(item.picked >> index & 1))
+            button.setting, button.option = item.name, index
+
+
+def _draw_wrapped(context, layout, text, icon='NONE'):
+    """``text`` over as many lines as the sidebar's width needs, broken between words."""
+    preferences = context.preferences
+    scale = preferences.system.ui_scale
+    blf.size(0, preferences.ui_styles[0].widget.points * scale)
+    room = context.region.width - (SIDEBAR_MARGIN + 1.5 * WIDGET_UNIT) * scale
+    lines = [""]
+    for word in text.split(" "):
+        line = (lines[-1] + " " + word) if lines[-1] else word
+        if lines[-1] and blf.dimensions(0, line)[0] > room:
+            lines.append(word)
+        else:
+            lines[-1] = line
+    col = layout.column(align=True)
+    for index, line in enumerate(lines):
+        col.label(text=line, icon=icon if index == 0 else 'BLANK1')
+
+
+def _draw_resize_sizes(context, layout, settings):
+    """The Sizes section: the settings the To body's (else the From body's) shape keys follow, with the values to
+    resize to, and the sizes that makes."""
+    body = settings.resize_to_object or settings.resize_from_object
+    if body is None or body.type != 'MESH' or not (len(settings.resize_sizes) or sizing.offers_sizes(body)):
         return
-    layout.prop(settings, "resize_use_sizes")
-    if not settings.resize_use_sizes:
+    header, panel = layout.panel("magic_fit_resize_sizes", default_closed=False)
+    header.use_property_split = False
+    header.prop(settings, "resize_use_sizes")
+    if settings.resize_use_sizes:
+        header.operator(MAGIC_FIT_OT_resize_sizes_read.bl_idname, text="", icon='FILE_REFRESH', emboss=False)
+    if panel is None:
         return
-    if "chest_size" in driving:
-        layout.prop(settings, "resize_chest")
-    if "leg_size" in driving:
-        layout.prop(settings, "resize_legs")
-    switches = [name for name in ("rue", "buff", "lavabod") if name in driving]
-    if switches:
-        col = layout.column(heading="Body", align=True)
-        for name in switches:
-            col.prop(settings, "resize_" + name)
+    panel.active = settings.resize_use_sizes
+    items = list(settings.resize_sizes)
+    if not items:
+        col = panel.column()
+        if settings.resize_sizes_problem:
+            col.label(text=settings.resize_sizes_problem, icon='ERROR')
+        col.operator(MAGIC_FIT_OT_resize_sizes_read.bl_idname, icon='FILE_REFRESH')
+        return
+
+    def picked(name):
+        other = settings.resize_sizes.get(name)
+        return set() if other is None else picked_of(other)
+
+    def draw(layout, item):
+        labels = sizing.option_labels(item.name, [option.label for option in item.options], picked)
+        _draw_size_setting(context, layout, item, labels)
+
+    col = panel.column(align=True)
+    for item in items:
+        if not item.more:
+            draw(col, item)
+    more = [item for item in items if item.more]
+    if more:
+        header, sub = panel.panel("magic_fit_resize_sizes_more", default_closed=True)
+        header.label(text="More ({:d})".format(len(more)))
+        if sub is not None:
+            col = sub.column(align=True)
+            for item in more:
+                draw(col, item)
+    picks = resize_sizes(settings)
+    if picks is None:
+        return
+    col = panel.column()
+    # What the meshes are resized from: the body as it is now.
+    _draw_wrapped(context, col, "From: " + (sizing.state_label(picks.settings, picks.now) or "the body as it is"),
+                  icon='INFO')
+    changed = [size.name for size in picks.changed]
+    if changed:
+        _draw_wrapped(context, col, "To {:s}: {:s}".format(
+            "{:d} sizes".format(len(changed)) if len(changed) > 1 else "1 size", ", ".join(changed)),
+            icon='SHAPEKEY_DATA')
 
 
 # UILayout.prop takes a placeholder from Blender 4.1 on.
@@ -1090,7 +1174,7 @@ _HAS_PLACEHOLDER = 'placeholder' in bpy.types.UILayout.bl_rna.functions['prop'].
 
 
 class VIEW3D_PT_resize_sidebar(tabs.TabPanel, bpy.types.Panel):
-    """Reshape meshes made for one body to fit another, such as another body mod"""
+    """Reshape meshes made for one body to fit another, such as another body mod, or other sizes of it"""
     bl_label = "Resize"
     bl_order = 2
     tab = 'FIT'
@@ -1107,17 +1191,30 @@ class VIEW3D_PT_resize_sidebar(tabs.TabPanel, bpy.types.Panel):
         row = col.row()
         row.active = settings.resize_to_object not in (None, body)
         row.prop(settings, "resize_match")
-        _draw_devkit_sizes(col, settings, resizing.devkit_settings(settings.resize_to_object or body))
-        col.prop(settings, "resize_use_keys")
-        if settings.resize_use_keys:
+        _draw_resize_sizes(context, layout, settings)
+
+        header, panel = layout.panel("magic_fit_resize_keys", default_closed=not settings.resize_use_keys)
+        header.use_property_split = False
+        header.prop(settings, "resize_use_keys")
+        if panel is not None:
+            panel.active = settings.resize_use_keys
+            col = panel.column()
             _draw_key_search(col, settings, "resize_from_key", body, "From Shapekey")
             _draw_key_search(col, settings, "resize_to_key", settings.resize_to_object or body, "To Shapekey")
-        col.prop(settings, "resize_radius")
-        col.prop(settings, "resize_bridge")
-        col.prop(settings, "resize_rigid_size")
-        col.prop(settings, "resize_keep_close")
+
+        header, panel = layout.panel("magic_fit_resize_options", default_closed=True)
+        header.label(text="Options")
+        if panel is not None:
+            col = panel.column()
+            col.prop(settings, "resize_radius")
+            col.prop(settings, "resize_bridge")
+            col.prop(settings, "resize_rigid_size")
+            col.prop(settings, "resize_keep_close")
+
+        col = layout.column()
+        name = resize_key_name(context)
         if _HAS_PLACEHOLDER:
-            col.prop(settings, "resize_key_name", placeholder=resize_key_name(context))
+            col.prop(settings, "resize_key_name", placeholder=name or "Each size's name")
         else:
             col.prop(settings, "resize_key_name")
         problem = check_resize_ready(context)
@@ -1126,7 +1223,10 @@ class VIEW3D_PT_resize_sidebar(tabs.TabPanel, bpy.types.Panel):
         col.separator()
         row = col.row()
         row.scale_y = 1.4
-        row.operator(MAGIC_FIT_OT_resize.bl_idname, icon='SHAPEKEY_DATA')
+        picks = resize_sizes(settings) if problem is None else None
+        count = len(picks.changed) if picks is not None else 0
+        row.operator(MAGIC_FIT_OT_resize.bl_idname, icon='SHAPEKEY_DATA',
+                     text="Resize to {:d} Sizes".format(count) if count > 1 else "Resize")
 
 
 class VIEW3D_PT_clipping_sidebar(tabs.TabPanel, bpy.types.Panel):

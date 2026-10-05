@@ -31,18 +31,17 @@ Bodies of any kind (an outfit's own body from another game, lined up on the Mann
 matched by shape instead: each vertex goes to the closest spot of the other body, where that faces the
 same way, and the parts that can't be matched like that (hands, feet, a head) follow the rest.
 
-A Yet Another Devkit body can also be resized to its other sizes (chest, legs, Rue, Buff, Lavabod) without
-switching the devkit: its settings drive the body's shape keys, and those drivers are worked out again with
-the sizes picked (`devkit_values`), which gives the To shape the devkit would show.
+A devkit body can also be resized to its other sizes (chest, legs, Rue...) without switching the devkit: its
+settings drive the body's shape keys, and those drivers are worked out again with the sizes picked (see
+`sizing`), which gives the To shape the devkit would show. Each size becomes a shape key of each mesh, which
+remembers what it was made from (`ResizedKeys`), so the next resize starts from the mesh's own shape and
+an unchanged key can be kept.
 
 Like `painting`, the engine (`ShapeChange`) works on world space arrays and doesn't need the 3D view.
 """
 
-import ast
-import functools
+import hashlib
 import math
-import operator
-import re
 
 import numpy as np
 from mathutils.bvhtree import BVHTree
@@ -1220,23 +1219,157 @@ def add_resized_key(obj, name, world_co):
     """Add a shape key named ``name`` (Blender makes it unique) holding ``world_co`` to ``obj``, turn it
     fully on and make it the active key. The keys that shaped the mesh before are turned off, so it
     shows the new shape alone; those that can't be (driven ones) are returned."""
+    return _put_key(obj, None, name, world_co, show=True)
+
+
+def _put_key(obj, block, name, world_co, show):
+    """Put ``world_co`` into shape key ``block`` of ``obj`` (None: a new one named ``name``), relative to the basis.
+    With ``show``, turn it fully on and make it active, and turn the keys that shaped the mesh before off; returns
+    (the key, those that can't be: driven ones)."""
     before = contributing_keys(obj)
     if obj.data.shape_keys is None:
         obj.shape_key_add(name="Basis", from_mix=False)
-    block = obj.shape_key_add(name=name, from_mix=False)
+    if block is None:
+        block = obj.shape_key_add(name=name, from_mix=False)
+        block.value = 0.0
     inverse = np.linalg.inv(np.array(obj.matrix_world, dtype=np.float64))
     block.data.foreach_set("co", _transform(world_co, inverse).astype(np.float32).ravel())
     block.relative_key = obj.data.shape_keys.reference_key
-    block.value = 1.0
     stuck = []
-    for other in before:
+    if show:
+        block.value = 1.0
+        block.mute = False
+        for other in before:
+            if other == block:
+                continue
+            if _driven(obj.data.shape_keys, other, "value"):
+                stuck.append(other.name)
+            else:
+                other.value = 0.0
+        obj.active_shape_key_index = list(obj.data.shape_keys.key_blocks).index(block)
+    obj.data.update()
+    return block, stuck
+
+
+# -----------------------------------------------------------------------------
+# Resized keys
+
+# Each shape key Resize makes remembers what it was made from, in its Key's custom properties under this name:
+# the size it's for ("label"), fingerprints of the From body's shape ("from"), of everything the result depends
+# on ("inputs") and of the key as made ("result"), the mesh's vertex count ("count"), and the values of the mesh's
+# other keys that gave the shape it was resized from ("mix").
+RECORD = "magic_fit_resized"
+
+
+def fingerprint(*parts):
+    """A short hash of ``parts``: arrays (as float32, as shape keys keep them) and anything else by its repr."""
+    digest = hashlib.blake2b(digest_size=12)
+    for part in parts:
+        if isinstance(part, np.ndarray):
+            digest.update(np.ascontiguousarray(part, dtype=np.float32).tobytes())
+        else:
+            digest.update(repr(part).encode())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def resized_keys(obj):
+    """{key name: record} of the shape keys of mesh ``obj`` that Resize made (see RECORD), those still there."""
+    keys = obj.data.shape_keys if obj.type == 'MESH' else None
+    stored = keys.get(RECORD) if keys is not None else None
+    if stored is None or not hasattr(stored, "to_dict"):
+        return {}
+    return {name: record for name, record in stored.to_dict().items()
+            if isinstance(record, dict) and keys.key_blocks.get(name) is not None}
+
+
+def resized_key(obj, label):
+    """The shape key of ``obj`` Resize made for the size ``label``, or None."""
+    for name, record in resized_keys(obj).items():
+        if record.get("label") == label:
+            return obj.data.shape_keys.key_blocks[name]
+    return None
+
+
+def key_state(obj, label, inputs):
+    """Whether the key Resize made for ``label`` on ``obj`` can stay, for a resize whose inputs have the fingerprint
+    ``inputs``: (the key or None, 'NEW' without one, 'FRESH' when made from the same inputs, 'STALE' when made from
+    others and not changed since, 'EDITED' when made from others and changed by hand since)."""
+    block = resized_key(obj, label)
+    if block is None:
+        return None, 'NEW'
+    record = resized_keys(obj)[block.name]
+    if record.get("count") != len(obj.data.vertices):
+        return block, 'STALE'
+    if record.get("inputs") == inputs:
+        return block, 'FRESH'
+    return block, 'STALE' if fingerprint(_key_positions(block)) == record.get("result") else 'EDITED'
+
+
+def from_values(obj, from_print):
+    """The shape key values giving ``obj`` the shape it fits the From body in, the body's shape having the
+    fingerprint ``from_print``: its keys as they are, but those Resize made from that same shape off and, when one
+    of those is on (the mesh shows a size), the others as they were when it was made. A key made from another
+    shape (a resize before, to the body it fits now) counts as it is.
+
+    Returns ({key name: value}, for rest_shape; the values of the other keys that aren't 0: the mix to remember).
+    """
+    keys = obj.data.shape_keys if obj.type == 'MESH' else None
+    if keys is None:
+        return {}, {}
+    records = resized_keys(obj)
+    ours = [name for name, record in records.items() if record.get("from") == from_print]
+    values = {name: 0.0 for name in ours}
+    showing = [name for name in ours if not keys.key_blocks[name].mute and keys.key_blocks[name].value != 0.0]
+    if showing:
+        values.update(records[showing[0]].get("mix", {}))
+    mix = {}
+    for block in keys.key_blocks:
+        if block == keys.reference_key or block.name in ours:
+            continue
+        value = values.get(block.name, 0.0 if block.mute else block.value)
+        if value:
+            mix[block.name] = float(value)
+    return values, mix
+
+
+def from_shape(obj, from_print):
+    """World space positions of ``obj`` in the shape it fits the From body in (see from_values), and the mix that
+    gives it."""
+    values, mix = from_values(obj, from_print)
+    return _transform(rest_shape(obj, values), obj.matrix_world), mix
+
+
+def write_resized_key(obj, label, world_co, record, show=False):
+    """Put ``world_co`` (world space) into the shape key Resize made for the size ``label`` on ``obj``, else into a
+    new key named ``label`` (Blender makes it unique), and remember ``record`` for it (see RECORD). With ``show``,
+    the key is turned fully on and made active, and the keys that shaped the mesh before are turned off, so it
+    shows the new shape alone. Returns (the key, keys that couldn't be turned off: driven ones)."""
+    block, stuck = _put_key(obj, resized_key(obj, label), label, world_co, show)
+    keys = obj.data.shape_keys
+    records = resized_keys(obj)
+    records[block.name] = dict(record, label=label, count=len(obj.data.vertices),
+                               result=fingerprint(_key_positions(block)))
+    keys[RECORD] = records
+    return block, stuck
+
+
+def show_key(obj, block):
+    """Turn shape key ``block`` of ``obj`` fully on and the others that shape the mesh off, and make it active.
+    Returns the keys that couldn't be turned off (driven ones)."""
+    stuck = []
+    for other in contributing_keys(obj):
+        if other == block:
+            continue
         if _driven(obj.data.shape_keys, other, "value"):
             stuck.append(other.name)
         else:
             other.value = 0.0
+    block.value = 1.0
+    block.mute = False
     obj.active_shape_key_index = list(obj.data.shape_keys.key_blocks).index(block)
     obj.data.update()
-    return block, stuck
+    return stuck
 
 
 def _driven(keys, block, prop):
@@ -1262,298 +1395,3 @@ def shows_to_shape(body, from_key, to_body, to_key):
         if (0.0 if block.mute else block.value) != value:
             return False
     return True
-
-
-# -----------------------------------------------------------------------------
-# Devkit sizes
-
-# Yet Another Devkit drives its bodies' shape keys from its settings, kept in Scene.ya_devkit_props in a
-# group per body (mannequin_state for the Mannequin): the chest size turns on the MEDIUM, SMALL or MASC key
-# and mutes the other sizes' sub-keys, Rue turns on the Rue key and, with Buff, the Rue/Buff correction,
-# and so on. Resize goes to other sizes without switching the devkit: it works those drivers out again with
-# the sizes picked.
-DEVKIT_PATH = re.compile(r"ya_devkit_props\.(\w+)\.(\w+)")
-# The settings it can pick, as the drivers read them: the chest and leg sizes by number (in the orders
-# below), the switches 0 or 1.
-DEVKIT_SIZES = ("chest_size", "leg_size", "rue", "buff", "lavabod")
-DEVKIT_CHEST = ("Large", "Medium", "Small", "Masc")
-# With Lavabod, the chest sizes are these instead.
-DEVKIT_LAVA_CHEST = ("Omoi", "Teardrop", "Cupcake", "Masc")
-DEVKIT_LEGS = ("Melon", "Skull", "Yanilla", "Masc", "Lavabod", "Mini")
-# Alt Hips (the devkit turns it off with the other leg sizes) only goes with these first ones.
-DEVKIT_HIP_LEGS = 3
-# Switching Lavabod, the devkit gives the chest's sub-keys ('- Squeeze', '-- Sag'...) the values they had
-# the last time it was switched the other way, kept in these lists of the settings' group; the first time
-# Lavabod comes on, it takes this key off.
-DEVKIT_KEPT_KEYS = {1: "lava_keys", 0: "yab_keys"}
-DEVKIT_LAVA_OFF = "- Squeeze"
-
-_KEY_PATH = re.compile(r'key_blocks\["((?:[^"\\]|\\.)*)"\]\.(value|mute)')
-_FUNCTIONS = {"min": min, "max": max, "abs": abs, "round": round, "int": int, "float": float, "bool": bool,
-              "floor": math.floor, "ceil": math.ceil, "sqrt": math.sqrt}
-_CONSTANTS = {"True": True, "False": False, "pi": math.pi}
-_ARITHMETIC = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv,
-               ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod}
-_COMPARISONS = {ast.Eq: operator.eq, ast.NotEq: operator.ne, ast.Lt: operator.lt, ast.LtE: operator.le,
-                ast.Gt: operator.gt, ast.GtE: operator.ge}
-
-
-@functools.lru_cache(maxsize=512)
-def _parsed(expression):
-    return ast.parse(expression.strip(), mode="eval").body
-
-
-def _expression_value(node, names):
-    """The value of a driver's expression (``node``, parsed) with its variables at ``names``. Only
-    arithmetic, comparisons, logic and a few functions, so nothing in a file can run code here."""
-    if isinstance(node, ast.Constant) and isinstance(node.value, (bool, int, float)):
-        return node.value
-    if isinstance(node, ast.Name):
-        if node.id in names:
-            return names[node.id]
-        if node.id in _CONSTANTS:
-            return _CONSTANTS[node.id]
-        raise ValueError("it reads '{:s}'".format(node.id))
-    if isinstance(node, ast.BoolOp):
-        # As in Python: the first value that decides, else the last.
-        for part in node.values:
-            value = _expression_value(part, names)
-            if bool(value) == isinstance(node.op, ast.Or):
-                return value
-        return value
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.Not, ast.USub, ast.UAdd)):
-        value = _expression_value(node.operand, names)
-        return not value if isinstance(node.op, ast.Not) else -value if isinstance(node.op, ast.USub) else value
-    if isinstance(node, ast.BinOp) and type(node.op) in _ARITHMETIC:
-        return _ARITHMETIC[type(node.op)](_expression_value(node.left, names), _expression_value(node.right, names))
-    if isinstance(node, ast.Compare) and all(type(op) in _COMPARISONS for op in node.ops):
-        left = _expression_value(node.left, names)
-        for op, part in zip(node.ops, node.comparators):
-            right = _expression_value(part, names)
-            if not _COMPARISONS[type(op)](left, right):
-                return False
-            left = right
-        return True
-    if isinstance(node, ast.IfExp):
-        return _expression_value(node.body if _expression_value(node.test, names) else node.orelse, names)
-    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _FUNCTIONS
-            and not node.keywords):
-        return _FUNCTIONS[node.func.id](*(_expression_value(part, names) for part in node.args))
-    raise ValueError("Resize can't work out '{:s}' in it".format(ast.unparse(node)))
-
-
-def _unescape(name):
-    return re.sub(r"\\(.)", r"\1", name)
-
-
-def _key_drivers(keys):
-    """The drivers of shape keys ``keys`` (a Key) that set a key's value or mute: {(key name, 'value' or
-    'mute'): F-curve}."""
-    animation = keys.animation_data
-    if animation is None:
-        return {}
-    result = {}
-    for curve in animation.drivers:
-        found = _KEY_PATH.fullmatch(curve.data_path)
-        if found is not None and not curve.mute:
-            result[(_unescape(found.group(1)), found.group(2))] = curve
-    return result
-
-
-def _devkit_setting(var):
-    """(scene, group, name) of the devkit setting driver variable ``var`` reads, or None."""
-    if var.type != 'SINGLE_PROP':
-        return None
-    target = var.targets[0]
-    if target.id_type != 'SCENE' or target.id is None:
-        return None
-    found = DEVKIT_PATH.fullmatch(target.data_path)
-    return None if found is None else (target.id, found.group(1), found.group(2))
-
-
-def _devkit_groups(keys):
-    """The devkit settings the drivers of ``keys`` read: {name: (scene, group)}."""
-    result = {}
-    for curve in _key_drivers(keys).values():
-        for var in curve.driver.variables:
-            setting = _devkit_setting(var)
-            if setting is not None:
-                result.setdefault(setting[2], setting[:2])
-    return result
-
-
-def _mesh_keys(obj):
-    return obj.data.shape_keys if obj is not None and obj.type == 'MESH' else None
-
-
-def devkit_settings(obj):
-    """The settings among DEVKIT_SIZES of Yet Another Devkit that drive shape keys of ``obj`` (a set)."""
-    keys = _mesh_keys(obj)
-    return set() if keys is None else set(_devkit_groups(keys)) & set(DEVKIT_SIZES)
-
-
-def _property_value(owner, path):
-    """The number a driver reads from property ``path`` of ``owner`` (an enum by its item's number), or None
-    when there's no such property."""
-    try:
-        value = owner.path_resolve(path)
-    except ValueError:
-        return None
-    if isinstance(value, (bool, int, float)):
-        return float(value)
-    if not isinstance(value, str):
-        return None
-    holder, _dot, name = path.rpartition(".")
-    try:
-        prop = (owner.path_resolve(holder) if holder else owner).bl_rna.properties[name]
-    except (ValueError, KeyError):
-        return None
-    if prop.type != 'ENUM':
-        return None
-    item = prop.enum_items.get(value)
-    if item is not None:
-        return float(item.value)
-    # Items made by a function aren't listed; the devkit's are named after their numbers.
-    return float(value) if value.isdigit() else None
-
-
-def _devkit_now(groups, name):
-    scene, group = groups[name]
-    return _property_value(scene, "ya_devkit_props.{:s}.{:s}".format(group, name))
-
-
-def devkit_state(obj):
-    """How the settings among DEVKIT_SIZES of Yet Another Devkit that drive shape keys of ``obj`` are set
-    now: {name: number}, as the drivers read them. Those that can't be read (the devkit's script isn't
-    running) are left out."""
-    keys = _mesh_keys(obj)
-    if keys is None:
-        return {}
-    groups = _devkit_groups(keys)
-    result = {}
-    for name in DEVKIT_SIZES:
-        if name in groups:
-            value = _devkit_now(groups, name)
-            if value is not None:
-                result[name] = int(value)
-    return result
-
-
-def devkit_rules(sizes):
-    """``sizes`` (see `devkit_state`) as the devkit would set them: Lavabod has no Masc chest (it takes
-    Small instead)."""
-    sizes = dict(sizes)
-    if sizes.get("lavabod") and sizes.get("chest_size") == 3:
-        sizes["chest_size"] = 2
-    return sizes
-
-
-def devkit_values(obj, sizes):
-    """The shape keys of mesh ``obj`` that Yet Another Devkit would change, with its settings set as
-    ``sizes`` says ({name: number}, see `devkit_state`): {key name: value}, 0 for a key it would mute.
-    Nothing is switched: the drivers are worked out here. Raises ResizeError when one involved can't be."""
-    keys = _mesh_keys(obj)
-    if keys is None or not sizes:
-        return {}
-    groups = _devkit_groups(keys)
-    sizes = devkit_rules({name: value for name, value in sizes.items() if name in groups})
-    if "alt_hips" in groups and sizes.get("leg_size", 0) >= DEVKIT_HIP_LEGS:
-        sizes["alt_hips"] = 0
-    blocks = keys.key_blocks
-    worked = {}
-    lavabod = sizes.get("lavabod")
-    if lavabod is not None and lavabod != _devkit_now(groups, "lavabod"):
-        scene, group = groups["lavabod"]
-        try:
-            kept = getattr(scene.path_resolve("ya_devkit_props." + group), DEVKIT_KEPT_KEYS[int(bool(lavabod))])
-        except (ValueError, AttributeError):
-            kept = ()
-        values = {item.name: item.value for item in kept} or ({DEVKIT_LAVA_OFF: 0.0} if lavabod else {})
-        for name, value in values.items():
-            if blocks.get(name) is not None:
-                worked[(name, 'value')] = value
-
-    drivers = _key_drivers(keys)
-
-    def variable(var):
-        # (Its value, whether that's one of the sizes or of the keys worked out.)
-        setting = _devkit_setting(var)
-        if setting is not None and setting[2] in sizes:
-            return float(sizes[setting[2]]), True
-        if var.type != 'SINGLE_PROP':
-            raise ValueError("it has a {:s} variable".format(var.type.replace("_", " ").lower()))
-        target = var.targets[0]
-        if target.id == keys:
-            found = _KEY_PATH.fullmatch(target.data_path)
-            if found is not None and (_unescape(found.group(1)), found.group(2)) in worked:
-                return float(worked[(_unescape(found.group(1)), found.group(2))]), True
-        value = None if target.id is None else _property_value(target.id, target.data_path)
-        if value is None:
-            raise ValueError("'{:s}' can't be read: is the devkit's script running?".format(target.data_path))
-        return value, False
-
-    # Each round works out the drivers that read a size or a key changed in the rounds before.
-    for _round in range(len(drivers) + 1):
-        changed = False
-        for (name, prop), curve in drivers.items():
-            driver = curve.driver
-            try:
-                read = [(var.name, variable(var)) for var in driver.variables]
-                if not any(involved for _name, (_value, involved) in read):
-                    continue
-                values = [value for _name, (value, _involved) in read]
-                if driver.type == 'SCRIPTED':
-                    value = float(_expression_value(_parsed(driver.expression),
-                                                    {var: value for var, (value, _involved) in read}))
-                elif not values:
-                    value = 0.0
-                else:
-                    value = {'AVERAGE': sum(values) / len(values), 'SUM': sum(values), 'MIN': min(values),
-                             'MAX': max(values)}[driver.type]
-            except (ValueError, SyntaxError, TypeError, KeyError, ArithmeticError) as error:
-                raise ResizeError("The driver of '{:s}' on '{:s}' can't be worked out: {:s}".format(
-                    name, obj.name, str(error))) from error
-            if len(curve.keyframe_points) or len(curve.modifiers):
-                value = curve.evaluate(value)
-            # Blender turns a boolean on from 1.
-            value = value > 1.0 - 1e-6 if prop == 'mute' else value
-            if worked.get((name, prop)) != value:
-                worked[(name, prop)] = value
-                changed = True
-        if not changed:
-            break
-
-    result = {}
-    for name in {name for name, _prop in worked}:
-        block = blocks.get(name)
-        if block is None or block == keys.reference_key:
-            continue
-        value = min(max(worked.get((name, 'value'), block.value), block.slider_min), block.slider_max)
-        value = 0.0 if worked.get((name, 'mute'), block.mute) else value
-        if value != (0.0 if block.mute else block.value):
-            result[name] = value
-    return result
-
-
-def devkit_label(sizes, now):
-    """A name for the devkit ``sizes`` (see `devkit_state`): those that differ from ``now``, like
-    'Medium Rue'; empty when none do."""
-    sizes, now = devkit_rules(sizes), devkit_rules(now)
-    words = []
-
-    def differs(name):
-        return name in sizes and sizes[name] != now.get(name)
-
-    lavabod = sizes.get("lavabod", now.get("lavabod", 0))
-    if "chest_size" in sizes and (differs("chest_size") or differs("lavabod")):
-        chest = DEVKIT_LAVA_CHEST if lavabod else DEVKIT_CHEST
-        words.append(chest[min(sizes["chest_size"], len(chest) - 1)])
-    if differs("leg_size"):
-        words.append(("Melon", "Skull", "Yanilla", "Masc Legs", "Lava Legs", "Mini")[sizes["leg_size"]])
-    if differs("lavabod") or differs("rue"):
-        body = [word for name, word in (("lavabod", "Lavabod"), ("rue", "Rue"))
-                if sizes.get(name, now.get(name, 0))]
-        words.extend(body or ["YAB"])
-    if differs("buff"):
-        words.append("Buff" if sizes["buff"] else "No Buff")
-    return " ".join(words)

@@ -16,7 +16,9 @@ Garments, all fitted to the large breasts:
 - "Pendant": a 2 cm cube hanging 6 cm in front of the cleavage.
 
 `devkit_body` builds the same scene with the body's keys driven like Yet Another Devkit's Mannequin, by
-stand-ins for the devkit's settings.
+stand-ins for the devkit's settings, and `devkit_part` a body part of it, driven from another group of settings like
+the devkit's Torso. `driver_body` drives the keys from custom properties of an object named Driver, like the RueXB
+devkit.
 """
 
 import bpy
@@ -273,6 +275,7 @@ class DevkitState(bpy.types.PropertyGroup):
 
 class DevkitProps(bpy.types.PropertyGroup):
     mannequin_state: PointerProperty(type=DevkitState)
+    torso_state: PointerProperty(type=DevkitState)
 
 
 def register_devkit():
@@ -283,9 +286,9 @@ def register_devkit():
     bpy.types.Scene.ya_devkit_props = PointerProperty(type=DevkitProps)
 
 
-def drive(keys, name, prop, expression, variables, kind='SCRIPTED'):
+def drive(keys, name, prop, expression, variables, kind='SCRIPTED', group="mannequin_state"):
     """Drive ``prop`` of shape key ``name`` of ``keys`` (a Key) with ``expression`` over ``variables``: (name,
-    devkit setting) pairs, or (name, key) to read another key's value."""
+    devkit setting of ``group``) pairs, or (name, key) to read another key's value."""
     driver = keys.key_blocks[name].driver_add(prop).driver
     driver.type = kind
     driver.expression = expression
@@ -301,7 +304,7 @@ def drive(keys, name, prop, expression, variables, kind='SCRIPTED'):
         else:
             target.id_type = 'SCENE'
             target.id = bpy.context.scene
-            target.data_path = "ya_devkit_props.mannequin_state." + source
+            target.data_path = "ya_devkit_props.{:s}.{:s}".format(group, source)
 
 
 def devkit_body():
@@ -345,4 +348,74 @@ def devkit_body():
     drive(keys, "Hip Dips (for YAB)", 'value', "legs <= 2 and alt_hips == 1 and rue == 0",
           (("legs", "leg_size"), ("alt_hips", "alt_hips"), ("rue", "rue")))
     drive(keys, "Rue/Follow", 'value', "", (("value", "Rue"),), kind='AVERAGE')
+    for state in (bpy.context.scene.ya_devkit_props.mannequin_state, bpy.context.scene.ya_devkit_props.torso_state):
+        for prop in ("chest_size", "leg_size", "rue", "buff", "lavabod", "alt_hips"):
+            state.property_unset(prop)
     return body, garments
+
+
+def devkit_part(body, name="Torso"):
+    """A body part of the devkit body ``body``: a copy of it whose keys the torso's settings drive (as the devkit's
+    Torso, from torso_state): MEDIUM, Rue and Buff."""
+    part = body.copy()
+    part.data = body.data.copy()
+    part.name = name
+    part.data.shape_keys.animation_data_clear()
+    bpy.context.scene.collection.objects.link(part)
+    keys = part.data.shape_keys
+    for block in keys.key_blocks:
+        block.value = 0.0
+    keys.key_blocks["- Squeeze"].value = 0.3
+    drive(keys, "MEDIUM", 'value', "size == 1 and lava == 0", (("size", "chest_size"), ("lava", "lavabod")),
+          group="torso_state")
+    for key, setting in (("Rue", "rue"), ("Buff", "buff")):
+        drive(keys, key, 'value', "option == 1", (("option", setting),), group="torso_state")
+    return part
+
+
+def driver_body():
+    """Build the scene with the body's keys driven by custom properties of an object named Driver, as the RueXB
+    devkit does: Buff (on or off) turns the key Buff on, and Heels (0 to 3) turns on Heels (1) or Cinderella (2),
+    "Mini Heels" (3) staying off. Returns (body, garments, the Driver)."""
+    body, garments = build()
+    driver = bpy.data.objects.new("Driver", None)
+    bpy.context.scene.collection.objects.link(driver)
+    driver["Buff"] = False
+    driver["Heels"] = 0
+    driver.id_properties_ui("Heels").update(min=0, max=3)
+    driver["Nipple Extra"] = 0
+    driver.id_properties_ui("Nipple Extra").update(min=0, max=2, description="0-Default Type 1-Inverted 2-Flatter")
+    large, _small, _quads = body_shapes()
+    x, z = large[:, :1], large[:, 2:]
+    front = np.array((0.0, -1.0, 0.0))
+    shapes = {
+        "Buff": large + 0.02 * x * (1.0, 0.0, 0.0),
+        "Heels": large + 0.004 * np.clip(-z / 0.1, 0.0, 1.0) * front,
+        "Cinderella": large + 0.006 * np.clip(-z / 0.1, 0.0, 1.0) * front,
+        "Inverted": large - 0.001 * np.clip(z / 0.1, 0.0, 1.0) * front,
+    }
+    for name, co in shapes.items():
+        block = body.shape_key_add(name=name, from_mix=False)
+        block.data.foreach_set("co", np.asarray(co).astype(np.float32).ravel())
+        block.value = 0.0
+    keys = body.data.shape_keys
+
+    def read(var_name, prop):
+        var = curve.driver.variables.new()
+        var.name = var_name
+        var.type = 'SINGLE_PROP'
+        var.targets[0].id_type = 'OBJECT'
+        var.targets[0].id = driver
+        var.targets[0].data_path = '["{:s}"]'.format(prop)
+
+    curve = keys.key_blocks["Buff"].driver_add("value")
+    curve.driver.type = 'AVERAGE'
+    read("Buff", "Buff")
+    for key, value in (("Heels", 1), ("Cinderella", 2)):
+        curve = keys.key_blocks[key].driver_add("value")
+        curve.driver.expression = "1 if Heels == {:d} else 0".format(value)
+        read("Heels", "Heels")
+    curve = keys.key_blocks["Inverted"].driver_add("value")
+    curve.driver.expression = "1 if Nipple_Extra == 1 else 0"
+    read("Nipple_Extra", "Nipple Extra")
+    return body, garments, driver
