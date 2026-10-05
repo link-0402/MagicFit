@@ -161,21 +161,43 @@ def steps():
     settings.resize_use_keys = False
     settings.resize_from_object = body
     settings.resize_use_sizes = True
-    settings.resize_chest = 'MEDIUM'
-    settings.resize_rue = True
+    with env.override(sidebar):
+        bpy.ops.magic_fit.resize_pick(setting="chest_size", option=1)
+        bpy.ops.magic_fit.resize_pick(setting="rue", option=1)
     for area in env.window.screen.areas:
         area.tag_redraw()
     yield 0.3
-    check(operators.check_resize_ready(bpy.context) is None, "sizes: ready with Devkit Sizes")
-    env.screenshot("resize_05_devkit_sizes.png")
+    check(operators.check_resize_ready(bpy.context) is None, "sizes: ready with Sizes")
+    env.screenshot("resize_05_sizes.png")
     keys_before = [(block.value, block.mute) for block in body.data.shape_keys.key_blocks]
     with env.override(sidebar):
         result = bpy.ops.magic_fit.resize('EXEC_DEFAULT', True)
     yield 0.5
     check(result == {'FINISHED'} and keys_of(bpy.data.objects["Suit"])[-1] == "Medium Rue",
           "sizes: added the key, named after the sizes")
+    body = bpy.data.objects["Body"]
     check([(block.value, block.mute) for block in body.data.shape_keys.key_blocks] == keys_before,
           "sizes: the devkit body wasn't switched")
+
+    # --- Several sizes: Shift-click adds a value; each combination is a size.
+    with env.override(sidebar):
+        bpy.ops.magic_fit.resize_pick(setting="chest_size", option=2, extend=True)
+        bpy.ops.magic_fit.resize_pick(setting="rue", option=0, extend=True)
+    for area in env.window.screen.areas:
+        area.tag_redraw()
+    yield 0.3
+    env.screenshot("resize_06_several_sizes.png")
+    with env.override(sidebar):
+        result = bpy.ops.magic_fit.resize('EXEC_DEFAULT', True)
+    yield 0.5
+    suit = bpy.data.objects["Suit"]
+    check(result == {'FINISHED'} and {"Medium", "Small", "Medium Rue", "Small Rue"} <= set(keys_of(suit))
+          and keys_of(suit).count("Medium Rue") == 1, "several: a key per size ({!s})".format(keys_of(suit)))
+    with env.override():
+        bpy.ops.ed.undo()
+    yield 0.4
+    check("Small Rue" not in keys_of(bpy.data.objects["Suit"]) and "Medium Rue" in keys_of(bpy.data.objects["Suit"]),
+          "several: undone in one step")
 
 
 def run():

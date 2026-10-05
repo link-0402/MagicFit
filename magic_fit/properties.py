@@ -109,54 +109,70 @@ def _set_use_keys(self, value):
     self.resize_use_keys_state = int(value)
 
 
-# Devkit Sizes: Yet Another Devkit's chest and leg sizes, in the devkit's order (its drivers read them by
-# number). Its Lavabod has chest sizes of its own and no Masc chest.
-RESIZE_CHESTS = ("LARGE", "MEDIUM", "SMALL", "MASC")
-_CHEST_ITEMS = (
-    ('LARGE', "Large", "The Large chest"),
-    ('MEDIUM', "Medium", "The Medium chest"),
-    ('SMALL', "Small", "The Small chest"),
-    ('MASC', "Masc", "Yet Another Masc (turns Lavabod off)"),
-)
-_LAVA_CHEST_ITEMS = (
-    ('LARGE', "Omoi", "Lavabod's largest chest"),
-    ('MEDIUM', "Teardrop", "Lavabod's medium chest"),
-    ('SMALL', "Cupcake", "Lavabod's small chest"),
-    ('MASC', "Masc", "Yet Another Masc (turns Lavabod off)"),
-)
-RESIZE_LEGS = ("MELON", "SKULL", "YANILLA", "MASC", "LAVABOD", "MINI")
+# Sizes: the settings the To body's (else the From body's) shape keys follow, as sizing lists them, each with the
+# values picked for it; every combination of those is a size to resize to. A setting's options are kept with it,
+# and the picks as bits of `picked`: at most this many options.
+MAX_OPTIONS = 31
 
 
-def _chest_items(self, _context):
-    return _LAVA_CHEST_ITEMS if self.resize_lavabod else _CHEST_ITEMS
+class SizeOption(bpy.types.PropertyGroup):
+    """A value a size setting can take (see sizing.Option)."""
+    value: FloatProperty()
+    label: StringProperty()
+    word: StringProperty()
 
 
-def _chest_changed(self, _context):
-    # As in the devkit: Lavabod has no Masc chest.
-    if self.resize_chest == 'MASC' and self.resize_lavabod:
-        self.resize_lavabod = False
+def picked_of(item):
+    """The values picked for size setting ``item`` (SizeSetting)."""
+    return {option.value for index, option in enumerate(item.options) if item.picked >> index & 1}
 
 
-def _lavabod_changed(self, _context):
-    if self.resize_lavabod and self.resize_chest == 'MASC':
-        self.resize_chest = 'SMALL'
+class SizeSetting(bpy.types.PropertyGroup):
+    """A setting the body's shape keys follow (named as sizing.Setting is), and the values picked for it: the bits
+    of ``picked``, one per option (the Resize panel's buttons set them)."""
+    label: StringProperty()
+    kind: StringProperty()
+    # Where the drivers read it (empty for a key nothing drives).
+    path: StringProperty()
+    # Barely reshapes the body: listed under More.
+    more: BoolProperty()
+    options: CollectionProperty(type=SizeOption)
+    picked: IntProperty(min=0)
+
+
+def sync_sizes(brush, keep=True):
+    """List in ``brush.resize_sizes`` the settings the To Body's (else the From Body's) shape keys follow, each with
+    the value it has now picked, or with ``keep``, the values picked before where it was listed."""
+    from . import sizing
+    body = brush.resize_to_object or brush.resize_from_object
+    before = {item.name: picked_of(item) for item in brush.resize_sizes} if keep else {}
+    brush.resize_sizes.clear()
+    brush.resize_sizes_problem = ""
+    if body is None or body.type != 'MESH':
+        return
+    settings, problems = sizing.body_settings(body)
+    brush.resize_sizes_problem = problems[0] if problems else ""
+    for setting in settings:
+        item = brush.resize_sizes.add()
+        item.name, item.label, item.kind, item.more = setting.name, setting.label, setting.kind, setting.more
+        item.path = setting.source[1] if setting.source is not None and setting.kind != 'KEY' else ""
+        for option in setting.options[:MAX_OPTIONS]:
+            entry = item.options.add()
+            entry.value, entry.label, entry.word = option.value, option.label, option.word
+        wanted = before.get(setting.name) or {setting.current}
+        item.picked = sum(1 << index for index, option in enumerate(item.options) if option.value in wanted)
 
 
 def _use_sizes_changed(self, _context):
-    # Start from the sizes the devkit shows now.
-    if not self.resize_use_sizes:
-        return
-    from . import resizing
-    state = resizing.devkit_state(self.resize_to_object or self.resize_from_object)
-    if "lavabod" in state:
-        self.resize_lavabod = bool(state["lavabod"])
-    if "chest_size" in state:
-        self.resize_chest = RESIZE_CHESTS[min(state["chest_size"], len(RESIZE_CHESTS) - 1)]
-    if "leg_size" in state:
-        self.resize_legs = RESIZE_LEGS[min(state["leg_size"], len(RESIZE_LEGS) - 1)]
-    for name in ("rue", "buff"):
-        if name in state:
-            setattr(self, "resize_" + name, bool(state[name]))
+    # Start from the sizes the body shows now.
+    if self.resize_use_sizes:
+        sync_sizes(self, keep=False)
+
+
+def _resize_body_changed(self, _context):
+    # Another body has other settings; those of the same names keep their picks.
+    if self.resize_use_sizes:
+        sync_sizes(self)
 
 
 def _get_weights_tab(self):
@@ -946,6 +962,7 @@ class BodyFitBrushSettings(bpy.types.PropertyGroup):
         description="The body the meshes fit now",
         type=bpy.types.Object,
         poll=_poll_mesh,
+        update=_resize_body_changed,
     )
     resize_use_keys: BoolProperty(
         name="Use Shapekeys",
@@ -971,6 +988,7 @@ class BodyFitBrushSettings(bpy.types.PropertyGroup):
         ),
         type=bpy.types.Object,
         poll=_poll_mesh,
+        update=_resize_body_changed,
     )
     resize_match: EnumProperty(
         name="Match By",
@@ -994,52 +1012,21 @@ class BodyFitBrushSettings(bpy.types.PropertyGroup):
         name="To Shapekey",
         description="The shape key to fit the meshes to. Empty or Basis: the body as it looks now",
     )
-    # Devkit Sizes: the To shape is the To body (or the From body) as Yet Another Devkit would show it at these
-    # sizes, worked out without switching the devkit.
+    # Sizes: the To shape is the To body (or the From body) at the sizes picked, its drivers worked out without
+    # switching anything (see sizing).
     resize_use_sizes: BoolProperty(
-        name="Devkit Sizes",
+        name="Sizes",
         description=(
-            "Resize to other sizes of a Yet Another Devkit body, picked below, without switching the devkit. "
-            "Turned on, it starts from the sizes the devkit shows now"
+            "Resize to other sizes of the body, picked below: the settings its shape keys follow, like a devkit's "
+            "chest size or Rue, without switching the devkit, or its keys where nothing drives them. Turned on, it "
+            "starts from the sizes the body shows now"
         ),
         default=False,
         update=_use_sizes_changed,
     )
-    resize_chest: EnumProperty(
-        name="Chest",
-        description="The chest size to resize to",
-        items=_chest_items,
-        update=_chest_changed,
-    )
-    resize_legs: EnumProperty(
-        name="Legs",
-        description="The leg size to resize to",
-        items=(
-            ('MELON', "Melon", "Gen A/Watermelon Crushers, the devkit's own legs"),
-            ('SKULL', "Skull", "Skull Crushers"),
-            ('YANILLA', "Yanilla", "Yanilla, as Yoshi-P intended"),
-            ('MASC', "Masc", "Yet Another Masc's legs"),
-            ('LAVABOD', "Lavabod", "Lavabod's legs: bigger hips, butt and hip dips"),
-            ('MINI', "Mini", "Smaller legs"),
-        ),
-        default='MELON',
-    )
-    resize_rue: BoolProperty(
-        name="Rue",
-        description="Resize to Rue: adds tummy",
-        default=False,
-    )
-    resize_buff: BoolProperty(
-        name="Buff",
-        description="Resize to Buff: adds muscle",
-        default=False,
-    )
-    resize_lavabod: BoolProperty(
-        name="Lavabod",
-        description="Resize to Lavabod, with its own chest sizes",
-        default=False,
-        update=_lavabod_changed,
-    )
+    resize_sizes: CollectionProperty(type=SizeSetting)
+    # Why some of the body's settings can't be listed (its script isn't running).
+    resize_sizes_problem: StringProperty(options={'HIDDEN'})
     resize_radius: FloatProperty(
         name="Smoothing",
         description=(
@@ -1296,6 +1283,8 @@ class ClippingSettings(bpy.types.PropertyGroup):
 
 classes = (
     FacePart,
+    SizeOption,
+    SizeSetting,
     MagicFitSettings,
     HairWeightsState,
     BodyFitBrushSettings,

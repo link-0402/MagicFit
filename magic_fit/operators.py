@@ -7,17 +7,17 @@ import bmesh
 import bpy
 import gpu
 import numpy as np
-from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
 from bpy_extras import view3d_utils
 from gpu_extras.batch import batch_for_shader
 from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 from mathutils.geometry import intersect_line_line, intersect_line_plane
 
-from . import (connecting, facedata, facing, fitting, goals, hairing, hairlineup, heeling, lineup, moving, painting,
-               relaxing, resizing, skirting, smoothing, straighten)
+from . import (api, connecting, facedata, facing, fitting, goals, hairing, hairlineup, heeling, lineup, moving, painting,
+               relaxing, resizing, sizing, skirting, smoothing, straighten)
 from .cplus import rig as cplus_rig
-from .properties import COMING_MODES, RESIZE_CHESTS, RESIZE_LEGS
+from .properties import COMING_MODES, sync_sizes
 
 # Cap on dabs per mouse event, so a fast flick can't stall the viewport.
 MAX_DABS_PER_EVENT = 64
@@ -496,31 +496,8 @@ def resize_keys(settings):
 
 
 def resize_sizes(settings):
-    """The Yet Another Devkit sizes Resize goes to ({setting: number}, see resizing.devkit_state): those
-    picked with Devkit Sizes that drive the To body's (else the From body's) shape keys. None with Devkit
-    Sizes off, or for a body the devkit doesn't drive."""
-    if not settings.resize_use_sizes:
-        return None
-    settings_driving = resizing.devkit_settings(settings.resize_to_object or settings.resize_from_object)
-    if not settings_driving:
-        return None
-    sizes = {
-        "chest_size": RESIZE_CHESTS.index(settings.resize_chest),
-        "leg_size": RESIZE_LEGS.index(settings.resize_legs),
-        "rue": int(settings.resize_rue),
-        "buff": int(settings.resize_buff),
-        "lavabod": int(settings.resize_lavabod),
-    }
-    return {name: value for name, value in sizes.items() if name in settings_driving}
-
-
-def resize_to_values(settings):
-    """The shape key values of the To shape at the Devkit Sizes (see resizing.devkit_values), or None
-    without them. Raises resizing.ResizeError."""
-    sizes = resize_sizes(settings)
-    if sizes is None:
-        return None
-    return resizing.devkit_values(settings.resize_to_object or settings.resize_from_object, sizes)
+    """The sizes picked in the Resize panel (api.Picks), or None with Sizes off or none listed for the body."""
+    return api.picked(settings)
 
 
 def check_resize_ready(context):
@@ -529,19 +506,23 @@ def check_resize_ready(context):
         return "Resize in Object or Edit Mode"
     settings = context.scene.body_fit_brush
     body = settings.resize_from_object
-    sizes = resize_sizes(settings)
-    if body is not None and settings.resize_to_object in (None, body) and not settings.resize_use_keys:
-        if not resizing.devkit_settings(body):
-            return "Pick a To Body, or turn on Use Shapekeys"
-        if sizes is None:
-            return "Pick a To Body, or turn on Devkit Sizes or Use Shapekeys"
+    picks = resize_sizes(settings)
+    alone = body is not None and settings.resize_to_object in (None, body) and not settings.resize_use_keys
+    if alone and not settings.resize_use_sizes:
+        sized = body.type == 'MESH' and sizing.offers_sizes(body)
+        return "Pick a To Body, or turn on {:s}Use Shapekeys".format("Sizes or " if sized else "")
+    if settings.resize_use_sizes and picks is None and alone:
+        if settings.resize_sizes_problem:
+            return settings.resize_sizes_problem
+        if sizing.offers_sizes(settings.resize_to_object or body):
+            return "List the body's sizes"
+        return "'{:s}' has no sizes: pick a To Body".format(body.name)
     from_key, to_key = resize_keys(settings)
-    # Which sizes change takes only the devkit's settings: the drivers are worked out when Resize runs (they can
-    # be hundreds, and this runs on every redraw).
-    sizes_change = bool(sizes) and bool(resizing.devkit_label(
-        sizes, resizing.devkit_state(settings.resize_to_object or body)))
-    if sizes is not None and not sizes_change and settings.resize_to_object in (None, body) and not (from_key or to_key):
-        return "The devkit shows these sizes now: pick others"
+    # Which sizes change takes only the settings' values: the drivers are worked out when Resize runs (they can be
+    # hundreds, and this runs on every redraw).
+    sizes_change = picks is not None and bool(picks.changed)
+    if picks is not None and not sizes_change and settings.resize_to_object in (None, body) and not (from_key or to_key):
+        return "The body shows these sizes now: pick others"
     problem = resizing.check_shapes(body, from_key, settings.resize_to_object, to_key, settings.resize_match,
                                     sizes_change)
     if problem is not None:
@@ -556,35 +537,30 @@ def check_resize_ready(context):
     return None
 
 
-def _rigid_parts(obj, co, size):
-    """Loose parts of ``obj`` (positions ``co``) that Resize moves rigidly: those no larger than ``size``,
-    or all of them for a mesh set to Rigid in Weight Transfer. Returns (part per vertex, -1
-    where not rigid; part count)."""
-    whole = getattr(getattr(obj, "magic_fit_transfer", None), "rigid", False)
-    if size <= 0.0 and not whole:
-        return np.full(len(co), -1, dtype=np.int64), 0
-    edges = np.empty(len(obj.data.edges) * 2, dtype=np.int64)
-    obj.data.edges.foreach_get("vertices", edges)
-    parts, count = resizing.loose_parts(co, edges.reshape(-1, 2))
-    rigid = np.ones(count, dtype=bool) if whole else resizing.part_sizes(co, parts, count) <= size
-    return np.where(rigid[parts], parts, -1), count
-
-
-def resize_key_name(context):
-    """Name of the shape key Resize adds: the Key Name setting, else the To shape's name."""
-    settings = context.scene.body_fit_brush
-    if settings.resize_key_name:
-        return settings.resize_key_name
+def resize_key_names(settings, picks=None):
+    """Names of the shape keys Resize adds, one per size it makes: the To shape's name (or the Key Name setting), or
+    with Sizes, each size's (after the Key Name, with several)."""
     body = settings.resize_from_object
     other = settings.resize_to_object or body
     to_key = resize_keys(settings)[1]
     label = resizing.shape_label(other, to_key, body) if other is not None else ""
-    sizes = resize_sizes(settings)
-    sizes_label = resizing.devkit_label(sizes, resizing.devkit_state(other)) if sizes else ""
-    if sizes_label:
-        # Named after the sizes that change, after the To Shapekey when there's one too.
-        label = " ".join(word for word in (label if label == to_key else "", sizes_label) if word)
-    return label or "Resized"
+    changed = picks.changed if picks is not None else []
+    if not changed:
+        return [settings.resize_key_name or label or "Resized"]
+    # Named after the sizes, after the To Shapekey when there's one too.
+    names = [" ".join(word for word in (label if label == to_key else "", size.name) if word) for size in changed]
+    if settings.resize_key_name:
+        names = [settings.resize_key_name] if len(names) == 1 else [
+            "{:s} {:s}".format(settings.resize_key_name, name) for name in names]
+    return names
+
+
+def resize_key_name(context):
+    """Name of the shape key Resize adds: the Key Name setting, else the To shape's name or the size's; empty when
+    it adds one per size."""
+    settings = context.scene.body_fit_brush
+    names = resize_key_names(settings, resize_sizes(settings))
+    return names[0] if len(names) == 1 else ""
 
 
 def lineup_model(context):
@@ -2879,6 +2855,61 @@ class MAGIC_FIT_OT_face_pose(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class MAGIC_FIT_OT_resize_pick(bpy.types.Operator):
+    """Resize to this. Shift-click to pick several: each combination is a size"""
+    bl_idname = "magic_fit.resize_pick"
+    bl_label = "Pick Size"
+    bl_options = {'REGISTER', 'UNDO', 'INTERNAL'}
+
+    setting: StringProperty(options={'HIDDEN'})
+    option: IntProperty(options={'HIDDEN'})
+    extend: BoolProperty(name="Extend", description="Pick this as well, or not anymore", options={'SKIP_SAVE'})
+
+    @classmethod
+    def description(cls, context, properties):
+        item = context.scene.body_fit_brush.resize_sizes.get(properties.setting)
+        if item is None or properties.option >= len(item.options):
+            return cls.__doc__
+        option = item.options[properties.option]
+        text = "Resize to {:s}".format(option.label if item.kind not in ('BOOL', 'KEY') else "{:s} {:s}".format(
+            item.label, option.label.lower()))
+        return text + ". Shift-click to pick several: each combination is a size"
+
+    def invoke(self, context, event):
+        self.extend = event.shift
+        return self.execute(context)
+
+    def execute(self, context):
+        item = context.scene.body_fit_brush.resize_sizes.get(self.setting)
+        if item is None or not 0 <= self.option < len(item.options):
+            return {'CANCELLED'}
+        bit = 1 << self.option
+        # As Blender's own buttons for several choices: a click picks this alone, Shift adds or takes it away.
+        item.picked = item.picked ^ bit if self.extend else bit
+        return {'FINISHED'}
+
+
+class MAGIC_FIT_OT_resize_sizes_read(bpy.types.Operator):
+    """List the settings the body's shape keys follow again, and start from the sizes it shows now"""
+    bl_idname = "magic_fit.resize_sizes_read"
+    bl_label = "List the Sizes"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        settings = context.scene.body_fit_brush
+        body = settings.resize_to_object or settings.resize_from_object
+        return body is not None and body.type == 'MESH'
+
+    def execute(self, context):
+        settings = context.scene.body_fit_brush
+        sync_sizes(settings, keep=False)
+        if not len(settings.resize_sizes):
+            self.report({'WARNING'}, settings.resize_sizes_problem or "'{:s}' has no sizes to pick".format(
+                (settings.resize_to_object or settings.resize_from_object).name))
+        return {'FINISHED'}
+
+
 class MAGIC_FIT_OT_resize(bpy.types.Operator):
     """Add a shape key to the selected meshes (or those in Edit Mode) that reshapes them from the From body
     to the To body"""
@@ -2896,11 +2927,30 @@ class MAGIC_FIT_OT_resize(bpy.types.Operator):
 
     def execute(self, context):
         settings = context.scene.body_fit_brush
-        body, to_body = settings.resize_from_object, settings.resize_to_object
-        from_key, to_key = resize_keys(settings)
-        sizes = resize_sizes(settings)
-        name = resize_key_name(context)
+        job = api.Job(settings)
+        body, to_body = job.body, job.to_body
+        picks = resize_sizes(settings)
+        sizes = picks.changed if picks is not None and picks.changed else [None]
+        names = resize_key_names(settings, picks)
         targets = resize_targets(context)
+        if picks is not None:
+            # Meshes whose keys follow the sizes themselves (a devkit's body parts) aren't resized.
+            try:
+                changed = {name for size in sizes if size is not None
+                           for name in sizing.size_values(job.sized, size.values)}
+            except resizing.ResizeError as error:
+                self.report({'ERROR'}, str(error))
+                return {'CANCELLED'}
+            setting_names = {setting.name for setting in picks.settings}
+            following = [obj for obj in targets if sizing.follows(obj, setting_names, changed)]
+            targets = [obj for obj in targets if obj not in following]
+            if following:
+                self.report({'WARNING'}, "Left out {:s}: {:s} shape keys follow the sizes".format(
+                    ", ".join("'{:s}'".format(obj.name) for obj in following[:3]) + (
+                        " and {:d} more".format(len(following) - 3) if len(following) > 3 else ""),
+                    "its" if len(following) == 1 else "their"))
+            if not targets:
+                return {'CANCELLED'}
         started = time.perf_counter()
         # Shape keys can only be added outside Edit Mode, and a body in Edit Mode too (edited along with
         # the meshes) only shows its latest shape and UV map outside it.
@@ -2910,72 +2960,65 @@ class MAGIC_FIT_OT_resize(bpy.types.Operator):
         window_manager = context.window_manager
         window_manager.progress_begin(0, 100)
         try:
-            try:
-                to_values = resize_to_values(settings)
-                bodies = resizing.body_shapes(body, from_key, to_body, to_key, settings.resize_match, to_values)
-                change = bodies.change(radius=settings.resize_radius, bridge=settings.resize_bridge)
-            except resizing.ResizeError as error:
-                self.report({'ERROR'}, str(error))
-                return {'CANCELLED'}
-            if change.largest <= 0.0:
-                self.report({'ERROR'}, "The From and To shapes are the same")
-                return {'CANCELLED'}
-            shapes = [resizing.garment_shape(obj) for obj in targets]
-            # Rigid parts are numbered across all meshes.
-            groups, first_part = [], 0
-            for obj, shape in zip(targets, shapes):
-                parts, count = _rigid_parts(obj, shape, settings.resize_rigid_size)
-                groups.append(np.where(parts >= 0, parts + first_part, -1))
-                first_part += count
-            rigid = np.concatenate(groups)
-            edges = None
-            if settings.resize_keep_close:
-                # Keep Close spreads its corrections along the meshes' edges, numbered across all meshes.
-                edges, first_vertex = [], 0
-                for obj, shape in zip(targets, shapes):
-                    pairs = np.empty(len(obj.data.edges) * 2, dtype=np.int64)
-                    obj.data.edges.foreach_get("vertices", pairs)
-                    edges.append(pairs.reshape(-1, 2) + first_vertex)
-                    first_vertex += len(shape)
-                edges = np.concatenate(edges)
-            moved = change.apply(
-                np.concatenate(shapes), rigid=rigid, edges=edges,
-                progress=lambda done: window_manager.progress_update(int(100 * done)),
-            )
-            first = 0
-            for obj, shape in zip(targets, shapes):
-                block, stuck = resizing.add_resized_key(obj, name, moved[first:first + len(shape)])
-                first += len(shape)
-                if stuck:
-                    self.report({'WARNING'}, "'{:s}': driven shape keys still shape it on top of '{:s}': {:s}".format(
-                        obj.name, block.name, ", ".join(stuck)))
+            runs, notes = api.resize_meshes(
+                targets, sizes, job, names, show=len(sizes) == 1,
+                progress=lambda done: window_manager.progress_update(int(100 * done)))
+        except resizing.ResizeError as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
         finally:
             window_manager.progress_end()
             if edit:
                 bpy.ops.object.mode_set(mode='EDIT')
+        if all(not run.made and not run.kept for run in runs):
+            self.report({'ERROR'}, "The From and To shapes are the same")
+            return {'CANCELLED'}
+        for run in runs:
+            for obj, stuck in run.stuck.items():
+                self.report({'WARNING'}, "'{:s}': driven shape keys still shape it on top of '{:s}': {:s}".format(
+                    obj.name, run.keys[obj], ", ".join(stuck)))
+        for note in notes:
+            self.report({'WARNING'}, note)
+        made = [run for run in runs if run.made]
+        elapsed = time.perf_counter() - started
+        kept = sum(run.kept for run in runs)
+        kept_note = ", {:d} kept: made from these shapes already".format(kept) if kept else ""
+        rigid = ", {:d} rigid part(s)".format(runs[0].rigid) if runs[0].rigid else ""
+        if len(runs) > 1:
+            if not made:
+                self.report({'INFO'}, "All {:d} sizes were made from these shapes already: kept ({:s})".format(
+                    len(runs), ", ".join(names)))
+            else:
+                self.report({'INFO'}, "Made {:d} of {:d} sizes on {:d} mesh(es){:s}{:s} in {:.1f} s: {:s}".format(
+                    len(made), len(runs), len(targets), rigid, kept_note, elapsed, ", ".join(names)))
+            return {'FINISHED'}
 
+        run = runs[0]
         # Body Fit fits against its Body: that should be the To body, showing the To shape.
         shown = to_body if to_body is not None else body
         needed = []
         if context.scene.magic_fit.target != shown:
             needed.append("pick '{:s}' as the Body".format(shown.name))
-        sizes_label = resizing.devkit_label(sizes, resizing.devkit_state(shown)) if sizes else ""
-        if sizes_label:
-            needed.append("set the devkit to {:s}".format(sizes_label))
-        if not resizing.shows_to_shape(body, from_key, to_body, to_key):
+        if sizes[0] is not None:
+            needed.append("set it to {:s}".format(sizes[0].name) if needed else
+                          "set '{:s}' to {:s}".format(shown.name, sizes[0].name))
+        elif not resizing.shows_to_shape(body, job.from_key, to_body, job.to_key):
             needed.append("switch {:s} to the To shape".format("it" if needed else "'{:s}'".format(shown.name)))
         hint = "; to fit against it, " + " and ".join(needed) if needed else ""
-        rigid_count = len(np.unique(rigid[rigid >= 0]))
-        match = bodies.match
+        key_name = next(iter(run.keys.values()), names[0])
+        if not run.made:
+            self.report({'INFO'}, "Shape key '{:s}' was made from these shapes already: shown{:s}".format(
+                key_name, hint))
+            return {'FINISHED'}
+        match = run.match
         how = ""
-        if bodies.how == 'UV':
+        if run.how == 'UV':
             how = ", bodies matched by UV map"
         elif match is not None:
             how = ", bodies matched by shape: {:.0f}% matched, {:.1f}% folded".format(
                 100.0 * match.matched_share, 100.0 * match.folded)
-        self.report({'INFO'}, "Added shape key '{:s}' to {:d} mesh(es){:s} in {:.1f} s ({:d} steps{:s}){:s}".format(
-            block.name, len(targets), ", {:d} rigid part(s)".format(rigid_count) if rigid_count else "",
-            time.perf_counter() - started, change.steps, how, hint))
+        self.report({'INFO'}, "Added shape key '{:s}' to {:d} mesh(es){:s}{:s} in {:.1f} s ({:d} steps{:s}){:s}".format(
+            key_name, run.made, rigid, kept_note, elapsed, run.steps, how, hint))
         if match is not None and match.spread > resizing.SHAPE_DIFFERENT:
             self.report({'WARNING'}, "'{:s}' and '{:s}' differ by {:.0f} cm in places: check there (often the chest) "
                                      "for creases, and move details tied to the skin, like piercings, by hand".format(
@@ -3309,6 +3352,8 @@ classes = (
     MAGIC_FIT_OT_pick_face,
     MAGIC_FIT_OT_face_pose,
     MAGIC_FIT_OT_read_game_faces,
+    MAGIC_FIT_OT_resize_pick,
+    MAGIC_FIT_OT_resize_sizes_read,
     MAGIC_FIT_OT_resize,
     MAGIC_FIT_OT_line_up,
     MAGIC_FIT_OT_line_up_hair,

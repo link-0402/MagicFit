@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(ROOT, "tests"))
 
 import resize  # noqa: E402
 import magic_fit  # noqa: E402
-from magic_fit import fitting, lineup, operators, properties, resizing  # noqa: E402
+from magic_fit import api, fitting, lineup, operators, properties, resizing, sizing  # noqa: E402
 
 FAILURES = []
 
@@ -77,9 +77,9 @@ def reset_settings():
     settings = bpy.context.scene.body_fit_brush
     for prop in ("resize_from_object", "resize_from_key", "resize_to_object", "resize_to_key", "resize_match",
                  "resize_radius", "resize_bridge", "resize_rigid_size", "resize_keep_close", "resize_key_name",
-                 "resize_use_keys_state", "resize_use_sizes", "resize_chest", "resize_legs", "resize_rue",
-                 "resize_buff", "resize_lavabod"):
+                 "resize_use_keys_state", "resize_use_sizes", "resize_sizes_problem"):
         settings.property_unset(prop)
+    settings.resize_sizes.clear()
     return settings
 
 
@@ -667,7 +667,7 @@ def test_operator():
           "button: needs a From body")
     scene.magic_fit.target = None
     settings.resize_from_object = body
-    check(operators.check_resize_ready(bpy.context) == "Pick a To Body, or turn on Use Shapekeys",
+    check(operators.check_resize_ready(bpy.context) == "Pick a To Body, or turn on Sizes or Use Shapekeys",
           "button: needs two shapes")
     settings.resize_use_keys = True
     check(operators.check_resize_ready(bpy.context) == "From and To are the same shape",
@@ -834,7 +834,7 @@ def test_use_shapekeys():
     settings = reset_settings()
     check(not settings.resize_use_keys, "shapekeys: off by default")
     settings.resize_from_object = body
-    check(operators.check_resize_ready(bpy.context) == "Pick a To Body, or turn on Use Shapekeys",
+    check(operators.check_resize_ready(bpy.context) == "Pick a To Body, or turn on Sizes or Use Shapekeys",
           "shapekeys: off, the From Body alone is one shape")
     settings.resize_use_keys = True
     settings.resize_to_key = "Small"
@@ -848,7 +848,7 @@ def test_use_shapekeys():
 
 
 # -----------------------------------------------------------------------------
-# Devkit Sizes
+# Sizes
 
 def key_states(obj):
     return [(block.name, block.value, block.mute) for block in obj.data.shape_keys.key_blocks]
@@ -859,74 +859,95 @@ def devkit_state():
     return [getattr(state, name) for name in ("chest_size", "leg_size", "rue", "buff", "lavabod", "alt_hips")]
 
 
-def devkit_error(body, sizes):
+def size_error(body, size):
     try:
-        resizing.devkit_values(body, sizes)
+        sizing.size_values(body, size)
     except resizing.ResizeError as error:
         return str(error)
     return None
 
 
-def test_devkit_values():
+def listed(body):
+    settings, problems = sizing.body_settings(body)
+    return {setting.name: setting for setting in settings}, problems
+
+
+def select_only(objects):
+    for obj in bpy.context.view_layer.objects:
+        obj.select_set(obj in objects)
+
+
+def test_size_values():
     body, _garments = resize.devkit_body()
     keys = body.data.shape_keys
     state = bpy.context.scene.ya_devkit_props.mannequin_state
-    check(resizing.devkit_settings(body) == {"chest_size", "leg_size", "rue", "buff", "lavabod"}
-          and resizing.devkit_settings(resize.coarse_body()) == set() and resizing.devkit_settings(None) == set(),
-          "devkit: the settings driving the body's keys")
+    settings, problems = listed(body)
+    check(set(settings) == {"chest_size", "leg_size", "rue", "buff", "lavabod", "alt_hips"} and not problems
+          and sizing.body_settings(None) == ([], []), "sizes: the settings driving the body's keys")
+    chest = settings["chest_size"]
+    check(chest.kind == 'ENUM' and [option.label for option in chest.options] == ["Large", "Medium", "Small", "Masc"]
+          and [option.value for option in chest.options] == [0.0, 1.0, 2.0, 3.0],
+          "sizes: an enum's items, listed by a function too, by number")
+    check(settings["rue"].kind == 'BOOL' and settings["rue"].label == "Rue" and settings["leg_size"].label == "Legs",
+          "sizes: switches, and labels for properties without names")
+    check(settings["leg_size"].option(3.0).word == "Masc Legs", "sizes: the devkit's words for leg sizes")
     state.chest_size = "2"
     state.leg_size = "1"
-    check(resizing.devkit_state(body) == {"chest_size": 2, "leg_size": 1, "rue": 0, "buff": 0, "lavabod": 0},
-          "devkit: its settings now, sizes by number (listed by a function too)")
+    names = list(settings)
+    check(sizing.now_values(body, names) == {"chest_size": 2.0, "leg_size": 1.0, "rue": 0.0, "buff": 0.0,
+                                             "lavabod": 0.0, "alt_hips": 0.0}, "sizes: the settings now, by number")
     state.chest_size = "0"
     state.leg_size = "0"
     before, settings_before = key_states(body), devkit_state()
 
-    check(resizing.devkit_values(body, {"chest_size": 1}) == {"MEDIUM": 1.0, "- Squeeze": 0.0},
-          "devkit: Medium turns MEDIUM on and mutes the Large sub-key")
-    check(resizing.devkit_values(body, {"chest_size": 0, "rue": 0}) == {}, "devkit: the sizes it shows change nothing")
-    check(resizing.devkit_values(body, {"rue": 1}) == {"Rue": 1.0, "Rue/Follow": 1.0},
-          "devkit: Rue, and the key that follows it")
-    check(resizing.devkit_values(body, {"rue": 1, "buff": 1}) == {"Rue": 1.0, "Buff": 1.0, "Rue/Buff": 1.0,
-                                                                  "Rue/Follow": 1.0},
-          "devkit: Rue with Buff adds their correction")
-    check(resizing.devkit_values(body, {"lavabod": 1, "chest_size": 1}) == {"Lavabod": 1.0, "- Squeeze": 0.0},
-          "devkit: Lavabod's medium chest isn't MEDIUM")
-    check(resizing.devkit_values(body, {"lavabod": 1, "chest_size": 3}) == resizing.devkit_values(
-        body, {"lavabod": 1, "chest_size": 2}), "devkit: Lavabod has no Masc chest, it takes Small")
-    check(resizing.devkit_values(body, {"lavabod": 1}) == {"Lavabod": 1.0, "- Squeeze": 0.0},
-          "devkit: switching Lavabod on the first time takes '- Squeeze' off, as the devkit does")
+    check(sizing.size_values(body, {"chest_size": 1}) == {"MEDIUM": 1.0, "- Squeeze": 0.0},
+          "sizes: Medium turns MEDIUM on and mutes the Large sub-key")
+    check(sizing.size_values(body, {"chest_size": 0, "rue": 0}) == {}, "sizes: the sizes it shows change nothing")
+    check(sizing.size_values(body, {"rue": 1}) == {"Rue": 1.0, "Rue/Follow": 1.0},
+          "sizes: Rue, and the key that follows it")
+    check(sizing.size_values(body, {"rue": 1, "buff": 1}) == {"Rue": 1.0, "Buff": 1.0, "Rue/Buff": 1.0,
+                                                              "Rue/Follow": 1.0},
+          "sizes: Rue with Buff adds their correction")
+    check(sizing.size_values(body, {"lavabod": 1, "chest_size": 1}) == {"Lavabod": 1.0, "- Squeeze": 0.0},
+          "sizes: Lavabod's medium chest isn't MEDIUM")
+    check(sizing.size_values(body, {"lavabod": 1, "chest_size": 3}) == sizing.size_values(
+        body, {"lavabod": 1, "chest_size": 2}), "sizes: Lavabod has no Masc chest, it takes Small")
+    check(sizing.size_values(body, {"lavabod": 1}) == {"Lavabod": 1.0, "- Squeeze": 0.0},
+          "sizes: switching Lavabod on the first time takes '- Squeeze' off, as the devkit does")
     kept = state.lava_keys.add()
     kept.name, kept.value = "- Squeeze", 0.5
-    check(resizing.devkit_values(body, {"lavabod": 1}) == {"Lavabod": 1.0, "- Squeeze": 0.5},
-          "devkit: ...or gives the sub-keys the values kept from last time")
+    check(sizing.size_values(body, {"lavabod": 1}) == {"Lavabod": 1.0, "- Squeeze": 0.5},
+          "sizes: ...or gives the sub-keys the values kept from last time")
     state.alt_hips = True
     keys.key_blocks["Hip Dips (for YAB)"].value = 1.0
-    check(resizing.devkit_values(body, {"leg_size": 1}) == {"Skull Crushers": 1.0},
-          "devkit: hip dips stay with the first leg sizes")
-    check(resizing.devkit_values(body, {"leg_size": 3}) == {"Hip Dips (for YAB)": 0.0},
-          "devkit: ...and go with the others (the devkit turns Alt Hips off)")
-    check(resizing.devkit_values(body, {"rue": 1}).get("Hip Dips (for YAB)") == 0.0, "devkit: ...and with Rue")
+    check(sizing.size_values(body, {"leg_size": 1}) == {"Skull Crushers": 1.0},
+          "sizes: hip dips stay with the first leg sizes")
+    check(sizing.size_values(body, {"leg_size": 3}) == {"Hip Dips (for YAB)": 0.0},
+          "sizes: ...and go with the others (the devkit turns Alt Hips off)")
+    check(sizing.size_values(body, {"rue": 1}).get("Hip Dips (for YAB)") == 0.0, "sizes: ...and with Rue")
     state.alt_hips = False
     keys.key_blocks["Hip Dips (for YAB)"].value = 0.0
     state.lava_keys.clear()
     check(key_states(body) == before and devkit_state() == settings_before,
-          "devkit: working the sizes out changes neither the body nor the devkit")
+          "sizes: working the sizes out changes neither the body nor the devkit")
 
-    rest = resizing.rest_shape(body, resizing.devkit_values(body, {"chest_size": 1, "rue": 1}))
+    rest = resizing.rest_shape(body, sizing.size_values(body, {"chest_size": 1, "rue": 1}))
     expected = resizing.rest_shape(body, {"MEDIUM": 1.0, "- Squeeze": 0.0, "Rue": 1.0, "Rue/Follow": 1.0})
-    check(np.abs(rest - expected).max() == 0.0, "devkit: the To shape mixes the keys at those values")
+    check(np.abs(rest - expected).max() == 0.0, "sizes: the To shape mixes the keys at those values")
 
     resize.drive(keys, "Buff", 'mute', "size == 1 and nope == 1", (("size", "chest_size"), ("nope", "nope")))
-    unreadable = devkit_error(body, {"chest_size": 1})
+    unreadable = size_error(body, {"chest_size": 1})
     check(unreadable is not None and "is the devkit's script running" in unreadable,
-          "devkit: a setting that can't be read is refused ({!s})".format(unreadable))
+          "sizes: a setting that can't be read is refused ({!s})".format(unreadable))
+    check(listed(body)[1] == ["'ya_devkit_props.mannequin_state.nope' can't be read: is the devkit's script running?"],
+          "sizes: ...and said when listing them")
     keys.key_blocks["Buff"].driver_remove("mute")
     resize.drive(keys, "Buff", 'mute', "__import__('os').getpid() > 0 and size", (("size", "chest_size"),))
-    unsafe = devkit_error(body, {"chest_size": 1})
-    check(unsafe is not None and "can't be worked out" in unsafe, "devkit: expressions that could run code aren't run")
+    unsafe = size_error(body, {"chest_size": 1})
+    check(unsafe is not None and "can't be worked out" in unsafe, "sizes: expressions that could run code aren't run")
     keys.key_blocks["Buff"].driver_remove("mute")
 
+    settings_list, _problems = sizing.body_settings(body)
     labels = {
         "Medium": ({"chest_size": 1}, {"chest_size": 0}),
         "Rue Buff": ({"rue": 1, "buff": 1, "chest_size": 0}, {"rue": 0, "buff": 0, "chest_size": 0}),
@@ -937,42 +958,104 @@ def test_devkit_values():
         "No Buff": ({"buff": 0}, {"buff": 1}),
         "": ({"chest_size": 2}, {"chest_size": 2}),
     }
-    for label, (sizes, now) in labels.items():
-        check(resizing.devkit_label(sizes, now) == label, "devkit label: {!r}".format(label))
+    for label, (size, now) in labels.items():
+        check(sizing.size_label(settings_list, size, now) == label, "size label: {!r}".format(label))
+    now = {"chest_size": 0.0, "leg_size": 0.0, "rue": 0.0, "buff": 0.0, "lavabod": 0.0, "alt_hips": 0.0}
+    sizes = sizing.combinations(settings_list, {"chest_size": {0.0, 1.0, 2.0}, "rue": {0.0, 1.0}}, now)
+    named = [sizing.size_label(settings_list, size, now, {"chest_size", "rue"}) for size in sizes]
+    check(sorted(named) == ["Large", "Large Rue", "Medium", "Medium Rue", "Small", "Small Rue"],
+          "combinations: every one of the values picked, named by what's picked ({!s})".format(named))
+    sizes = sizing.combinations(settings_list, {"chest_size": {2.0, 3.0}, "lavabod": {1.0}}, now)
+    check(len(sizes) == 1 and sizes[0]["chest_size"] == 2.0, "combinations: Masc Lavabod is Small Lavabod, given once")
 
 
-def test_devkit_sizes_operator():
+def test_body_parts():
+    body, _garments = resize.devkit_body()
+    part = resize.devkit_part(body)
+    names = [setting.name for setting in sizing.body_settings(body)[0]]
+    check(sizing.follows(part, names) and not sizing.follows(resize.coarse_body(), names),
+          "parts: a body part follows the body's settings, from its own group")
+    check(sizing.size_values(part, {"chest_size": 1, "rue": 1}) == {"MEDIUM": 1.0, "Rue": 1.0},
+          "parts: its keys worked out with the same sizes")
+    copy = body.copy()
+    copy.data = body.data.copy()
+    copy.data.shape_keys.animation_data_clear()
+    bpy.context.scene.collection.objects.link(copy)
+    body_values = sizing.size_values(body, {"chest_size": 1, "rue": 1})
+    check(sizing.follows(copy, names, body_values)
+          and sizing.size_values(copy, {"chest_size": 1, "rue": 1}, body_values) == body_values,
+          "parts: a copy without drivers takes the body's keys by name")
+
+
+def test_custom_property_settings():
+    body, _garments, driver = resize.driver_body()
+    settings, problems = listed(body)
+    check(set(settings) == {"Buff", "Heels", "Nipple Extra"} and not problems,
+          "custom properties: an object's properties driving the keys are settings")
+    heels = settings["Heels"]
+    check(heels.kind == 'NUMBER' and [option.value for option in heels.options] == [0.0, 1.0, 2.0, 3.0]
+          and [option.label for option in heels.options] == ["None", "Heels", "Cinderella", "3"],
+          "custom properties: numbers in their range, named after the keys they turn on ({!s})".format(
+              [option.label for option in heels.options]))
+    check([option.label for option in settings["Nipple Extra"].options] == ["Default Type", "Inverted", "Flatter"],
+          "custom properties: ...or as their description names them")
+    check(settings["Buff"].kind == 'BOOL', "custom properties: a switch")
+    check(sizing.size_values(body, {"Heels": 2, "Buff": 1}) == {"Cinderella": 1.0, "Buff": 1.0},
+          "custom properties: worked out without switching them")
+    check(driver["Heels"] == 0 and not driver["Buff"], "custom properties: left as they were")
+    driver["Heels"] = 2
+    check(sizing.now_values(body, ["Heels"]) == {"Heels": 2.0}, "custom properties: read as they are now")
+    driver["Heels"] = 0
+
+
+def test_plain_key_sizes():
+    body, garments = resize.build()
+    settings, _problems = listed(body)
+    check(list(settings) == ["key:Small"] and settings["key:Small"].kind == 'KEY'
+          and settings["key:Small"].label == "Small", "plain keys: a body whose keys nothing drives has them as sizes")
+    check(sizing.size_values(body, {"key:Small": 1.0}) == {"Small": 1.0}, "plain keys: turned on")
+    brush = reset_settings()
+    brush.resize_from_object = body
+    brush.resize_use_sizes = True
+    check([item.name for item in brush.resize_sizes] == ["key:Small"], "plain keys: listed in the panel")
+    bpy.ops.magic_fit.resize_pick(setting="key:Small", option=1)
+    select_only(garments.values())
+    check(operators.check_resize_ready(bpy.context) is None and operators.resize_key_name(bpy.context) == "Small",
+          "plain keys: ready, named after the key")
+    before = np.concatenate([resize.positions(obj) for obj in garments.values()])
+    check(bpy.ops.magic_fit.resize() == {'FINISHED'}, "plain keys: resized")
+    change = resizing.body_shapes(body, "", None, "Small").change(radius=brush.resize_radius, bridge=brush.resize_bridge)
+    rigid = np.full(len(before), -1)
+    rigid[-8:] = 0
+    expected = change.apply(before, rigid=rigid, edges=garment_edges(garments.values()))
+    got = np.concatenate([resize.positions(obj, "Small") for obj in garments.values()])
+    check(np.abs(got - expected).max() < 1e-5, "plain keys: as resizing to the key ({:.2g} m off)".format(
+        np.abs(got - expected).max()))
+
+
+def test_sizes_operator():
     body, garments = resize.devkit_body()
     settings = reset_settings()
     settings.resize_from_object = body
-    check(operators.check_resize_ready(bpy.context) == "Pick a To Body, or turn on Devkit Sizes or Use Shapekeys",
-          "sizes: offered for a devkit body")
+    check(operators.check_resize_ready(bpy.context) == "Pick a To Body, or turn on Sizes or Use Shapekeys",
+          "sizes: offered for a body with sizes")
     state = bpy.context.scene.ya_devkit_props.mannequin_state
     skull = body.data.shape_keys.key_blocks["Skull Crushers"]
     state.leg_size = "1"
     skull.value = 1.0  # as its driver sets it
     settings.resize_use_sizes = True
-    check((settings.resize_chest, settings.resize_legs, settings.resize_rue) == ('LARGE', 'SKULL', False),
-          "sizes: turned on, they start from the devkit's")
-    check(operators.check_resize_ready(bpy.context) == "The devkit shows these sizes now: pick others",
+    check(properties.picked_of(settings.resize_sizes["leg_size"]) == {1.0}
+          and properties.picked_of(settings.resize_sizes["chest_size"]) == {0.0},
+          "sizes: turned on, they start from the body's")
+    check(operators.check_resize_ready(bpy.context) == "The body shows these sizes now: pick others",
           "sizes: the same as now is nothing to do")
     state.leg_size = "0"
     skull.value = 0.0
-    settings.resize_legs = 'MELON'
-    settings.resize_chest = 'MEDIUM'
-    check(operators.resize_sizes(settings) == {"chest_size": 1, "leg_size": 0, "rue": 0, "buff": 0, "lavabod": 0}
-          and operators.check_resize_ready(bpy.context) is None and operators.resize_key_name(bpy.context) == "Medium",
+    bpy.ops.magic_fit.resize_pick(setting="leg_size", option=0)
+    bpy.ops.magic_fit.resize_pick(setting="chest_size", option=1)
+    check(operators.check_resize_ready(bpy.context) is None and operators.resize_key_name(bpy.context) == "Medium",
           "sizes: ready, named after what changes")
-
-    settings.resize_chest = 'MASC'
-    settings.resize_lavabod = True
-    check(settings.resize_chest == 'SMALL', "sizes: Lavabod takes Small for Masc, as in the devkit")
-    check([item[1] for item in properties._chest_items(settings, None)][:3] == ["Omoi", "Teardrop", "Cupcake"],
-          "sizes: with Lavabod, its own chest names")
-    settings.resize_chest = 'MASC'
-    check(not settings.resize_lavabod, "sizes: Masc turns Lavabod off")
-    settings.resize_chest = 'MEDIUM'
-    settings.resize_rue = True
+    bpy.ops.magic_fit.resize_pick(setting="rue", option=1)
     check(operators.resize_key_name(bpy.context) == "Medium Rue", "sizes: named after every size that changes")
 
     before = {name: resize.positions(obj) for name, obj in garments.items()}
@@ -998,13 +1081,133 @@ def test_devkit_sizes_operator():
     got = np.concatenate([resize.positions(obj, "Medium Rue") for obj in garments.values()])
     check(np.abs(got - expected).max() < 1e-5, "sizes: as resizing to a hand-set copy ({:.2g} m off)".format(
         np.abs(got - expected).max()))
+    suit = garments["Suit"]
+    check(suit.data.shape_keys.key_blocks["Medium Rue"].value == 1.0, "sizes: one size is shown")
+
+    # Several at once: Shift-click picks more. The suit shows Medium Rue now, but each starts from its own shape.
+    bpy.ops.magic_fit.resize_pick(setting="chest_size", option=2, extend=True)
+    picks = operators.resize_sizes(settings)
+    check([size.name for size in picks.changed] == ["Medium Rue", "Small Rue"]
+          and operators.check_resize_ready(bpy.context) is None, "several: every combination of the values picked")
+    check(bpy.ops.magic_fit.resize() == {'FINISHED'}, "several: resized")
+    blocks = suit.data.shape_keys.key_blocks
+    check([block.name for block in blocks] == ["Basis", "Medium Rue", "Small Rue"],
+          "several: a key per size, the one made before kept")
+    small = resizing.body_shapes(body, "", None, "", 'AUTO', sizing.size_values(body, picks.changed[1].values))
+    expected = small.change(radius=settings.resize_radius, bridge=settings.resize_bridge).apply(
+        np.concatenate(list(before.values())), rigid=rigid, edges=garment_edges(garments.values()))
+    got = np.concatenate([resize.positions(obj, "Small Rue") for obj in garments.values()])
+    check(np.abs(got - expected).max() < 1e-5, "several: from the clothing's own shape, not the size it shows "
+                                               "({:.2g} m off)".format(np.abs(got - expected).max()))
+
+    part = resize.devkit_part(body)
+    select_only(list(garments.values()) + [part])
+    check(bpy.ops.magic_fit.resize() == {'FINISHED'} and part.data.shape_keys.key_blocks.get("Medium Rue") is None,
+          "several: a body part selected along isn't resized")
 
     settings.resize_to_object = copy
-    check(operators.resize_sizes(settings) is None and operators.check_resize_ready(bpy.context) is None,
-          "sizes: not for a To body the devkit doesn't drive")
+    picks = operators.resize_sizes(settings)
+    check(picks is not None and all(setting.kind == 'KEY' for setting in picks.settings),
+          "sizes: a To body nothing drives has its keys as sizes")
     settings.resize_to_object = None
     settings.resize_use_sizes = False
     check(operators.resize_sizes(settings) is None, "sizes: off")
+
+
+def test_reused_keys():
+    body, garments = resize.devkit_body()
+    settings = reset_settings()
+    settings.resize_from_object = body
+    settings.resize_use_sizes = True
+    bpy.ops.magic_fit.resize_pick(setting="chest_size", option=1)
+    select_only(garments.values())
+    suit = garments["Suit"]
+    bpy.ops.magic_fit.resize()
+    block = suit.data.shape_keys.key_blocks["Medium"]
+    made = resize.positions(suit, "Medium")
+    bridge_made = resize.positions(garments["Bridge"], "Medium")
+    record = resizing.resized_keys(suit)["Medium"]
+    check(record["label"] == "Medium" and record["count"] == len(suit.data.vertices) and record["mix"] == {},
+          "records: what the key was made from")
+    check(resizing.key_state(suit, "Medium", record["inputs"]) == (block, 'FRESH'), "records: fresh")
+    bpy.ops.magic_fit.resize()
+    check(np.array_equal(resize.positions(suit, "Medium"), made) and len(suit.data.shape_keys.key_blocks) == 2,
+          "again: the key made from the same shapes is kept, not made twice")
+
+    settings.resize_radius = 0.012
+    bpy.ops.magic_fit.resize()
+    remade = resize.positions(suit, "Medium")
+    check(not np.array_equal(remade, made) and len(suit.data.shape_keys.key_blocks) == 2,
+          "changed: made again in place when the options change")
+    # Fixed by hand, then the options change: the fix stays.
+    fixed = remade.copy()
+    fixed[:, 1] -= 0.001
+    suit.data.shape_keys.key_blocks["Medium"].data.foreach_set("co", fixed.astype(np.float32).ravel())
+    settings.resize_radius = 0.01
+    bpy.ops.magic_fit.resize()
+    check(np.allclose(resize.positions(suit, "Medium"), fixed, atol=1e-6), "edited: a key fixed by hand is kept")
+    check(np.array_equal(resize.positions(garments["Bridge"], "Medium"), bridge_made),
+          "edited: the other meshes' keys were made again, as at first")
+
+
+def test_resize_collection():
+    body, garments = resize.devkit_body()
+    part = resize.devkit_part(body)
+    settings = reset_settings()
+    settings.resize_from_object = body
+    settings.resize_use_sizes = True
+    bpy.ops.magic_fit.resize_pick(setting="chest_size", option=0)
+    bpy.ops.magic_fit.resize_pick(setting="chest_size", option=1, extend=True)
+    bpy.ops.magic_fit.resize_pick(setting="rue", option=1)
+    collection = bpy.data.collections.new("Outfit")
+    bpy.context.scene.collection.children.link(collection)
+    for obj in list(garments.values()) + [part, body]:
+        collection.objects.link(obj)
+    sizes = api.picked_sizes()
+    check([(size.name, size.now) for size in sizes] == [("Large Rue", False), ("Medium Rue", False)],
+          "api: the sizes picked ({!s})".format(sizes))
+    results = api.resize_collection(collection)
+    check([result.name for result in results] == ["Large Rue", "Medium Rue"], "api: a result per size")
+    medium = results[1]
+    check(set(medium.keys) == set(garments.values()) and part in medium.parts and body not in medium.parts,
+          "api: clothing resized, the body part set, the body left out")
+    # Its keys the torso's settings drive are worked out; the others take the body's values by name.
+    check(medium.parts.get(part) == {"MEDIUM": 1.0, "Rue": 1.0, "- Squeeze": 0.0, "Rue/Follow": 1.0},
+          "api: the part's keys at the size")
+    suit = garments["Suit"]
+    blocks = suit.data.shape_keys.key_blocks
+    check([block.value for block in blocks][1:] == [0.0, 0.0], "api: the clothing shows its own shape still")
+    part_keys = part.data.shape_keys
+    drivers_before = [curve.mute for curve in part_keys.animation_data.drivers]
+    states_before = key_states(part), key_states(suit)
+    with medium.shown():
+        check(blocks[medium.keys[suit]].value == 1.0 and blocks[results[0].keys[suit]].value == 0.0,
+              "shown: the clothing's key for the size on")
+        check(part_keys.key_blocks["MEDIUM"].value == 1.0 and part_keys.key_blocks["Rue"].value == 1.0
+              and all(curve.mute for curve in part_keys.animation_data.drivers
+                      if curve.data_path.split('"')[1] in ("MEDIUM", "Rue")),
+              "shown: the part's keys set, their drivers muted meanwhile")
+        bpy.context.view_layer.update()
+        evaluated = suit.evaluated_get(bpy.context.evaluated_depsgraph_get()).data
+        co = np.empty(len(evaluated.vertices) * 3)
+        evaluated.vertices.foreach_get("co", co)
+        check(np.allclose(co.reshape(-1, 3), resize.positions(suit, medium.keys[suit]), atol=1e-6),
+              "shown: what an export reads is the size")
+    check((key_states(part), key_states(suit)) == states_before
+          and [curve.mute for curve in part_keys.animation_data.drivers] == drivers_before,
+          "shown: everything put back afterwards")
+    try:
+        with medium.shown():
+            raise RuntimeError("export failed")
+    except RuntimeError:
+        pass
+    check((key_states(part), key_states(suit)) == states_before, "shown: put back after an error too")
+
+    again = api.resize_collection(list(garments.values()) + [part], [{"chest_size": 2}, {"chest_size": 0}])
+    check([(result.name, result.size.now) for result in again] == [("Small", False), ("Large", True)]
+          and all(name is None for name in again[1].keys.values()) and not again[1].parts,
+          "api: sizes given, the one the body shows kept as it is ({!s})".format(again))
+    check(sum(1 for block in blocks if block.name == "Small") == 1, "api: the key for the size given")
 
 
 def test_registered():
@@ -1012,9 +1215,12 @@ def test_registered():
     settings = bpy.context.scene.body_fit_brush
     for prop in ("resize_from_object", "resize_from_key", "resize_to_object", "resize_to_key", "resize_match",
                  "resize_radius", "resize_bridge", "resize_rigid_size", "resize_keep_close", "resize_key_name",
-                 "resize_use_keys", "resize_use_sizes", "resize_chest", "resize_legs", "resize_rue", "resize_buff",
-                 "resize_lavabod"):
+                 "resize_use_keys", "resize_use_sizes", "resize_sizes"):
         check(prop in settings.bl_rna.properties, "setting: " + prop)
+    check(hasattr(bpy.ops.magic_fit, "resize_pick") and hasattr(bpy.ops.magic_fit, "resize_sizes_read"),
+          "the Sizes buttons are registered")
+    check(api.VERSION >= 1 and callable(api.resize_collection) and callable(api.picked_sizes),
+          "the API for other add-ons is there")
 
 
 def main():

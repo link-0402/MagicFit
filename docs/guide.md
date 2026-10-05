@@ -552,11 +552,11 @@ How it differs from Blender's Move:
 
 ## Resize
 
-**Resize** moves clothing from one body to another and adds the result to each mesh as a shape key. The bodies can be two shape keys of one devkit body, like the Yet Another Devkit Mannequin's Rue, Lava or Buff keys, or that body at other sizes picked like in the devkit ([Devkit Sizes](#devkit-sizes)). They can also be two different bodies: another body mod with the same UV layout, like the RueXB devkit's body and the Mannequin, or any body the clothing was made on, like an outfit's own body from another game.
+**Resize** moves clothing from one body to another and adds the result to each mesh as a shape key. The bodies can be two shape keys of one devkit body, like the Yet Another Devkit Mannequin's Rue, Lava or Buff keys, or that body at other sizes picked like in the devkit, several at once ([Sizes](#sizes)). They can also be two different bodies: another body mod with the same UV layout, like the RueXB devkit's body and the Mannequin, or any body the clothing was made on, like an outfit's own body from another game.
 
 1. In the **Resize** panel on the **Body Fit** tab, pick the **From Body**, the body the clothing fits now.
 2. Pick the **To Body**. Leave it empty to go to another shape key of the From Body.
-3. To start from or go to a shape key, turn on **Use Shapekeys** and pick **From Shapekey** and **To Shapekey**. For other sizes of the Yet Another Devkit's Mannequin, use [Devkit Sizes](#devkit-sizes) instead.
+3. To start from or go to a shape key, turn on **Use Shapekeys** and pick **From Shapekey** and **To Shapekey**. For other sizes of a devkit body, like the Yet Another Devkit's Mannequin, use [Sizes](#sizes) instead.
 4. Select all of the clothing's meshes, so its parts stay together, and click **Resize**.
 
 Examples:
@@ -569,9 +569,11 @@ Examples:
 | Rue to YAB | Mannequin | `Rue` | | |
 | Another game's outfit to YAB | The outfit's own body, lined up with it | | Mannequin | |
 
-Bring in bodies from other files with **File → Append**. The other shape keys of the bodies count as they're set: for Rue with a medium chest, set the Mannequin to Medium first, or pick both with Devkit Sizes.
+Bring in bodies from other files with **File → Append**. The other shape keys of the bodies count as they're set: for Rue with a medium chest, set the Mannequin to Medium first, or pick both with Sizes.
 
 **The result** is a new shape key on each mesh, named after the To Shapekey (or **Key Name**). It's turned on, and the mesh's other keys are turned off. Turn it off to compare, set it halfway for an in-between size, or keep fitting it with Body Fit. Resize doesn't change Body Fit's body for you: its report says what to set to check the fit, then fix what still clips with [Body Fit](#body-fit).
+
+**Resizing again** starts from the shape the clothing fits the From Body in, even while it shows a key Resize made: resizing to Medium and then to Small gives two keys, both from the large shape. A key made for the same size from the same shapes and settings is kept as it is, and so is one you fixed by hand since. Resize makes it again when the clothing, the bodies or the settings changed and nobody touched it; delete a key to have it made again anyway.
 
 **Match By** says how Resize tells which spot of the To Body each spot of the From Body is, when they're different meshes:
 
@@ -604,30 +606,37 @@ Good to know:
 | From Body | The body the clothing fits now. |
 | To Body | The body to fit to. Empty: the From Body. |
 | Match By | How different bodies are matched: Auto, Vertices, UV Map or Shape. |
-| Devkit Sizes | Resize to other sizes of a Yet Another Devkit body, without switching the devkit. Only shown for such a body. |
-| Chest, Legs, Body | The devkit sizes to resize to: the chest and leg size, Rue, Buff and Lavabod. |
+| Sizes | Resize to other sizes of the body, picked in its section, without switching the devkit. Only shown for a body with shape keys. |
 | Use Shapekeys | Resize from or to shape keys. Off by default. |
 | From Shapekey | The From Body's key the clothing fits. Empty: the body as its keys show it. |
 | To Shapekey | The To Body's key to fit to. Empty: the body as its keys show it. |
+| Options | Smoothing, Bridge Creases, Rigid Parts and Keep Close, folded away. |
 | Smoothing | How widely the body's change is averaged at the skin (about 1 cm). |
 | Bridge Creases | Clothing spans creases a ball this size can't roll into. 0 follows the skin everywhere. |
 | Rigid Parts | Loose parts smaller than this keep their shape. 0 turns it off. |
 | Keep Close | Brings tight clothing back to its old distance from the body afterwards. |
-| Key Name | Name of the new shape key. Empty: the To Shapekey's name, the devkit sizes that change, the To Body's, or "Resized". |
+| Key Name | Name of the new shape key. Empty: the To Shapekey's name, the sizes that change, the To Body's, or "Resized". With several sizes, each key is named after its size, after the Key Name. |
 
-### Devkit Sizes
+### Sizes
 
-**Devkit Sizes** resizes to the Yet Another Devkit's other sizes without switching the devkit, so the Mannequin keeps showing the size the clothing fits. There's no need to copy the Mannequin and set its shape keys by hand. It shows up when the devkit's settings drive the To Body's shape keys (or the From Body's, without a To Body), like the Mannequin's.
+**Sizes** resizes to other sizes of a devkit body without switching the devkit, so the body keeps showing the size the clothing fits. There's no need to copy the body and set its shape keys by hand. It works with any body whose shape keys follow settings, read from the keys' drivers:
 
-1. Set the devkit to the size the clothing fits, as usual, and pick the Mannequin as the **From Body**. Leave the **To Body** empty.
-2. Turn on **Devkit Sizes**. It starts from the sizes the devkit shows now.
-3. Pick the **Chest** (Large, Medium, Small or Masc; with Lavabod, Omoi, Teardrop or Cupcake), the **Legs** (Melon, Skull, Yanilla, Masc, Lavabod or Mini) and the **Body** (Rue, Buff, Lavabod), then click **Resize**.
+- **Yet Another Devkit's Mannequin:** its chest and leg sizes, Rue, Buff, Lavabod, the butt and hip options and the rest of what the devkit's panel sets.
+- **Settings kept as custom properties,** like the RueXB devkit's Driver object (Buff, Heels, CoochieType...): numbers are named after the shape keys they turn on, or after their description where it lists them ("0-Default Type 1-NippleInV3...").
+- **A body whose keys nothing drives,** like the Roh devkit's torso: its keys are the sizes, each on or off.
 
-The new key is named after what changes, like `Medium Rue`. For more sizes, pick the next one and click **Resize** again.
+1. Pick the body as the **From Body**, while the devkit shows the size the clothing fits. Leave the **To Body** empty (or pick another body: its sizes are listed instead).
+2. Turn on **Sizes**. Every setting starts at what the body shows now; **From** below says which.
+3. Click the values to resize to. **Shift-click** to pick several: every combination of the values picked is a size, as **To** below lists them.
+4. Select the clothing and click **Resize**, or **Resize to N Sizes**.
 
-The sizes come out as the devkit would show them: it switches along what goes with them, like the Rue/Buff and Rue/Lava corrections, the hip dips, and each chest size's own shape keys (Squeeze, Push-Up…) as they're set. The devkit's other settings (genitals, butt, nails, hands, feet) stay as it shows them. To check the fit afterwards, set the devkit to those sizes; the report says which.
+Each size becomes a shape key named after what changes, like `Medium Rue` (or `Large` and `Large Rue` when both Rue and no Rue are picked). One size is turned on; with several, the clothing keeps showing its own shape and the keys wait, off.
 
-Devkit Sizes needs the devkit's script running, as the devkit's own panel does. If Blender didn't run it when opening the file, Resize says which setting it can't read.
+The sizes come out as the devkit would show them: it switches along what goes with them, like the Rue/Buff and Rue/Lava corrections, the hip dips, and each chest size's own shape keys (Squeeze, Push-Up...) as they're set. The settings are listed from head to toe; those that barely reshape the body (nails, nipples, genitals on YAB) are under **More**. The refresh button in the section's header lists the body's settings again and starts over from what it shows.
+
+**Body parts are left out.** Meshes whose own shape keys follow the same settings, like the devkit's Torso, Waist, Hands and Feet, or clothing whose keys Yet Another Addon transferred from the body, aren't resized: Resize says which it left out. Skin meshes without such keys, like a top's own skin from a mod, are resized like the clothing.
+
+Sizes needs the devkit's script running, as the devkit's own panel does. If Blender didn't run it when opening the file, Sizes says which setting it can't read.
 
 ### Clothing from another game
 
