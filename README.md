@@ -11,7 +11,7 @@ This page only gives a brief overview. The [guide](docs/guide.md) covers every t
 
 - **Blender 5.2 or newer.**
 - **Weight Transfer needs 64-bit Windows.** It uses SciPy, and the copy that comes with the add-on is built for Blender 5.2 on Windows. Everything else works on any system.
-- **A full body with an armature** for the tools that work against a body. Required for weight transfer, line up and fitting.
+- **A full body with an armature** for the tools that work against a body. Required for weight transfer, line up and fitting. Lining up hair needs the face model's skin (its 0.0 mesh) instead.
 - **FFXIV installed** on the same computer, for Face Weighting. It reads the game's faces from your install the first time you use it and generates a weight model from those.
 
 ## Installation
@@ -65,7 +65,7 @@ The **[Weight Brushes](docs/guide.md#weight-brushes)** fix weights where you pai
 
 ### Line Up
 
-**[Line Up](docs/guide.md#line-up)** takes a model from other games, turns and poses it so its hips, shoulders and limb joints land on the selected body's. With Fit Shape, it then scales, turns and moves each bone a little so the model sits around the body, keeping its details. It reads the common rigs by bone name, and models without a usable armature by their vertex groups.
+**[Line Up](docs/guide.md#line-up)** takes a model from other games, turns and poses it so its hips, shoulders and limb joints land on the selected body's. With Fit Shape, it then scales, turns and moves each bone a little so the model sits around the body, keeping its details. It reads the common rigs by bone name, and models without a usable armature by their vertex groups. In **[Hair](docs/guide.md#lining-up-hair)** mode, it scales and moves hair so it rests on the scalp of the face model's 0.0 mesh, then pushes strands that are inside the head out of it, the hair over them rising along.
 Only tested against Sims 4, VRChat and Unreal Engine models for the time being. If you encounter an issue with a model from another game, please open an issue to let me know about it so I can extend this feature.
 
 ### Texture Relax

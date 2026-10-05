@@ -23,6 +23,7 @@ from .operators import (
     MAGIC_FIT_OT_hair_weights,
     MAGIC_FIT_OT_heel_weights,
     MAGIC_FIT_OT_line_up,
+    MAGIC_FIT_OT_line_up_hair,
     MAGIC_FIT_OT_paint,
     MAGIC_FIT_OT_pick_face,
     MAGIC_FIT_OT_pick_hair_skeleton,
@@ -34,6 +35,7 @@ from .operators import (
     check_face_pose_ready,
     check_face_tools_ready,
     check_fit_ready,
+    check_hair_lineup_ready,
     check_hair_weights_ready,
     check_lineup_ready,
     check_ready,
@@ -42,6 +44,7 @@ from .operators import (
     check_whole_mesh_ready,
     fit_notes,
     found_face,
+    hair_lineup_summary,
     hair_skeleton_text,
     lineup_summary,
     parse_matches,
@@ -697,6 +700,18 @@ class VIEW3D_PT_magic_fit_tabs(bpy.types.Panel):
             needed = general or (settings.weights_tab == 'SKIRT' and settings.skirt_skin_weight > 0.0)
         else:
             shown = needed = tab in {'FIT', 'LINE_UP'}
+        if tab == 'LINE_UP':
+            # Outfits line up with the shared body, hair on a head of its own.
+            lineup_settings = context.scene.body_fit_brush
+            col.separator()
+            _draw_choice(col, lineup_settings, "lineup_mode")
+            if lineup_settings.lineup_mode == 'HAIR':
+                col.separator()
+                row = col.row()
+                row.use_property_split = True
+                row.alert = lineup_settings.lineup_head is None
+                row.prop(lineup_settings, "lineup_head", text="Head")
+                return
         if shown:
             col.separator()
             row = col.row()
@@ -1143,7 +1158,7 @@ class VIEW3D_PT_clipping_sidebar(tabs.TabPanel, bpy.types.Panel):
 # Line Up and Texture Relax tabs (Customize+ has its own module)
 
 class VIEW3D_PT_line_up_sidebar(tabs.TabPanel, bpy.types.Panel):
-    """Scale, turn and pose an imported model so it lines up with the body"""
+    """Scale, turn and pose an imported model so it lines up with the body, or hair so it sits on the head"""
     bl_label = "Line Up"
     bl_order = 1
     tab = 'LINE_UP'
@@ -1152,19 +1167,28 @@ class VIEW3D_PT_line_up_sidebar(tabs.TabPanel, bpy.types.Panel):
         layout = _panel_layout(self.layout)
         settings = context.scene.body_fit_brush
         col = layout.column()
-        col.prop(settings, "lineup_stretch")
-        col.prop(settings, "lineup_fit_shape")
-        problem = check_lineup_ready(context)
+        hair = settings.lineup_mode == 'HAIR'
+        if hair:
+            col.prop(settings, "lineup_push_out")
+            col.prop(settings, "lineup_distance")
+            problem = check_hair_lineup_ready(context)
+            summary = hair_lineup_summary(context) if problem is None else None
+        else:
+            col.prop(settings, "lineup_stretch")
+            col.prop(settings, "lineup_fit_shape")
+            problem = check_lineup_ready(context)
+            summary = lineup_summary(context) if problem is None else None
         if problem is not None:
             col.box().label(text=problem, icon='ERROR')
-        else:
-            summary = lineup_summary(context)
-            if summary:
-                col.label(text=summary, icon='INFO')
+        elif summary:
+            col.label(text=summary, icon='INFO')
         col.separator()
         row = col.row()
         row.scale_y = 1.4
-        row.operator(MAGIC_FIT_OT_line_up.bl_idname, icon='ARMATURE_DATA')
+        if hair:
+            row.operator(MAGIC_FIT_OT_line_up_hair.bl_idname, text="Line Up", icon='OUTLINER_OB_CURVES')
+        else:
+            row.operator(MAGIC_FIT_OT_line_up.bl_idname, icon='ARMATURE_DATA')
 
 
 class VIEW3D_PT_texture_relax_sidebar(tabs.TabPanel, bpy.types.Panel):

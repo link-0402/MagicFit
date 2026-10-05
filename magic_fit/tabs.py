@@ -17,7 +17,7 @@ TABS = (
      "Copy and smooth the body's weights, and make skirt, heel, hair and face weights", 0),
     ('FIT', "Body Fit",
      "Fit meshes around the body, resize them to another body, and see where they clip", 1),
-    ('LINE_UP', "Line Up", "Line imported models up with the body", 2),
+    ('LINE_UP', "Line Up", "Line imported models up with the body, and hair up on the head", 2),
     ('RELAX', "Texture Relax", "Repair textures that got stretched or squashed", 3),
     ('CPLUS', "Customize+", "Show a Customize+ template on the armatures", 4),
 )

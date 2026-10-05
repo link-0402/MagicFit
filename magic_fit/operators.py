@@ -7,15 +7,15 @@ import bmesh
 import bpy
 import gpu
 import numpy as np
-from bpy.props import BoolProperty, EnumProperty, FloatVectorProperty, IntProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty
 from bpy_extras import view3d_utils
 from gpu_extras.batch import batch_for_shader
 from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 from mathutils.geometry import intersect_line_line, intersect_line_plane
 
-from . import (connecting, facedata, facing, fitting, goals, hairing, heeling, lineup, moving, painting, relaxing,
-               resizing, skirting, smoothing, straighten)
+from . import (connecting, facedata, facing, fitting, goals, hairing, hairlineup, heeling, lineup, moving, painting,
+               relaxing, resizing, skirting, smoothing, straighten)
 from .cplus import rig as cplus_rig
 from .properties import COMING_MODES
 
@@ -615,6 +615,67 @@ def lineup_summary(context):
     if armatures:
         return "{:s} of '{:s}'".format(count, armatures[0].name)
     return count
+
+
+def hair_lineup_model(context):
+    """The hair Line Up's Hair mode moves: the selected meshes but the head and the body, and those a selected
+    armature bends, each mesh data once. Returns (meshes, armatures): the armatures bending them, whose rest pose
+    moves along when they bend nothing else."""
+    head = context.scene.body_fit_brush.lineup_head
+    skip = {head, context.scene.magic_fit.target}
+    selected_armatures = [obj for obj in context.selected_objects if obj.type == 'ARMATURE']
+    candidates = [obj for obj in context.selected_objects if obj.type == 'MESH' and obj not in skip]
+    if selected_armatures:
+        candidates += [obj for obj in context.view_layer.objects if obj.type == 'MESH' and obj not in skip and
+                       obj not in candidates and lineup.armature_of(obj) in selected_armatures]
+    meshes = []
+    seen = set()
+    for obj in candidates:
+        if obj.data.as_pointer() not in seen:
+            seen.add(obj.data.as_pointer())
+            meshes.append(obj)
+    armatures = []
+    for obj in meshes:
+        armature = lineup.armature_of(obj)
+        if armature is not None and armature not in armatures:
+            armatures.append(armature)
+    return meshes, armatures
+
+
+def hair_lineup_armatures(context, meshes, armatures):
+    """Those of ``armatures`` that bend nothing but ``meshes`` (and copies of them): their rest pose can move along."""
+    chosen = {obj.data.as_pointer() for obj in meshes}
+    return [armature for armature in armatures if all(
+        obj.data.as_pointer() in chosen for obj in context.view_layer.objects
+        if obj.type == 'MESH' and lineup.armature_of(obj) == armature)]
+
+
+def check_hair_lineup_ready(context):
+    """Return why hair can't be lined up right now, or None when it can."""
+    if context.mode != 'OBJECT':
+        return "Line up in Object Mode"
+    head = context.scene.body_fit_brush.lineup_head
+    if head is None:
+        return "Pick the head: the face model's 0.0 mesh"
+    if head.type != 'MESH':
+        return "The head must be a mesh"
+    if not head.data.polygons:
+        return "Head '{:s}' has no faces".format(head.name)
+    meshes, armatures = hair_lineup_model(context)
+    if not meshes:
+        return "Select the hair to line up"
+    for armature in armatures:
+        if lineup.is_posed(armature):
+            return "'{:s}' is posed: clear its pose first".format(armature.name)
+    return None
+
+
+def hair_lineup_summary(context):
+    """What Line Up would move in Hair mode, in a few words, or None."""
+    meshes, _armatures = hair_lineup_model(context)
+    if not meshes:
+        return None
+    return "{:d} meshes".format(len(meshes)) if len(meshes) > 1 else "'{:s}'".format(meshes[0].name)
 
 
 def check_relax_ready(context):
@@ -3023,6 +3084,118 @@ class MAGIC_FIT_OT_line_up(bpy.types.Operator):
             armature.hide_viewport = hidden[1]
 
 
+class MAGIC_FIT_OT_line_up_hair(bpy.types.Operator):
+    """Scale and move the selected hair so it rests on the head, then push it out where it's inside the head"""
+    bl_idname = "magic_fit.line_up_hair"
+    bl_label = "Line Up Hair"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    push_out: BoolProperty(
+        name="Push Out",
+        description=(
+            "Then push the hair out where it's inside the head, the hair over it rising along, so it clears the "
+            "scalp and its layers keep their distance. Off: only scale and move it"
+        ),
+        default=True,
+        options={'SKIP_SAVE'},
+    )
+    distance: FloatProperty(
+        name="Distance",
+        description="How far the hair's innermost layer stays off the scalp",
+        subtype='DISTANCE',
+        default=0.002,
+        min=0.0,
+        soft_max=0.01,
+        precision=4,
+        options={'SKIP_SAVE'},
+    )
+
+    @classmethod
+    def poll(cls, context):
+        problem = check_hair_lineup_ready(context)
+        if problem is not None:
+            cls.poll_message_set(problem)
+            return False
+        return True
+
+    def execute(self, context):
+        settings = context.scene.body_fit_brush
+        # From the panel the settings decide; from Adjust Last Operation this operator's own.
+        if not self.properties.is_property_set("push_out"):
+            self.push_out = settings.lineup_push_out
+        if not self.properties.is_property_set("distance"):
+            self.distance = settings.lineup_distance
+        settings.lineup_push_out = self.push_out
+        settings.lineup_distance = self.distance
+        head = settings.lineup_head
+        meshes, armatures = hair_lineup_model(context)
+        movable = hair_lineup_armatures(context, meshes, armatures)
+        # Lined up on this head already and not moved since: it stays, and is only pushed out if it wasn't like
+        # this (see `hairlineup.LINED_UP`).
+        before = hairlineup.lined_up(meshes, head)
+        keep = before is not None
+        if keep and (before[0] or not self.push_out) and (not self.push_out or abs(before[1] - self.distance) < 1e-6):
+            self.report({'INFO'}, "Already lined up on '{:s}'".format(head.name))
+            return {'FINISHED'}
+        started = time.perf_counter()
+        try:
+            result = hairlineup.plan(meshes, [] if keep else movable, head, context.evaluated_depsgraph_get(),
+                                     self.distance, push=self.push_out, keep=keep)
+        except hairlineup.HairLineUpError as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
+        hairlineup.write_meshes(result)
+        moved = [armature.name for armature in result.armatures if self._move_rest_pose(context, result, armature)]
+        hairlineup.remember(meshes, head, self.push_out or (keep and before[0]), self.distance)
+
+        what = "{:d} mesh{:s}".format(len(meshes), "es" if len(meshes) != 1 else "")
+        if moved:
+            what += " and '{:s}'".format("', '".join(moved))
+        details = ["already on it, so left in place" if keep else
+                   "{:.0f} % of its size".format(100.0 * result.placement.scale)]
+        push = result.push
+        if push is not None:
+            if push.count:
+                details.append("{:d} vertices pushed out of the head, up to {:.1f} mm".format(
+                    push.count, 1000.0 * push.most))
+            else:
+                details.append("nothing inside the head")
+        self.report({'INFO'}, "Lined up {:s} on '{:s}' in {:.1f} s: {:s}".format(
+            what, head.name, time.perf_counter() - started, ", ".join(details)))
+        return {'FINISHED'}
+
+    def _move_rest_pose(self, context, result, armature):
+        """Move the rest pose of ``armature`` along with the hair, in its Edit Mode. Returns whether it could."""
+        view_layer = context.view_layer
+        active = view_layer.objects.active
+        selected = list(context.selected_objects)
+        hidden = armature.hide_get(), armature.hide_viewport
+        armature.hide_set(False)
+        armature.hide_viewport = False
+        try:
+            if not armature.visible_get() or armature.library is not None or armature.data.library is not None:
+                self.report({'WARNING'}, "Couldn't edit '{:s}' (hidden in a hidden collection, or linked): its "
+                                         "rest pose wasn't moved along".format(armature.name))
+                return False
+            for obj in selected:
+                obj.select_set(False)
+            view_layer.objects.active = armature
+            armature.select_set(True)
+            bpy.ops.object.mode_set(mode='EDIT')
+            try:
+                hairlineup.move_rest_pose(result, armature)
+            finally:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            return True
+        finally:
+            armature.select_set(False)
+            for obj in selected:
+                obj.select_set(True)
+            view_layer.objects.active = active
+            armature.hide_set(hidden[0])
+            armature.hide_viewport = hidden[1]
+
+
 class MAGIC_FIT_OT_use_tool(bpy.types.Operator):
     """Switch the active mesh to this brush's mode and pick the brush"""
     bl_idname = "magic_fit.use_tool"
@@ -3100,6 +3273,7 @@ classes = (
     MAGIC_FIT_OT_read_game_faces,
     MAGIC_FIT_OT_resize,
     MAGIC_FIT_OT_line_up,
+    MAGIC_FIT_OT_line_up_hair,
     MAGIC_FIT_OT_use_tool,
 )
 

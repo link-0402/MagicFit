@@ -7,6 +7,7 @@ Run from the repository root:
 import math
 import os
 import sys
+import time
 import traceback
 
 import bpy
@@ -19,7 +20,7 @@ sys.path.insert(0, os.path.join(ROOT, "tests"))
 
 import lineup as fixture  # noqa: E402
 import magic_fit  # noqa: E402
-from magic_fit import lineup, operators  # noqa: E402
+from magic_fit import hairlineup, lineup, operators  # noqa: E402
 
 FAILURES = []
 
@@ -1093,6 +1094,196 @@ def test_body_without_armature():
           "body: without an armature, its joints come from its weights ({:s})".format(mm(max(errors.values()))))
 
 
+# -----------------------------------------------------------------------------
+# Hair
+
+def hair_scene(narrower=0.0, junk=False, armature=False):
+    """The head and hair from elsewhere, the head picked, the hair selected, in Hair mode."""
+    fixture.clear()
+    head = fixture.build_head()
+    hair, part, rig = fixture.build_hair(narrower, junk, armature)
+    settings = bpy.context.scene.body_fit_brush
+    settings.lineup_mode = 'HAIR'
+    settings.lineup_head = head
+    settings.lineup_push_out = True
+    settings.lineup_distance = 0.002
+    fixture.select([hair])
+    return head, hair, part, rig
+
+
+def head_of(head):
+    points, tris = lineup.body_surface(head, bpy.context.evaluated_depsgraph_get())
+    return hairlineup.Head(points, tris)
+
+
+def layer_gaps(head, points):
+    """Distance of ``points`` from the head's surface (negative inside)."""
+    return head.surface.nearest(points).distance
+
+
+def test_hair_head_middle():
+    head_object, _hair, _part, _rig = hair_scene()
+    head = head_of(head_object)
+    centre, radius = head.centre, head.radius
+    check(0.06 < radius <= fixture.HEAD_AXES[0] + 1e-3 and abs(centre[0]) < 0.003 and
+          abs(centre[1] - fixture.HEAD_CENTRE[1]) < 0.01 and -0.02 < centre[2] - fixture.HEAD_CENTRE[2] < 0.05,
+          "hair: the head's middle is inside its skull under the crown (radius {:s}, {:s} over the centre)".format(
+              mm(radius), mm(centre[2] - fixture.HEAD_CENTRE[2])))
+    at_face = (head.directions[:, 1] < -0.8) & (head.directions[:, 2] < 0.15)
+    check(len(head.directions) == hairlineup.DIRECTIONS and not at_face.any(),
+          "hair: it's matched where hair grows, not the face")
+
+
+def test_hair_place():
+    head_object, hair, part, _rig = hair_scene()
+    head = head_of(head_object)
+    points = lineup.mesh_positions(hair)
+    tris = lineup.mesh_tris(hair)
+    started = time.perf_counter()
+    placement = hairlineup.place(points, tris, head, 0.002)
+    took = time.perf_counter() - started
+    made, _faces, _part = fixture.hair_parts()
+    placed = placement.move(points)
+    off = np.linalg.norm(placed - made, axis=1)
+    inner = np.median(layer_gaps(head, placed[part == 0]))
+    check(abs(placement.scale * fixture.HAIR_SCALE - 1.0) < 0.02,
+          "hair: scaled back to the head's size ({:.1f} % of its size)".format(100.0 * placement.scale))
+    check(np.median(off) < 0.003 and 0.0005 < inner < 0.0035,
+          "hair: put back where it was made ({:s} off), its inner layer resting {:s} off the scalp".format(
+              mm(np.median(off)), mm(inner)))
+    check(took < 5.0, "hair: placed in {:.2f} s".format(took))
+    again = hairlineup.place(placed, tris, head, 0.002)
+    check(abs(again.scale - 1.0) < 0.005 and np.linalg.norm(again.offset - (1.0 - again.scale) * head.centre) < 0.002,
+          "hair: placed again, it stays")
+
+
+def test_hair_push():
+    head_object, hair, part, _rig = hair_scene(narrower=0.012, junk=True)
+    head = head_of(head_object)
+    points = lineup.mesh_positions(hair)
+    placement = hairlineup.place(points, lineup.mesh_tris(hair), head, 0.002)
+    placed = placement.move(points)
+    push = hairlineup.push_out(placed, head, 0.002)
+    pushed = placed + push.moves
+    before = layer_gaps(head, placed[part == 0])
+    after = layer_gaps(head, pushed[part == 0])
+    check((before < -0.001).sum() > 20 and (after < -0.0005).sum() == 0 and after.min() > 0.0015,
+          "push: hair made on a narrower head clipped ({:d} points, up to {:s}), and is out ({:s} off the scalp at "
+          "least)".format(int((before < -0.001).sum()), mm(-before.min()), mm(after.min())))
+    inner, outer = pushed[part == 0], pushed[part == 1]
+    middle = head.centre
+    order = np.linalg.norm(outer - middle, axis=1) - np.linalg.norm(inner - middle, axis=1)
+    kept = (np.linalg.norm(outer - inner, axis=1) - np.linalg.norm(placed[part == 1] - placed[part == 0], axis=1))
+    check(order.min() > 0.0 and np.abs(kept).max() < 0.001,
+          "push: the outer layer rose with the inner one (stays {:s} farther out at least, distance kept within "
+          "{:s})".format(mm(order.min()), mm(np.abs(kept).max())))
+    sheet = np.linalg.norm(push.moves[part == 3], axis=1)
+    check(sheet.max() < 1e-4, "push: a sheet through the skull stays where it is ({:s})".format(mm(sheet.max())))
+    locks = np.linalg.norm(push.moves[part == 2], axis=1)
+    faces = fixture.hair_parts(0.012, True)[1]
+    edges = np.array([(a, b) for face in faces for a, b in zip(face, face[1:] + face[:1])])
+    stretch = (np.linalg.norm(pushed[edges[:, 0]] - pushed[edges[:, 1]], axis=1) /
+               np.linalg.norm(placed[edges[:, 0]] - placed[edges[:, 1]], axis=1))
+    check(stretch.max() < 1.5 and stretch.min() > 0.67,
+          "push: nothing tears or folds (edges {:.2f}x to {:.2f}x; locks moved up to {:s})".format(
+              stretch.min(), stretch.max(), mm(locks.max())))
+    again = hairlineup.push_out(pushed, head, 0.002)
+    check(again.most < 0.0005, "push: pushed again, it barely moves ({:s})".format(mm(again.most)))
+
+
+def test_hair_operator():
+    head_object, hair, part, rig = hair_scene(narrower=0.01, armature=True)
+    hair.shape_key_add(name="Basis")
+    key = hair.shape_key_add(name="Longer")
+    co = np.empty(len(key.data) * 3)
+    key.data.foreach_get("co", co)
+    co = co.reshape(-1, 3)
+    co[:, 2] -= 0.01
+    key.data.foreach_set("co", co.ravel())
+    key.value = 0.0
+    check(operators.check_hair_lineup_ready(bpy.context) is None and
+          operators.hair_lineup_summary(bpy.context) == "'Hair'", "operator: ready, and names the hair")
+    locks = np.flatnonzero(part == 2)
+    ends = locks[[1, -1]]  # the bottom corners of the first and the last lock
+
+    def spans(co):
+        return np.linalg.norm(co[ends[0]] - co[ends[1]]), np.array(rig.data.bones["Hair Bone"].head_local)
+
+    lock_span, bone_head = spans(fixture.world_positions(hair))
+    bone_length = rig.data.bones["Hair Bone"].length
+    result = bpy.ops.magic_fit.line_up_hair()
+    check(result == {'FINISHED'}, "operator: lined up")
+    head = head_of(head_object)
+    shown = fixture.world_positions(hair)
+    gaps = layer_gaps(head, shown[part == 0])
+    check(gaps.min() > 0.0015 and np.median(gaps) < 0.006,
+          "operator: the hair rests on the head, out of it (inner layer {:s} to {:s} off, {:s} typically)".format(
+              mm(gaps.min()), mm(gaps.max()), mm(np.median(gaps))))
+    longer = fixture.world_positions(hair, "Longer")
+    drop = shown[:, 2] - longer[:, 2]
+    check(np.abs(drop - 0.01 / fixture.HAIR_SCALE).max() < 0.0005,
+          "operator: shape keys move alike ({:s} lower, from 10 mm scaled)".format(mm(np.median(drop))))
+    bone = rig.data.bones["Hair Bone"]
+    span, head_now = spans(shown)
+    scale = span / lock_span
+    where = np.array(rig.matrix_world) @ np.append(head_now, 1.0)
+    check(abs(bone.length / bone_length - scale) < 0.005 and np.linalg.norm(where[:3] - fixture.HEAD_CENTRE) < 0.012
+          and rig.mode == 'OBJECT' and hair.select_get(),
+          "operator: the armature bending only the hair moved along (scaled {:.1f} %, like the hair's {:.1f} %; "
+          "{:s} from the head's centre)".format(100.0 * bone.length / bone_length, 100.0 * scale,
+                                                mm(np.linalg.norm(where[:3] - fixture.HEAD_CENTRE))))
+    check(np.abs(fixture.displayed_positions(hair) - shown).max() < 1e-5, "operator: displayed as lined up")
+    result = bpy.ops.magic_fit.line_up_hair()
+    check(result == {'FINISHED'} and np.abs(fixture.world_positions(hair) - shown).max() < 1e-7,
+          "operator: clicked again, the hair stays where it is")
+    bpy.context.scene.body_fit_brush.lineup_distance = 0.004
+    result = bpy.ops.magic_fit.line_up_hair()
+    gaps = layer_gaps(head, fixture.world_positions(hair)[part == 0])
+    check(result == {'FINISHED'} and gaps.min() > 0.0035,
+          "operator: again with a larger Distance, it's only pushed out further ({:s} off at least)".format(
+              mm(gaps.min())))
+
+
+def test_hair_without_push():
+    head_object, hair, part, _rig = hair_scene()
+    result = bpy.ops.magic_fit.line_up_hair(push_out=False, distance=0.003)
+    settings = bpy.context.scene.body_fit_brush
+    head = head_of(head_object)
+    gaps = layer_gaps(head, fixture.world_positions(hair)[part == 0])
+    check(result == {'FINISHED'} and settings.lineup_push_out is False and abs(settings.lineup_distance - 0.003) < 1e-6
+          and abs(np.median(gaps) - 0.003) < 0.0015,
+          "operator: Push Out and Distance from Adjust Last Operation, written back to the panel's settings "
+          "(resting {:s} off)".format(mm(np.median(gaps))))
+    settings.lineup_push_out = True
+    settings.lineup_distance = 0.002
+
+
+def test_hair_readiness():
+    head_object, hair, _part, rig = hair_scene(armature=True)
+    settings = bpy.context.scene.body_fit_brush
+    ready = operators.check_hair_lineup_ready
+    fixture.select([head_object])
+    check(ready(bpy.context) == "Select the hair to line up", "readiness: the head isn't the hair")
+    fixture.select([rig])
+    check(ready(bpy.context) is None and operators.hair_lineup_model(bpy.context)[0] == [hair],
+          "readiness: a selected armature brings the hair it bends")
+    fixture.select([hair])
+    settings.lineup_head = None
+    check(ready(bpy.context) == "Pick the head: the face model's 0.0 mesh", "readiness: asks for the head")
+    settings.lineup_head = head_object
+    rig.pose.bones["Hair Bone"].location = (0.0, 0.01, 0.0)
+    check(ready(bpy.context) == "'Hair Armature' is posed: clear its pose first", "readiness: refuses a posed armature")
+    rig.pose.bones["Hair Bone"].location = (0.0, 0.0, 0.0)
+    bpy.ops.object.mode_set(mode='EDIT')
+    check(ready(bpy.context) == "Line up in Object Mode", "readiness: only in Object Mode")
+    bpy.ops.object.mode_set(mode='OBJECT')
+    other = fixture.mesh_object("Body Part", [(0, 0, 0), (1, 0, 0), (0, 1, 0)], [(0, 1, 2)], [{"Hair Bone": 1.0}] * 3)
+    other.modifiers.new("Armature", 'ARMATURE').object = rig
+    meshes, armatures = operators.hair_lineup_model(bpy.context)
+    check(operators.hair_lineup_armatures(bpy.context, meshes, armatures) == [],
+          "readiness: an armature bending more than the hair stays as it is")
+
+
 def test_registered():
     check(hasattr(bpy.ops.magic_fit, "line_up"), "the Line Up operator is registered")
     properties = bpy.context.scene.body_fit_brush.bl_rna.properties
@@ -1102,6 +1293,10 @@ def test_registered():
           "setting: lineup_fit_shape, on by default")
     panel = getattr(bpy.types, "VIEW3D_PT_line_up_sidebar", None)
     check(panel is not None and panel.tab == 'LINE_UP', "panel: on the Line Up tab")
+    check(hasattr(bpy.ops.magic_fit, "line_up_hair"), "the Line Up Hair operator is registered")
+    check(properties["lineup_mode"].default == 'OUTFIT' and properties["lineup_push_out"].default is True and
+          abs(properties["lineup_distance"].default - 0.002) < 1e-9 and "lineup_head" in properties,
+          "settings: Line Up's mode (Outfit by default), the head, Push Out (on) and Distance (2 mm)")
 
 
 def main():

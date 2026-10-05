@@ -167,6 +167,47 @@ def steps():
         bpy.ops.object.mode_set(mode='OBJECT')
     yield 0.2
 
+    # --- Hair: the mode switches what the tab shows, and the button lines the hair up on the head.
+    for obj in list(bpy.context.view_layer.objects):
+        obj.hide_set(True)
+    head = fixture.build_head()
+    hair, part, _rig = fixture.build_hair(narrower=0.01)
+    settings = bpy.context.scene.body_fit_brush
+    settings.lineup_mode = 'HAIR'
+    fixture.select([hair])
+    with env.override():
+        bpy.ops.view3d.view_all()
+        bpy.ops.ed.undo_push(message="Hair")
+    for area in env.window.screen.areas:
+        area.tag_redraw()
+    yield 0.4
+    with env.override(sidebar):
+        check(not bpy.ops.magic_fit.line_up_hair.poll(), "hair: without a head, the button is greyed out")
+    check(operators.check_hair_lineup_ready(bpy.context) == "Pick the head: the face model's 0.0 mesh",
+          "hair: the panel asks for the head")
+    env.screenshot("lineup_06_hair_no_head.png")
+    settings.lineup_head = head
+    for area in env.window.screen.areas:
+        area.tag_redraw()
+    yield 0.3
+    before = fixture.world_positions(hair)
+    with env.override(sidebar):
+        check(bpy.ops.magic_fit.line_up_hair.poll() and operators.hair_lineup_summary(bpy.context) == "'Hair'",
+              "hair: ready with the head picked and the hair selected")
+        result = bpy.ops.magic_fit.line_up_hair('EXEC_DEFAULT', True)
+    yield 0.5
+    after = fixture.world_positions(hair)
+    made = fixture.hair_parts(0.01)[0]
+    check(result == {'FINISHED'} and np.median(np.linalg.norm(after - made, axis=1)) < 0.01 <
+          np.median(np.linalg.norm(before - made, axis=1)), "hair: the button put the hair on the head")
+    env.screenshot("lineup_07_hair.png")
+    with env.override():
+        bpy.ops.ed.undo()
+    yield 0.4
+    hair = bpy.data.objects["Hair"]
+    check(np.abs(fixture.world_positions(hair) - before).max() < 1e-6, "hair: one undo puts it back")
+    bpy.context.scene.body_fit_brush.lineup_mode = 'OUTFIT'
+
 
 def run():
     magic_fit.register()
