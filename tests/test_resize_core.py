@@ -1210,6 +1210,41 @@ def test_resize_collection():
     check(sum(1 for block in blocks if block.name == "Small") == 1, "api: the key for the size given")
 
 
+def test_resize_collection_as_is():
+    """The size the body shows exports the clothing as it fits the body, also while it shows another size."""
+    body, garments = resize.devkit_body()
+    settings = reset_settings()
+    settings.resize_from_object = body
+    settings.resize_use_sizes = True
+    bpy.ops.magic_fit.resize_pick(setting="chest_size", option=0)
+    bpy.ops.magic_fit.resize_pick(setting="chest_size", option=1, extend=True)
+    suit = garments["Suit"]
+
+    def evaluated():
+        bpy.context.view_layer.update()
+        mesh = suit.evaluated_get(bpy.context.evaluated_depsgraph_get()).data
+        co = np.empty(len(mesh.vertices) * 3)
+        mesh.vertices.foreach_get("co", co)
+        return co.reshape(-1, 3)
+
+    own = evaluated()
+    large, medium = api.resize_collection(list(garments.values()))
+    check(large.size.now and large.keys[suit] is None and medium.keys[suit] is not None,
+          "as is: the size the body shows keeps the clothing as it is")
+    blocks = suit.data.shape_keys.key_blocks
+    # Looking at a size, as the Resize button leaves one size on.
+    blocks[medium.keys[suit]].value = 1.0
+    large, medium = api.resize_collection(list(garments.values()))
+    before = key_states(suit)
+    with large.shown():
+        check(np.allclose(evaluated(), own, atol=1e-6) and blocks[medium.keys[suit]].value == 0.0,
+              "as is: shown as it fits the body, not the size it shows")
+    check(key_states(suit) == before, "as is: the size it shows put back afterwards")
+    with medium.shown():
+        check(np.allclose(evaluated(), resize.positions(suit, medium.keys[suit]), atol=1e-6),
+              "as is: the other size still shows its key")
+
+
 def test_registered():
     check(hasattr(bpy.ops.magic_fit, "resize"), "the Resize operator is registered")
     settings = bpy.context.scene.body_fit_brush
