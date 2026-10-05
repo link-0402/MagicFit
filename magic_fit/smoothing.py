@@ -298,9 +298,9 @@ class SmoothGraph:
 
         Sheets are the mesh's surfaces as `fitting.mesh_sheets` tells them apart: a fold tighter than
         ``fitting.FOLD_RADIUS`` or sharper than 90 degrees (a hem, a cuff, the rim of a lining) ends one, so
-        the layers it joins are sheets of their own, while one smooth surface stays one sheet wherever it
-        comes close to itself. The sheets a node lies on are never across a gap from it, other sheets of its
-        own part only with ``join_folds``.
+        the layers it joins are sheets of their own, while one smooth surface (both sides of a double-sided
+        one) stays one sheet wherever it comes close to itself. The sheets a node lies on are never across a
+        gap from it, other sheets of its own part only with ``join_folds``.
         """
         count = self.count
         sheet, sheets = fitting.mesh_sheets(rest, tris)

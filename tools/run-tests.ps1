@@ -85,13 +85,15 @@ if ($OtherScreen) {
     $Position = @($area.X, ($desktop.Height - $height - ($area.Y + $titleBar)), $area.Width, $height)
 }
 
-$core = 'core','fit_core','move_core','straighten_core','skirt_core','heels_core','smooth_core','connect_core','hair_core',
-        'face_core','relax_core','resize_core','lineup_core','transfer_core','cplus_core'
-$ui = 'ui','fit_ui','move_ui','fit_deformed_ui','straighten_ui','skirt_ui','heels_ui','smooth_ui','hair_ui',
-      'face_ui','relax_ui','resize_ui','lineup_ui','clipping_ui','sidebar_ui','transfer_ui','cplus_ui'
-
-$tests = @($core | ForEach-Object { [pscustomobject]@{ Name = $_; Ui = $false } })
-if (-not $SkipUi) { $tests += $ui | ForEach-Object { [pscustomobject]@{ Name = $_; Ui = $true } } }
+# Every tests/test_*.py: the core tests first, then the UI ones (test_ui.py and test_*_ui.py), which need a window.
+$names = Get-ChildItem (Join-Path $root 'tests') -Filter 'test_*.py' | Sort-Object Name |
+    ForEach-Object { $_.BaseName.Substring(5) }
+$tests = @($names | Where-Object { $_ -ne 'ui' -and $_ -notlike '*_ui' } |
+    ForEach-Object { [pscustomobject]@{ Name = $_; Ui = $false } })
+if (-not $SkipUi) {
+    $tests += $names | Where-Object { $_ -eq 'ui' -or $_ -like '*_ui' } |
+        ForEach-Object { [pscustomobject]@{ Name = $_; Ui = $true } }
+}
 if ($SkipFace) { $tests = $tests | Where-Object { $_.Name -notlike 'face_*' } }
 if ($Only.Count) { $tests = $tests | Where-Object { $Only -contains $_.Name } }
 

@@ -19,32 +19,24 @@ def _poll_mesh(_self, obj):
     return obj.type == 'MESH'
 
 
-FACE_LISTS = ("face_lashes", "face_mouth_parts", "face_others")
-
-
-def _prune_face_lists(_self, context):
-    # A mesh cleared from a list (its picker's X) leaves the list.
-    settings = context.scene.magic_fit
-    for prop in FACE_LISTS:
-        items = getattr(settings, prop)
-        for index in reversed(range(len(items))):
-            if items[index].object is None:
-                items.remove(index)
-
-
 class FacePart(bpy.types.PropertyGroup):
-    """A mesh in one of the Face panel's lists (Lashes, Mouth, Other Parts)."""
-    object: PointerProperty(name="Mesh", type=bpy.types.Object, poll=_poll_mesh, update=_prune_face_lists)
+    """A mesh in one of the Face panel's lists (Lashes, Mouth, Other Parts). Cleared (its picker's X), it stays in the
+    list, empty, until the next mesh is added: removing it while its own update runs would free what Blender is still
+    updating. The panel doesn't show it, and the face tools skip it."""
+    object: PointerProperty(name="Mesh", type=bpy.types.Object, poll=_poll_mesh)
 
 
 def _adder(collection, prop):
-    """An update for picker ``prop`` that adds the mesh picked to list ``collection`` and empties itself again, so the
-    list ends in an empty picker for the next mesh."""
+    """An update for picker ``prop`` that adds the mesh picked to list ``collection`` (dropping the entries cleared
+    since) and empties itself again, so the list ends in an empty picker for the next mesh."""
     def update(self, _context):
         obj = getattr(self, prop)
         if obj is None:
             return
         items = getattr(self, collection)
+        for index in reversed(range(len(items))):
+            if items[index].object is None:
+                items.remove(index)
         if all(item.object != obj for item in items):
             items.add().object = obj
         setattr(self, prop, None)

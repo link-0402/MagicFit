@@ -300,7 +300,12 @@ def test_fill_meshes():
     check([item.object for item in settings.face_lashes] == [other] and settings.face_add_lash is None,
           "lists: a mesh picked is added once, and the picker empties")
     settings.face_lashes[0].object = None
-    check(not settings.face_lashes, "lists: clearing a mesh takes it off the list")
+    picked, roles = facing.picked_meshes(settings)
+    check(not any(item.object for item in settings.face_lashes) and roles[picked.index(other)] == {facing.ROLE_MOUTH},
+          "lists: a mesh cleared from a list is no longer that part (the piercing stays under Mouth)")
+    settings.face_add_lash = objects["eye_l"]
+    check([item.object for item in settings.face_lashes] == [objects["eye_l"]],
+          "lists: the entry cleared is dropped when the next mesh is added")
     check(bpy.ops.magic_fit.face_meshes_clear() == {'FINISHED'} and settings.face_skin is None
           and not settings.face_mouth_parts and not settings.face_others, "clear: empties the Meshes")
 

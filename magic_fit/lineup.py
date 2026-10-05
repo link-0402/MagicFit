@@ -2203,12 +2203,13 @@ def same_rig(first, second):
     return float(np.abs(ends - copies).max()) <= 1e-4 * size
 
 
-def armature_rig(armature, depsgraph=None):
+def armature_rig(armature, depsgraph=None, rig=None):
     """Parts of an armature's bones and joints of its parts. Returns (part of every bone, part of each
     deform bone, part -> joint in world space). The joints are the heads of the parts' main deform bones:
-    as posed with a ``depsgraph``, else at rest."""
+    as posed with a ``depsgraph``, else at rest. ``rig`` is what `rig_parts` gives for it, if worked out
+    already."""
     bones = armature.data.bones
-    parts, deform, main, _guessed = rig_parts(armature)
+    parts, deform, main, _guessed = rig_parts(armature) if rig is None else rig
     matrix = _matrix(armature)
     pose = armature.evaluated_get(depsgraph).pose if depsgraph is not None else None
     joints = {}
@@ -2354,8 +2355,9 @@ def plan(meshes, armature, body, depsgraph, stretch=True, fit=False):
     all_parts, deforming, guessed = {}, None, set()
     bone_joints = {}
     if armature is not None:
-        all_parts, deforming, bone_joints = armature_rig(armature)
-        guessed = rig_parts(armature)[3]
+        rig = rig_parts(armature)
+        all_parts, deforming, bone_joints = armature_rig(armature, rig=rig)
+        guessed = rig[3]
     named_bones = deforming is not None and has_half(deforming)
     if named_bones:
         names = sorted({group.name for obj in meshes for group in obj.vertex_groups if group.name in deforming})

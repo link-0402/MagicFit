@@ -1448,14 +1448,13 @@ def build_stroke(context, obj, settings):
         raise HairError("Armature '{:s}' lacks the hair bones of {:s}: give the hair Hair Weights first".format(
             modifier.object.name, skeleton_label(number)))
     params = stroke_params(settings)
-    rest, = straighten.rest_geometry(context, (obj,), ('INDEXED',))
-    fixed = None
+    parts = []
     if params["layer_range"] > 0.0:
         parts = [part for part in hair_parts(context, (obj,), weighted_armature(obj), race)
                  if part.magic_fit_hair.skeleton == number]
-        if parts:
-            fixed = fixed_parts(straighten.rest_geometry(context, parts, ('INDEXED',) * len(parts)), parts,
-                                [bone.name for bone in rig.bones])
+    # Read together: each read puts posed armatures in their rest position and back, evaluating the scene twice.
+    rest, *part_rests = straighten.rest_geometry(context, [obj] + parts, ('INDEXED',) * (1 + len(parts)))
+    fixed = fixed_parts(part_rests, parts, [bone.name for bone in rig.bones]) if parts else None
     weight_kwargs = weight_params(settings)
     key = (obj.data.as_pointer(), race, number, tuple(rig.offset.tolist()), tuple(sorted(weight_kwargs.items())))
     arrays = [rest.co, rest.tris] + (list(fixed) if fixed is not None else [])

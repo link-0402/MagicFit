@@ -111,6 +111,10 @@ FOLD_RADIUS = 0.0025
 # ...while triangles flatter than this (a cosine, about 6 degrees) never do: even a quarter of a millimetre
 # wide, they'd pass.
 FLAT_COSINE = 0.995
+# Triangles on one side of an edge that more than two share lie on one surface there when their directions
+# from the edge agree to within this (a cosine, about 15 degrees): a double-sided mesh whose back is split
+# along other diagonals than its front (see `_copy_joins`).
+FLAP_COSINE = 0.966
 # A sheet faces away from the body on the side its normals face the body's normals under it when they
 # agree on this share of the vote more than they disagree (cosine-weighted, 0..1)...
 SHEET_CLEAR = 0.3
@@ -271,31 +275,138 @@ def _connected(count, edges):
     return labels, (int(labels.max()) + 1 if len(labels) else 0)
 
 
-def sheet_joins(unit, middle, points, corners):
+def sheet_joins(unit, middle, points, corners, sides=False):
     """Where a mesh's triangles meet and how they turn there, for telling its sheets apart (see `in_sheet`).
 
     ``corners`` (t, 3) are the triangles' corners among the welded vertices ``points``, ``unit`` their unit
     normals and ``middle`` their middles. Returns the pairs of triangles that share an edge (one, other;
-    an edge of more than two triangles joins nothing), the cosine of the turn between their normals, its
-    angle, and how wide the two are across the edge (how far their middles are from it, together).
+    an edge of more than two triangles joins nothing, unless they are a double-sided mesh's front and back,
+    see `_copy_joins`), the cosine of the turn between their normals, its angle, and how wide the two are
+    across the edge (how far their middles are from it, together). With ``sides``, also the pairs of
+    triangles there that are its front and its back without being copies of each other (one, other).
     """
     count = len(points)
     first = corners.T.reshape(-1)
     second = corners[:, [1, 2, 0]].T.reshape(-1)
     low, high = np.minimum(first, second), np.maximum(first, second)
-    face = np.flatnonzero(low != high)
-    keys = low[face] * count + high[face]
+    half = np.flatnonzero(low != high)
+    keys = low[half] * count + high[half]
     order = np.argsort(keys)
-    keys, face = keys[order], face[order] % len(corners)
+    keys, half = keys[order], half[order]
+    face = half % len(corners)
     same = np.concatenate(([False], keys[1:] == keys[:-1], [False]))
     pair = np.flatnonzero(same[1:-1] & ~same[:-2] & ~same[2:])
-    one, other = face[pair], face[pair + 1]
+    one, other, edge = face[pair], face[pair + 1], keys[pair]
+    copies = _copy_joins(corners, keys, face, first[half] < second[half], same, points, middle)
+    if copies is not None:
+        one, other, edge = (np.concatenate(both) for both in zip((one, other, edge), copies))
     cosine = np.einsum("ij,ij->i", unit[one], unit[other])
-    end = points[keys[pair] // count]
-    along = points[keys[pair] % count] - end
+    end = points[edge // count]
+    along = points[edge % count] - end
     along /= np.maximum(np.linalg.norm(along, axis=1, keepdims=True), 1e-30)
     width = sum(np.linalg.norm(np.cross(middle[f] - end, along), axis=1) for f in (one, other))
-    return one, other, cosine, np.arccos(np.clip(cosine, -1.0, 1.0)), width
+    joins = one, other, cosine, np.arccos(np.clip(cosine, -1.0, 1.0)), width
+    if not sides:
+        return joins
+    none = np.zeros(0, dtype=np.int64)
+    return joins + (copies[3:] if copies is not None else (none, none))
+
+
+def _copy_joins(corners, keys, face, forward, same, points, middle):
+    """The pairs of triangles of `sheet_joins` across edges of more than two triangles that lie in two flaps,
+    one on each side of the edge: a double-sided mesh, whose back is its front the other way round on the
+    same vertices, so each edge inside it has four. A flap is copies of one triangle (on the same corners,
+    in any order), or where the back is split along other diagonals than the front, its triangles on one
+    side of the edge (see `_flaps`). A triangle of one flap joins those of the other that go along the edge
+    the other way (the way round triangles of one surface do), so the front is a sheet and the back
+    another, as if they lay apart. ``keys`` are the triangles' edges, sorted, ``face`` their triangles,
+    ``forward`` which way round each goes and ``same`` where one is the edge before it (see `sheet_joins`).
+    Returns (one, other, edge, and the pairs of triangles of a flap going along the edge opposite ways that
+    aren't copies: the front and the back), or None if there are none."""
+    start = np.flatnonzero(~same[:-1])
+    size = np.diff(np.append(start, len(keys)))
+    group = np.repeat(np.arange(len(start)), size)
+    crowded = np.flatnonzero(size[group] > 2)
+    if not len(crowded):
+        return None
+    copy = _copies(corners[face[crowded]])
+    group = group[crowded]
+    both = np.unique(group * len(crowded) + copy) // len(crowded)
+    kinds = np.bincount(both, minlength=len(start))[group]
+    two, flap = kinds == 2, copy
+    loose = np.flatnonzero(kinds > 2)
+    if len(loose):
+        part, two[loose] = _flaps(points, middle[face[crowded[loose]]], keys[crowded[loose]], group[loose],
+                                  copy[loose], forward[crowded[loose]])
+        flap = copy.copy()
+        flap[loose] = len(crowded) + part
+    crowded, group, copy, flap = crowded[two], group[two], copy[two], flap[two]
+    ones, others, fronts, backs = [], [], [], []
+    for step in range(1, len(crowded)):
+        a = np.arange(len(crowded) - step)
+        b = a + step
+        near = group[a] == group[b]
+        if not near.any():
+            break
+        turned = near & (forward[crowded[a]] != forward[crowded[b]])
+        joined = turned & (flap[a] != flap[b])
+        ones.append(crowded[a[joined]])
+        others.append(crowded[b[joined]])
+        back_to_back = turned & (flap[a] == flap[b]) & (copy[a] != copy[b])
+        fronts.append(crowded[a[back_to_back]])
+        backs.append(crowded[b[back_to_back]])
+    if not ones:
+        return None
+    ones, others, fronts, backs = (np.concatenate(halves) for halves in (ones, others, fronts, backs))
+    return face[ones], face[others], keys[ones], face[fronts], face[backs]
+
+
+def _flaps(points, middle, keys, group, copy, forward):
+    """The flaps of `_copy_joins` on edges of more than two triangles that aren't copies of two: triangles
+    of an edge whose directions from it (toward their ``middle``) agree within ``FLAP_COSINE``, together.
+    ``keys`` are their edges, sorted, ``group`` which edge, ``copy`` the first of their copies and
+    ``forward`` which way round each goes. Returns each one's flap and whether its edge has two, each of
+    them going each way along the edge copies of one triangle only: one surface's front and back, split
+    along any diagonals. Two sheets crossing or parts touching there have more flaps (a triangle each),
+    and two layers facing the same way a flap of different triangles going one way."""
+    count = len(points)
+    end = points[keys // count]
+    along = points[keys % count] - end
+    along /= np.maximum(np.linalg.norm(along, axis=1, keepdims=True), 1e-30)
+    out = middle - end
+    out -= np.einsum("ij,ij->i", out, along)[:, None] * along
+    out /= np.maximum(np.linalg.norm(out, axis=1, keepdims=True), 1e-30)
+    close = [np.zeros((0, 2), dtype=np.int64)]
+    for step in range(1, len(keys)):
+        a = np.arange(len(keys) - step)
+        b = a + step
+        near = group[a] == group[b]
+        if not near.any():
+            break
+        agree = near & (np.einsum("ij,ij->i", out[a], out[b]) > FLAP_COSINE)
+        close.append(np.stack((a[agree], b[agree]), axis=1))
+    part, parts = _connected(len(keys), np.concatenate(close))
+    edges = int(group.max()) + 1
+    flaps = np.bincount(group[np.unique(part, return_index=True)[1]], minlength=edges)
+    way = part * 2 + forward
+    span = int(copy.max()) + 1
+    kinds = np.bincount(np.unique(way * span + copy) // span, minlength=2 * parts)
+    mixed = np.zeros(edges, dtype=bool)
+    mixed[group[kinds[way] > 1]] = True
+    return part, (flaps == 2)[group] & ~mixed[group]
+
+
+def _copies(tris):
+    """The first of the copies of each of ``tris`` (the same corners, in any order), itself where it has
+    none."""
+    rows = np.sort(tris, axis=1)
+    order = np.lexsort(rows.T[::-1])
+    rows = rows[order]
+    new = np.ones(len(rows), dtype=bool)
+    new[1:] = (rows[1:] != rows[:-1]).any(axis=1)
+    first = np.empty(len(rows), dtype=np.int64)
+    first[order] = order[new][np.cumsum(new) - 1]
+    return first
 
 
 def in_sheet(joins, radius):
@@ -309,13 +420,22 @@ def in_sheet(joins, radius):
 def mesh_sheets(points, tris):
     """The sheet of each of the triangles ``tris`` of the welded vertices ``points``, and how many there are:
     triangles joined where the mesh turns less than 90 degrees and bends no more sharply than ``FOLD_RADIUS``
-    (see `FitStroke._sheets`). A hem folded back, a lining or a copy for the back side is a sheet of its own."""
+    (see `FitStroke._sheets`). A hem folded back, a lining or a copy for the back side is a sheet of its own,
+    but a double-sided mesh's back on the same vertices (copies of its triangles, or split along other
+    diagonals) is in its front's sheets: one surface, which faces both ways."""
     a, b, c = (points[tris[:, k]] for k in range(3))
     normals = np.cross(b - a, c - a)
     unit = normals / np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-30)
-    joins = sheet_joins(unit, (a + b + c) / 3.0, points, tris)
-    keep = in_sheet(joins, FOLD_RADIUS)
-    return _connected(len(tris), np.stack((joins[0][keep], joins[1][keep]), axis=1))
+    joins = sheet_joins(unit, (a + b + c) / 3.0, points, tris, sides=True)
+    keep = in_sheet(joins[:5], FOLD_RADIUS)
+    sheet, sheets = _connected(len(tris), np.stack((joins[0][keep], joins[1][keep]), axis=1))
+    first = _copies(tris)
+    front, back = joins[5:]
+    if np.array_equal(first, np.arange(len(tris))) and not len(front):
+        return sheet, sheets
+    merged, sheets = _connected(sheets, np.concatenate((np.stack((sheet, sheet[first]), axis=1),
+                                                        np.stack((sheet[front], sheet[back]), axis=1))))
+    return merged[sheet], sheets
 
 
 def _both_ways(edges):
@@ -1607,9 +1727,10 @@ class FitStroke:
 
         Triangles next to each other form sheets, which face one way: away from the body under most of
         them. A sheet ends where the mesh turns more than ``SHEET_COSINE`` or bends more sharply than
-        ``FOLD_RADIUS``, and at edges more than two triangles share (parts touching along them), so a hem
-        folded back inside, the inside of a solid strap or a copy for the back side is a sheet of its
-        own, facing the body too, though its triangles are the other way round; so are parts joined
+        ``FOLD_RADIUS``, and at edges more than two triangles share (parts touching along them, but not
+        a double-sided mesh's front and back, see `sheet_joins`), so a hem folded back inside, the inside
+        of a solid strap or a copy for the back side (on vertices of its own or the front's) is a sheet of
+        its own, facing the body too, though its triangles are the other way round; so are parts joined
         with their triangles the other way round (mirrored legs). The shape the mesh had where the
         stroke found it decides, so a crease the stroke gets to later still pulls both ways alike.
         """
