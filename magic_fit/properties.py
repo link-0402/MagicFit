@@ -1019,7 +1019,42 @@ class BodyFitBrushSettings(bpy.types.PropertyGroup):
         description="Name of the shape key added to each mesh. Empty: named after the To shape",
     )
 
-    # Line Up lines the selected model up with the shared body.
+    # Line Up lines the selected model up with the shared body, or hair up on a head of its own.
+    lineup_mode: EnumProperty(
+        name="Line Up",
+        description="What to line up",
+        items=(
+            ('OUTFIT', "Outfit", "Line a model or outfit up with the body, such as the devkit's Mannequin"),
+            ('HAIR', "Hair", "Line hair up on a head: the skin of the face model, its 0.0 mesh"),
+        ),
+        default='OUTFIT',
+    )
+    lineup_head: PointerProperty(
+        name="Head",
+        description=(
+            "The head hair is lined up on: the skin of the face model, its 0.0 mesh (like "
+            "'c0201f0001_fac Part 0.0')"
+        ),
+        type=bpy.types.Object,
+        poll=_poll_mesh,
+    )
+    lineup_push_out: BoolProperty(
+        name="Push Out",
+        description=(
+            "Then push the hair out where it's inside the head, the hair over it rising along, so it clears the "
+            "scalp and its layers keep their distance. Off: only scale and move it"
+        ),
+        default=True,
+    )
+    lineup_distance: FloatProperty(
+        name="Distance",
+        description="How far the hair's innermost layer stays off the scalp",
+        subtype='DISTANCE',
+        default=0.002,
+        min=0.0,
+        soft_max=0.01,
+        precision=4,
+    )
     lineup_stretch: BoolProperty(
         name="Stretch Limbs",
         description=(

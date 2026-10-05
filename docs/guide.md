@@ -10,13 +10,13 @@ In the 3D Viewport, press **N** and open the **Magic Fit** tab. It's there in ev
 | --- | --- |
 | **Weights** | [Weight Transfer](#weight-transfer), [Connect Parts](#connect-parts) and the [Weight Brushes](#weight-brushes), sorted into sub-tabs: **General** (Copy, Straighten, Smooth), **Skirt**, **Heels**, **Hair** and **Face**. Each sub-tab has a button for whole meshes first, then its brush. |
 | **Body Fit** | The [Body Fit](#body-fit) brush, the [Fit Move](#fit-move) tool, [Resize](#resize) and the [Clipping](#clipping-marks) marks. |
-| **Line Up** | [Line Up](#line-up), for models from other games. |
+| **Line Up** | [Line Up](#line-up), for models from other games, and for [hair](#lining-up-hair) on a head. |
 | **Texture Relax** | The [Texture Relax](#texture-relax) brush. |
 | **Customize+** | Shows a [Customize+](#customize) template and the game's [Bust Size](#bust-size) on your armatures. |
 
 ![The Magic Fit tab of the sidebar: Weights, Body Fit and Customize+](images/sidebar.png)
 
-- **The Body** sits right below the tabs. It's one setting shared by every tool that works against a body. Resize has its own From and To bodies.
+- **The Body** sits right below the tabs. It's one setting shared by every tool that works against a body. Resize has its own From and To bodies. On the Line Up tab, **Outfit** and **Hair** come first: with Hair, the **Head** takes the Body's place.
 - **Each brush panel has a button** that switches the mesh to the right mode and picks the brush: **Paint Weights**, **Paint Skirt Weights**, **Paint Heel Weights**, **Paint Hair Weights**, **Paint Face Weights**, **Fit to Body**, **Fit Move** or **Relax Texture**.
 - **The Weights sub-tabs are the brush's modes.** Picking a sub-tab sets the mode, and changing the mode in the tool header switches the sub-tab.
 - **The tabs take two rows** in a narrow sidebar. Drag the sidebar wider and they fit in one. Folding the first panel hides the tabs.
@@ -657,9 +657,11 @@ The panel lists each checked mesh with how many vertices clip. Big changes can t
 
 A model from another game, VRChat or The Sims stands in its own pose and size. **Line Up** scales, turns and poses it so its hips, shoulders and every limb joint land on the body's. With **Fit Shape**, it then reshapes the model bone by bone, so it sits around the body without losing its details. Refitting it with [Resize](#resize), [Body Fit](#body-fit) and [Weight Transfer](#weight-transfer) starts from the right place. When the model comes with the body it was made on, line that up too, and [Resize from it](#clothing-from-another-game) to fit the clothing around the body.
 
-1. On the **Line Up** tab, pick the **Body**, such as the devkit Mannequin.
+1. On the **Line Up** tab, keep **Outfit** picked, and pick the **Body**, such as the devkit Mannequin.
 2. Select the model in Object Mode. One of its meshes or its armature is enough: everything on that armature comes along.
 3. Click **Line Up**.
+
+For hair, see [Lining up hair](#lining-up-hair) below.
 
 The meshes, their shape keys and the armature all change together, and one Ctrl Z undoes it all. You can switch **Stretch Limbs** and **Fit Shape** afterwards in **Adjust Last Operation** (F9).
 
@@ -706,6 +708,44 @@ Good to know:
 | --- | --- |
 | Stretch Limbs | Stretches the clavicles and each limb segment so the joints land on the body's. Off: keeps the model's limb lengths. |
 | Fit Shape | Then scales, turns and moves each bone of the model a little, so its surface lies on the body's where the two are close. Off: keeps the model's own shape. |
+
+### Lining up hair
+
+Hair from The Sims, VRChat, another game or another FFXIV race was made on its own head. With **Hair** picked at the top of the Line Up tab, **Line Up** scales and moves the hair so it rests on the head you pick, then pushes it out wherever it's inside that head. It needs neither the hair's own head nor its weights.
+
+1. On the **Line Up** tab, click **Hair**, and pick the **Head**: the skin of the face model, its **0.0** mesh (like `c0201f0001_fac Part 0.0`). Pick the face of the race the hair is for.
+2. Select the hair's meshes in Object Mode. Select all of them, scalp caps and inner layers included: they're placed as one. Selecting an armature brings the meshes it bends.
+3. Click **Line Up**.
+
+The meshes and their shape keys change together, and one Ctrl Z undoes it all. You can switch **Push Out** and change **Distance** afterwards in **Adjust Last Operation** (F9).
+
+How it lines up:
+
+- **It rests on the scalp.** It looks for where the hair's own head was and how big: the place inside the hair from which, all around the head where hair grows (not the face, not the neck), a layer of the hair lies just Distance off the scalp, and none sinks into it. Then it scales the hair about that place and moves it onto the head. Hair with a scalp cap or a close inner layer, as Sims and VRChat hair have, sits about as you'd place it by hand: on a Sims hair ported to Au Ra by hand, it picked the same scale to 0.03 %.
+- **It isn't turned.** The hair has to stand upright and face the front like the head, as imports from the game, The Sims and VRChat do.
+- **Layers stay layers.** Strands lying over each other, a cap under the hair, flyaway strands, the opening for the face and sheets the game's hair cuts through the skull don't throw it.
+
+How Push Out pushes it out:
+
+- **Where the head is fuller** than the one the hair was made on, the hair would be inside it. Push Out lifts it until it clears the scalp by Distance.
+- **Everything over a spot rises alike,** so layers lying on each other keep their distance and order, and a strand that clips in one spot lifts with those around it. The lift eases out over about a centimetre around, and over 4 cm out past 6 cm from the scalp, so long hair hanging down doesn't bend.
+- **Deep inside stays.** Hair more than about a centimetre deep rises less the deeper it is, and from a quarter of the head's radius (under 2 cm) it stays where it is: it's tucked in on purpose, like the sheets the game's hair cuts through the skull.
+- The report says how many vertices it pushed out, and how far at most.
+
+Good to know:
+
+- **Hair made for FFXIV floats** 4 to 11 mm off the scalp, so on another race's head it's lined up about 10 % smaller, resting closer to the scalp. Raise Distance to keep it looser.
+- **Only the head counts.** Long hair can still clip into the shoulders or back: push it out there with [Body Fit](#body-fit).
+- **Hair already lined up** stays where it is when you click Line Up again, unless you moved it since. With Push Out turned on, or a larger Distance, it's only pushed out (further).
+- **An armature bending only the hair** moves along, so its bones keep their place in it. One that bends other meshes too (a VRChat avatar's) is left as it is.
+- **For FFXIV,** give the hair its weights afterwards with [Hair Weights](#hair).
+
+| Option | What it does |
+| --- | --- |
+| Outfit / Hair | What to line up: a model or outfit with the Body, or hair on the Head. |
+| Head | The head hair is lined up on: the face model's 0.0 mesh. |
+| Push Out | Then pushes the hair out where it's inside the head, the hair over it rising along. Off: only scales and moves it. |
+| Distance | How far the hair's innermost layer stays off the scalp (2 mm). |
 
 ## Texture Relax
 

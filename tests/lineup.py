@@ -628,3 +628,112 @@ def finger_bones(joints, sides=("l", "r"), wrist="Wrist_{S}", curl=0.0):
                 result.append((name, parent, points[k - 1], points[k]))
                 parent = name
     return result
+
+
+# -----------------------------------------------------------------------------
+# Hair (Line Up's Hair mode)
+
+# The head: an ellipsoid about as wide, deep and tall as the game's, open at the neck.
+HEAD_CENTRE = np.array((0.0, -0.01, 1.56))
+HEAD_AXES = np.array((0.075, 0.095, 0.11))
+# The hair's two layers lie this far off the head it was made on.
+HAIR_LAYERS = (0.002, 0.009)
+# Where the hair comes from: this much bigger, moved this far.
+HAIR_SCALE = 1.25
+HAIR_OFFSET = np.array((0.02, -0.03, 0.2))
+
+
+def ellipsoid(axes, centre=HEAD_CENTRE, rings=28, segments=56, lowest=math.pi, keep=None):
+    """Vertices and faces of an ellipsoid of ``axes`` around ``centre``: rings from the top (a pole, then quads)
+    down to the polar angle ``lowest``, leaving it open below. ``keep(point)`` can leave quads out. Returns
+    (vertices, faces, (ring, segment) of each vertex)."""
+    vertices = [tuple(centre + (0.0, 0.0, axes[2]))]
+    grid = [(0, 0)]
+    count = max(2, int(round(rings * lowest / math.pi)))
+    for i in range(1, count + 1):
+        theta = lowest * i / count
+        for j in range(segments):
+            phi = 2.0 * math.pi * j / segments
+            unit = np.array((math.sin(theta) * math.cos(phi), math.sin(theta) * math.sin(phi), math.cos(theta)))
+            vertices.append(tuple(centre + axes * unit))
+            grid.append((i, j))
+
+    def index(i, j):
+        return 1 + (i - 1) * segments + j % segments
+
+    faces = []
+    for j in range(segments):
+        faces.append((0, index(1, j), index(1, j + 1)))
+    for i in range(1, count):
+        for j in range(segments):
+            quad = (index(i, j), index(i + 1, j), index(i + 1, j + 1), index(i, j + 1))
+            middle = np.mean([vertices[k] for k in quad], axis=0)
+            if keep is None or keep(middle):
+                faces.append(quad)
+    return np.array(vertices), faces, grid
+
+
+def build_head():
+    """The head, as the face model's 0.0 mesh would be: a skull open at the neck."""
+    vertices, faces, _grid = ellipsoid(HEAD_AXES, lowest=0.8 * math.pi)
+    return mesh_object("c0201f0001_fac Part 0.0", vertices, faces, [])
+
+
+def hair_parts(narrower=0.0, junk=False):
+    """Hair made on the head (``narrower``: on one that much narrower), as it would sit on it: two layers over
+    the skull but the face, three locks hanging at the back and, with ``junk``, a sheet through the skull (as the
+    game's hair has). Returns (vertices, faces, which part each vertex is: 0 inner layer, 1 outer, 2 locks, 3
+    sheet), with the layers' vertices in the same order."""
+    axes = HEAD_AXES - (narrower, 0.0, 0.0)
+    centre = HEAD_CENTRE
+
+    def not_face(point):
+        # Down to the nape at the back, to the ears at the sides, to the brow in front.
+        front = point[1] < centre[1] - 0.03 and point[2] < centre[2] + 0.015
+        sides = point[1] < centre[1] + 0.03 and point[2] < centre[2] - 0.03
+        return not (front or sides)
+
+    vertices, faces, part = [], [], []
+    for k, gap in enumerate(HAIR_LAYERS):
+        v, f, _grid = ellipsoid(axes + gap, lowest=0.75 * math.pi, keep=not_face)
+        first = len(vertices)
+        vertices.extend(v.tolist())
+        faces.extend(tuple(i + first for i in face) for face in f)
+        part.extend([k] * len(v))
+    for x in (-0.04, 0.0, 0.04):
+        first = len(vertices)
+        for row in range(12):
+            z = centre[2] - 0.02 - 0.02 * row
+            for dx in (-0.01, 0.01):
+                vertices.append((x + dx, centre[1] + axes[1] + 0.012, z))
+        faces.extend((first + 2 * r, first + 2 * r + 1, first + 2 * r + 3, first + 2 * r + 2) for r in range(11))
+        part.extend([2] * 24)
+    if junk:
+        first = len(vertices)
+        for row in range(5):
+            for column in range(5):
+                vertices.append((-0.03 + 0.015 * column, centre[1], centre[2] - 0.03 + 0.015 * row))
+        faces.extend((first + 5 * r + c, first + 5 * r + c + 1, first + 5 * (r + 1) + c + 1, first + 5 * (r + 1) + c)
+                     for r in range(4) for c in range(4))
+        part.extend([3] * 25)
+    return np.array(vertices), faces, np.array(part)
+
+
+def from_elsewhere(points):
+    """Hair as it comes from elsewhere: HAIR_SCALE bigger about the head's centre, moved by HAIR_OFFSET."""
+    return (points - HEAD_CENTRE) * HAIR_SCALE + HEAD_CENTRE + HAIR_OFFSET
+
+
+def build_hair(narrower=0.0, junk=False, armature=False):
+    """The hair as imported from elsewhere, as one mesh "Hair" (with "Hair Bone" bending it all with
+    ``armature``). Returns (mesh, part of each vertex, armature or None)."""
+    vertices, faces, part = hair_parts(narrower, junk)
+    rig = None
+    if armature:
+        head = from_elsewhere(HEAD_CENTRE[None])[0]
+        rig = armature_object("Hair Armature", {}, {}, [("Hair Bone", None, head, head + (0.0, 0.0, 0.1))])
+    obj = mesh_object("Hair", from_elsewhere(vertices), faces, [{"Hair Bone": 1.0}] * len(vertices) if armature else [])
+    if rig is not None:
+        modifier = obj.modifiers.new("Armature", 'ARMATURE')
+        modifier.object = rig
+    return obj, part, rig
