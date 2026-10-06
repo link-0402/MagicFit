@@ -292,13 +292,6 @@ def _draw_face_problem(layout, problem):
     box.operator("preferences.addon_show", text="Set the Game Folder", icon='PREFERENCES').module = __package__
 
 
-def _draw_face_experimental(layout):
-    """The Face tools are still experimental: say so at the top of the Face sub-tab."""
-    box = layout.box().column(align=True)
-    box.label(text="Experimental", icon='EXPERIMENTAL')
-    box.label(text="Check the results in the game", icon='BLANK1')
-
-
 def _draw_face_list(layout, settings, prop, add, label):
     """A list of the Face panel's Meshes: a picker per mesh (clearing one takes it off the list), and an empty picker
     below for the next."""
@@ -961,7 +954,6 @@ class VIEW3D_PT_face_weights_sidebar(tabs.TabPanel, bpy.types.Panel):
         layout = _panel_layout(self.layout)
         settings = context.scene.magic_fit
         col = layout.column()
-        _draw_face_experimental(col)
         _draw_game_face(col, settings)
         _draw_face_meshes(col, settings)
         col.prop(settings, "face_close_eyes")

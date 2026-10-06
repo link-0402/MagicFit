@@ -51,7 +51,6 @@ The **[Weight Brushes](docs/guide.md#weight-brushes)** fix weights where you pai
 - **Heels** makes high heels and boots rigid below the ankle, so heels and soles don't bend.
 - **Hair** weights new hair to FFXIV's hair bones. It picks the hair skeleton that fits best and tells you which EST entry to set in Penumbra. When exporting the hair with Instant Edit, this EST setting is automatically written into the mod for you.
 - **Face** gives custom faces the weights of the game's face they replace: lids that meet when the game shuts the eyes, a mouth that moves like the game's, and lashes, teeth, tongue and piercings that follow along. Repairs fix just the lids, lashes, mouth, parts or neck, and test poses play the game's blink and expressions.
-**Note**: Face Weight mode is experimental and still being worked on for now and may not produce optimal results for sculpts that differ too greatly from the game's faces.  
 
 ### Body Fit
 
