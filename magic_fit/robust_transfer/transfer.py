@@ -8,12 +8,34 @@
 # only matching (no Max Distance, normal angles, Inpaint Mode or smoothing
 # settings), and fingers and toes are handled on their own (digit_columns).
 import numpy as np
+from mathutils.bvhtree import BVHTree
+from scipy import sparse
+from scipy.sparse import csgraph
+from scipy.sparse.linalg import splu
+from scipy.spatial import cKDTree
 
 from . import util, seams, weighttransfer
 
 WRITE_THRESHOLD = 1e-5
 # Rigid weights below this round to nothing in FFXIV's 8-bit vertex weights (half a step), so they're dropped.
 RIGID_THRESHOLD = 0.5 / 255.0
+# Loose parts of a Rigid mesh whose triangles cross or come this close are one piece, like the split segments of a
+# ring or a buckle's frame and prong. Pieces apart from each other, like the rings on two straps, move on their own.
+RIGID_GAP = 0.0003
+# The other meshes of a transfer hold onto the Rigid ones: their vertices within HOLD_DISTANCE of a rigid piece
+# take its weights, and that change fades out along the mesh over HOLD_BLEND times the piece's size (its bounding
+# box's diagonal), so a strap looped around a ring stays on it instead of following the body under it.
+HOLD_DISTANCE = 0.002
+HOLD_BLEND = 3.0
+# A piece they hold moves as they do around it: the average of their weights within HOLD_AVERAGE times its size,
+# fading out with distance (and fully where they touch it), so a ring follows the bra it's on.
+HOLD_AVERAGE = 2.0
+# Layers lying on each other (a trim on its panel) are linked this many times as strongly as a typical edge
+# along the mesh in that blend, so they get the same weights and stay together.
+HOLD_LAYER_LINK = 100.0
+# Points closer than HOLD_DISTANCE lie on each other when at least this share of the way between them runs along
+# either one's normal.
+LAYER_COSINE = 0.7
 WEIGHT_TOLERANCE = 1e-7
 # How far from the body a match counts, and Partial Reweight reaches. Farther, a vertex only anchors its
 # loose part. 2.5 or 10 cm gave the same weights on every garment tried.
@@ -577,15 +599,47 @@ def rigid_weights(values, areas, movable, limit=None):
     return average / total if total > WEIGHT_TOLERANCE else None
 
 
-def make_target_rigid(target, settings, transferred_deform_names):
-    """Give every vertex the transfer writes the same deform weights, so the mesh moves as one piece:
-    the average of what the transfer staged for them (after masks, seam sync and normalizing), weighted by
-    their share of the surface in the rest shape. They add up to 1, or to what locked groups leave; locked
-    groups keep their weights. Returns False when there's nothing to average."""
+def rigid_pieces(vertices, triangles, gap=RIGID_GAP):
+    """A piece number per vertex: the loose parts of the mesh (``vertices``, ``triangles``), joined where their
+    triangles cross or a vertex of one comes within ``gap`` of the other, so they move together."""
+    vertices = np.asarray(vertices, dtype=np.float64)
+    triangles = np.asarray(triangles, dtype=np.int64).reshape(-1, 3)
+    count = len(vertices)
+    if not count:
+        return np.zeros(0, dtype=np.int64)
+    links = [triangles[:, [0, 1]], triangles[:, [1, 2]]]
+    if count > 1:
+        links.append(np.asarray(cKDTree(vertices).query_pairs(gap, output_type='ndarray'),
+                                dtype=np.int64).reshape(-1, 2))
+    if len(triangles):
+        tree = BVHTree.FromPolygons(vertices.tolist(), triangles.tolist(), all_triangles=True)
+        # Triangles crossing (or touching) triangles of other parts, and vertices near other parts' triangles.
+        crossing = np.asarray(tree.overlap(tree), dtype=np.int64).reshape(-1, 2)
+        links.append(np.column_stack((triangles[crossing[:, 0], 0], triangles[crossing[:, 1], 0])))
+        near = [(index, face) for index, point in enumerate(vertices.tolist())
+                for _location, _normal, face, _distance in tree.find_nearest_range(point, gap)]
+        if near:
+            near = np.asarray(near, dtype=np.int64)
+            links.append(np.column_stack((near[:, 0], triangles[near[:, 1], 0])))
+    links = np.vstack(links)
+    graph = sparse.coo_matrix((np.ones(len(links), dtype=np.uint8), (links[:, 0], links[:, 1])),
+                              shape=(count, count)).tocsr()
+    return weighttransfer._connected_components(graph)[1].astype(np.int64)
+
+
+def make_target_rigid(target, settings, transferred_deform_names, others=()):
+    """Give every vertex the transfer writes in a piece of the mesh (`rigid_pieces`) the same deform weights, so
+    each piece moves as one. A piece that the ``others`` (the transfer's targets that aren't Rigid) touch, within
+    HOLD_DISTANCE, like a ring a strap is looped through, moves as what holds it: the average of what the
+    transfer staged for their vertices touching it. Any other piece moves as the body under it: the average of
+    what the transfer staged for its own vertices. Averages are weighted by the vertices' share of the surface in
+    the rest shape, after masks, seam sync and normalizing. They add up to 1, or to what locked groups leave;
+    locked groups keep their weights. Returns False when there's nothing to average."""
     obj = target['obj']
-    rows = np.flatnonzero(target['write_vertices'])
-    names = list(dict.fromkeys(list(transferred_deform_names) + target_deform_names(target)))
-    if not len(rows) or not names:
+    written = target['write_vertices']
+    names = list(dict.fromkeys(list(transferred_deform_names) + target_deform_names(target)
+                               + [name for other in others for name in target_deform_names(other)]))
+    if not written.any() or not names:
         return False
     count = len(obj.data.vertices)
     for name in names:
@@ -595,26 +649,299 @@ def make_target_rigid(target, settings, transferred_deform_names):
     if not movable.any():
         return False
     values = np.column_stack([target['final'][name] for name in names]).astype(np.float64)
-    locked_values = values[rows][:, locked]
-    locked_count = int((locked_values > 0).sum(axis=1).max()) if locked.any() else 0
-    limit = max(1, settings.num_limit_groups - locked_count) if settings.enforce_four_bone_limit else None
     rest_vertices, rest_triangles, _normals = util.get_obj_arrs_world(obj)
-    shares = rigid_weights(values[rows], vertex_areas(rest_vertices, rest_triangles)[rows], movable, limit)
-    if shares is None:
+    areas = vertex_areas(rest_vertices, rest_triangles)
+    pieces = rigid_pieces(rest_vertices, rest_triangles)
+    target['rigid_pieces'] = pieces
+    held = _holding_weights(rest_vertices, rest_triangles, pieces, others, names, piece_sizes(rest_vertices, pieces))
+    made = False
+    for piece in np.unique(pieces[written]):
+        rows = np.flatnonzero(written & (pieces == piece))
+        locked_values = values[rows][:, locked]
+        locked_count = int((locked_values > 0).sum(axis=1).max()) if locked.any() else 0
+        limit = max(1, settings.num_limit_groups - locked_count) if settings.enforce_four_bone_limit else None
+        source, source_areas = held.get(int(piece), (values[rows], areas[rows]))
+        shares = rigid_weights(source, source_areas, movable, limit)
+        if shares is None:
+            continue
+        budget = np.clip(1.0 - locked_values.sum(axis=1), 0.0, 1.0)
+        values[np.ix_(rows, np.flatnonzero(movable))] = budget[:, None] * shares[None, :]
+        made = True
+    if not made:
         return False
-    budget = np.clip(1.0 - locked_values.sum(axis=1), 0.0, 1.0)
-    values[np.ix_(rows, np.flatnonzero(movable))] = budget[:, None] * shares[None, :]
     target['writable'].update(name for name, can_write in zip(names, movable) if can_write)
     for column, name in enumerate(names):
         target['final'][name] = values[:, column].astype(np.float32)
     return True
 
 
-def report_rigid(operator, targets, made_rigid):
+def _layer_links(points, normals, edges):
+    """Links between layers lying on each other, like a trim on its panel, a lining under it or a strap folded
+    back on itself, so what holds a rigid piece carries them all along: pairs of ``points`` within HOLD_DISTANCE
+    of each other, apart mostly along their ``normals`` (by LAYER_COSINE), that ``edges`` (index pairs) don't
+    already join. Neighbours on one sheet lie apart along it instead. Index pairs."""
+    if len(points) < 2:
+        return np.empty((0, 2), dtype=np.int64)
+    pairs = np.asarray(cKDTree(points).query_pairs(HOLD_DISTANCE, output_type='ndarray'),
+                       dtype=np.int64).reshape(-1, 2)
+    if not len(pairs):
+        return pairs
+    keys = np.sort(edges, axis=1)
+    known = np.isin(pairs[:, 0] * len(points) + pairs[:, 1], keys[:, 0] * len(points) + keys[:, 1])
+    offset = points[pairs[:, 1]] - points[pairs[:, 0]]
+    length = np.linalg.norm(offset, axis=1)
+    across = np.maximum(np.abs(np.einsum('ij,ij->i', offset, normals[pairs[:, 0]])),
+                        np.abs(np.einsum('ij,ij->i', offset, normals[pairs[:, 1]])))
+    return pairs[~known & (across >= LAYER_COSINE * length)]
+
+
+def piece_sizes(vertices, pieces):
+    """The size (bounding box diagonal) of each piece, by piece number."""
+    count = int(pieces.max()) + 1 if len(pieces) else 0
+    low = np.full((count, 3), np.inf)
+    high = np.full((count, 3), -np.inf)
+    np.minimum.at(low, pieces, vertices)
+    np.maximum.at(high, pieces, vertices)
+    return np.linalg.norm(high - low, axis=1)
+
+
+def _holding_weights(vertices, triangles, pieces, others, names, sizes):
+    """What holds each piece of a rigid mesh (``vertices``, ``triangles``, a piece per vertex, ``sizes`` per
+    piece): {piece: (staged weights of the ``others``' vertices around it, in columns ``names``; their areas
+    times how much they count)}, for the pieces they touch (within HOLD_DISTANCE). Vertices count fully within
+    HOLD_DISTANCE and fade out (smoothstep) by HOLD_AVERAGE times the piece's size, on the loose parts touching
+    it."""
+    if not others or not len(triangles):
+        return {}
+    vertices = np.asarray(vertices, dtype=np.float64)
+    triangles = np.asarray(triangles)
+    tree = BVHTree.FromPolygons(vertices.tolist(), triangles.tolist(), all_triangles=True)
+    reaches = HOLD_DISTANCE + HOLD_AVERAGE * sizes
+    reach = float(reaches.max())
+    low, high = vertices.min(axis=0) - reach, vertices.max(axis=0) + reach
+    found = {}
+    for other in others:
+        points, faces, normals = util.get_obj_arrs_world(other['obj'])
+        points = points.astype(np.float64)
+        rows = np.flatnonzero(np.all((points >= low) & (points <= high), axis=1))
+        near, piece_of, gap = [], [], []
+        for row, point in zip(rows.tolist(), points[rows].tolist()):
+            location, _normal, face, distance = tree.find_nearest(point, reach)
+            if location is not None:
+                piece = int(pieces[triangles[face][0]])
+                if distance <= reaches[piece]:
+                    near.append(row)
+                    piece_of.append(piece)
+                    gap.append(distance)
+        if not near:
+            continue
+        near, piece_of, gap = np.asarray(near), np.asarray(piece_of), np.asarray(gap)
+        # Only loose parts that touch the piece hold it, with the layers lying on them (and welded, so split
+        # seams don't cut them).
+        count = len(points)
+        merge = weighttransfer.find_vertex_merge_map(points, weighttransfer.BRIDGE_WELD)
+        edges = merge[np.vstack((faces[:, [0, 1]], faces[:, [1, 2]]))]
+        unit = normals / np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12)
+        edges = np.vstack((edges, _layer_links(points, unit.astype(np.float64), edges)))
+        graph = sparse.coo_matrix((np.ones(len(edges)), (edges[:, 0], edges[:, 1])),
+                                  shape=(count, count)).tocsr()
+        _parts, labels = weighttransfer._connected_components(graph)
+        labels = labels[merge]
+        staged = np.column_stack([other['final'].get(name, np.zeros(count)) for name in names])
+        areas = vertex_areas(points, faces)
+        for piece in np.unique(piece_of):
+            mine = piece_of == piece
+            touching = mine & (gap <= HOLD_DISTANCE)
+            if not touching.any():
+                continue
+            mine &= np.isin(labels[near], labels[near[touching]])
+            fade = np.clip((gap[mine] - HOLD_DISTANCE) / max(reaches[piece] - HOLD_DISTANCE, 1e-9), 0.0, 1.0)
+            share = 1.0 - fade * fade * (3.0 - 2.0 * fade)
+            found.setdefault(int(piece), []).append((staged[near[mine]], areas[near[mine]] * share))
+    return {piece: (np.concatenate([values for values, _areas in parts]).astype(np.float64),
+                    np.concatenate([areas for _values, areas in parts]))
+            for piece, parts in found.items()}
+
+
+def hold_rigid_pieces(targets, made_rigid, settings, transferred_deform_names):
+    """Make the other meshes of the transfer hold onto the Rigid ones (``made_rigid`` per target: True for those
+    made rigid, None for those that aren't Rigid): their vertices within HOLD_DISTANCE of a rigid piece take its
+    weights at their closest point there, and the change fades out harmonically along the mesh over HOLD_BLEND times the piece's size, so a strap stays
+    wrapped around its ring and what doesn't touch the piece keeps its weights. Locked groups keep their
+    weights, the group limit holds, and only vertices the transfer writes change. Returns the names of the
+    meshes that changed."""
+    rigid = [target for target, made in zip(targets, made_rigid) if made]
+    holders = [target for target, made in zip(targets, made_rigid) if made is None]
+    if not rigid or not holders:
+        return []
+    surfaces = [util.get_obj_arrs_world(target['obj'])[:2] for target in rigid]
+    # How far each rigid triangle reaches: HOLD_DISTANCE plus the blend for its piece.
+    reaches = []
+    for target, (vertices, triangles) in zip(rigid, surfaces):
+        pieces = target.get('rigid_pieces')
+        if pieces is None:
+            pieces = rigid_pieces(vertices, triangles)
+        size = piece_sizes(vertices, pieces)
+        reaches.append(HOLD_DISTANCE + HOLD_BLEND * size[pieces[triangles[:, 0]]])
+    offsets = np.cumsum([0] + [len(vertices) for vertices, _triangles in surfaces])
+    points = np.concatenate([vertices for vertices, _triangles in surfaces]).astype(np.float64)
+    tris = np.concatenate([triangles + offset for (_vertices, triangles), offset in zip(surfaces, offsets)])
+    if not len(tris):
+        return []
+    tree = BVHTree.FromPolygons(points.tolist(), tris.tolist(), all_triangles=True)
+    names = list(dict.fromkeys(list(transferred_deform_names)
+                               + [name for target in rigid for name in target_deform_names(target)]))
+    values = np.concatenate([
+        np.column_stack([target['final'].get(name, np.zeros(len(vertices))) for name in names])
+        for target, (vertices, _triangles) in zip(rigid, surfaces)]).astype(np.float64)
+    reaches = np.concatenate(reaches)
+    reach = float(reaches.max())
+    box = (points.min(axis=0) - reach, points.max(axis=0) + reach)
+    return [target['obj'].name for target in holders
+            if _hold(target, settings, transferred_deform_names, tree, points, tris, reaches, values, names, box)]
+
+
+def _hold(target, settings, transferred_deform_names, tree, points, tris, reaches, values, names, box):
+    """`hold_rigid_pieces` for one mesh, onto the rigid surface ``tree`` (``points``, ``tris``, how far each
+    triangle ``reaches``) whose vertices have ``values`` (columns ``names``). Returns whether any weights
+    changed."""
+    obj = target['obj']
+    vertices, triangles, normals = util.get_obj_arrs_world(obj)
+    vertices = vertices.astype(np.float64)
+    written = target['write_vertices']
+    rows = np.flatnonzero(written & np.all((vertices >= box[0]) & (vertices <= box[1]), axis=1))
+    count = len(vertices)
+    gap = np.full(count, np.inf)
+    reach_of = np.zeros(count)
+    found, locations, faces = [], [], []
+    for row, point in zip(rows.tolist(), vertices[rows].tolist()):
+        location, _normal, face, distance = tree.find_nearest(point, HOLD_DISTANCE)
+        if location is None:
+            continue
+        gap[row] = distance
+        reach_of[row] = reaches[face] - HOLD_DISTANCE
+        found.append(row)
+        locations.append(location[:])
+        faces.append(face)
+    if not found:
+        return False
+
+    columns = list(dict.fromkeys(names + target_deform_names(target, transferred_deform_names)))
+    for name in columns:
+        target['final'].setdefault(name, np.zeros(count, dtype=np.float32))
+    locked = np.array([bool((group := obj.vertex_groups.get(name)) and group.lock_weight) for name in columns])
+    movable = np.flatnonzero(~locked)
+    if not len(movable):
+        return False
+    current = np.column_stack([target['final'][name] for name in columns]).astype(np.float64)
+    # The rigid weights at each holding vertex's closest point, as shares of the movable groups.
+    faces = np.asarray(faces, dtype=np.int64)
+    bary = weighttransfer._barycentric_coordinates(np.asarray(locations), points[tris[faces]])
+    taken = np.zeros((count, len(columns)))
+    taken[np.asarray(found)[:, None], np.arange(len(names))[None, :]] = np.einsum(
+        'ik,ikj->ij', np.clip(bary, 0.0, None), values[tris[faces]])
+
+    # Welded vertices (split seams) as one, linked along the mesh's edges by their inverse lengths.
+    merge = weighttransfer.find_vertex_merge_map(vertices, weld_distance(settings))
+    clusters = int(merge.max()) + 1
+    sizes = np.bincount(merge, minlength=clusters).astype(np.float64)
+    centre = np.zeros((clusters, 3))
+    np.add.at(centre, merge, vertices)
+    centre /= sizes[:, None]
+    cluster_gap = np.full(clusters, np.inf)
+    np.minimum.at(cluster_gap, merge, gap)
+    holding = cluster_gap <= HOLD_DISTANCE
+    writable = np.zeros(clusters, dtype=bool)
+    writable[merge[written]] = True
+    held = np.zeros((clusters, len(columns)))
+    holds = np.flatnonzero(gap <= HOLD_DISTANCE)
+    np.add.at(held, merge[holds], taken[holds])
+    held /= np.maximum(np.bincount(merge[holds], minlength=clusters), 1)[:, None]
+    own = np.zeros((clusters, len(columns)))
+    np.add.at(own, merge, current)
+    own /= sizes[:, None]
+
+    edges = merge[np.vstack((triangles[:, [0, 1]], triangles[:, [1, 2]], triangles[:, [2, 0]]))]
+    edges = np.unique(np.sort(edges[edges[:, 0] != edges[:, 1]], axis=1), axis=0)
+    facing = np.zeros((clusters, 3))
+    np.add.at(facing, merge, normals.astype(np.float64))
+    facing /= np.maximum(np.linalg.norm(facing, axis=1, keepdims=True), 1e-12)
+    along = len(edges)
+    edges = np.vstack((edges, _layer_links(centre, facing, edges)))
+    lengths = np.maximum(np.linalg.norm(centre[edges[:, 0]] - centre[edges[:, 1]], axis=1), 1e-6)
+    holding &= writable
+    if not holding.any():
+        return False
+    # The blend reaches HOLD_BLEND times the piece's size from where the mesh touches it, measured along the mesh
+    # (and across the layers lying on it), so it neither jumps to other parts nearby nor across a gore.
+    cluster_reach = np.zeros(clusters)
+    np.maximum.at(cluster_reach, merge, reach_of)
+    graph = sparse.coo_matrix((lengths, (edges[:, 0], edges[:, 1])), shape=(clusters, clusters)).tocsr()
+    sources = np.flatnonzero(holding)
+    along_mesh, _previous, nearest = csgraph.dijkstra(graph, directed=False, indices=sources, min_only=True,
+                                                      limit=float(cluster_reach.max()), return_predecessors=True)
+    region = np.isfinite(along_mesh) & (along_mesh <= np.where(nearest >= 0, cluster_reach[np.maximum(nearest, 0)],
+                                                                0.0))
+    unknown = region & ~holding & writable
+
+    def normalized(values):
+        part = np.clip(values[:, movable], 0.0, None)
+        totals = part.sum(axis=1, keepdims=True)
+        return np.divide(part, totals, out=np.zeros_like(part), where=totals > WEIGHT_TOLERANCE)
+
+    # Each vertex keeps its own weights plus a correction: the rigid piece's minus its own where it touches the
+    # piece, fading to nothing by the end of the blend (harmonic), so the fabric around keeps its own shape of
+    # weights instead of being smoothed over.
+    shares = normalized(own)
+    correction = np.zeros_like(shares)
+    correction[holding] = normalized(held)[holding] - shares[holding]
+    if unknown.any():
+        strength = 1.0 / lengths
+        if along and len(edges) > along:
+            strength[along:] = HOLD_LAYER_LINK * np.median(strength[:along])
+        laplacian = sparse.coo_matrix(
+            (np.concatenate((strength, strength)), (np.concatenate((edges[:, 0], edges[:, 1])),
+                                                    np.concatenate((edges[:, 1], edges[:, 0])))),
+            shape=(clusters, clusters)).tocsr()
+        laplacian = sparse.diags(np.asarray(laplacian.sum(axis=1)).ravel()) - laplacian
+        solve = np.flatnonzero(unknown)
+        fixed = np.flatnonzero(~unknown)
+        system = laplacian[solve][:, solve].tocsc()
+        rhs = -(laplacian[solve][:, fixed] @ correction[fixed])
+        correction[solve] = np.asarray(splu(system).solve(np.asarray(rhs)))
+    shares = np.clip(shares + correction, 0.0, None)
+
+    changed = holding | unknown
+    rows = np.flatnonzero(changed[merge] & written)
+    if not len(rows):
+        return False
+    budget = np.clip(1.0 - current[rows][:, locked].sum(axis=1), 0.0, 1.0)
+    new = shares[merge[rows]]
+    if settings.enforce_four_bone_limit:
+        slots = np.maximum(1, settings.num_limit_groups - np.count_nonzero(current[rows][:, locked] > 0, axis=1))
+        for slot in np.unique(slots):
+            pick = slots == slot
+            new[pick] = weighttransfer.limit_groups_smoothly(new[pick], int(slot))
+    else:
+        new[new < RIGID_THRESHOLD] = 0.0
+    totals = new.sum(axis=1, keepdims=True)
+    new = np.divide(new, totals, out=np.zeros_like(new), where=totals > WEIGHT_TOLERANCE)
+    keep = totals[:, 0] > WEIGHT_TOLERANCE
+    rows, new, budget = rows[keep], new[keep], budget[keep]
+    current[np.ix_(rows, movable)] = budget[:, None] * new
+    target['writable'].update(columns[column] for column in movable)
+    for column, name in enumerate(columns):
+        target['final'][name] = current[:, column].astype(np.float32)
+    return bool(len(rows))
+
+
+def report_rigid(operator, targets, made_rigid, holding=()):
     names = [target['obj'].name for target, rigid in zip(targets, made_rigid) if rigid]
     missed = [target['obj'].name for target, rigid in zip(targets, made_rigid) if rigid is False]
     if names:
         operator.report({'INFO'}, 'Made rigid: ' + ', '.join(names))
+    if holding:
+        operator.report({'INFO'}, 'Holding onto the rigid meshes: ' + ', '.join(holding))
     if missed:
         operator.report({'WARNING'}, 'Could not make ' + ', '.join(missed)
                         + ' rigid: the transfer left them no deform weights to average')

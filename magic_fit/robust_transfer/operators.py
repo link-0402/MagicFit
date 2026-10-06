@@ -252,12 +252,17 @@ class MAGIC_FIT_OT_transfer_weights(bpy.types.Operator):
                 targets, settings, [name for name, use in zip(names, deform) if use], fallback)
             post_counts = transfer.postprocess_transfer_targets(
                 targets, settings, [name for name, use in zip(names, deform) if use])
-            # Last, so nothing changes the rigid meshes' weights afterwards. None: not asked for.
+            # Last, so nothing changes the rigid meshes' weights afterwards. None: not asked for. Rigid pieces
+            # move as the other meshes holding them, which then hold onto them.
+            others = [target for target in targets if not target['obj'].magic_fit_transfer.rigid]
             made_rigid = [
-                transfer.make_target_rigid(target, settings, [name for name, use in zip(names, deform) if use])
+                transfer.make_target_rigid(target, settings, [name for name, use in zip(names, deform) if use],
+                                           others)
                 if target['obj'].magic_fit_transfer.rigid else None
                 for target in targets
             ]
+            holding = transfer.hold_rigid_pieces(targets, made_rigid, settings,
+                                                 [name for name, use in zip(names, deform) if use])
         except (ValueError, RuntimeError) as error:
             self.report({'ERROR'}, str(error))
             return {'CANCELLED'}
@@ -269,7 +274,7 @@ class MAGIC_FIT_OT_transfer_weights(bpy.types.Operator):
         transfer.report_partial(self, targets)
         transfer.report_stability(self, targets)
         transfer.report_postprocess(self, post_counts)
-        transfer.report_rigid(self, targets, made_rigid)
+        transfer.report_rigid(self, targets, made_rigid, holding)
         self.report({'INFO'}, f'Weights transferred from {source_original.name} to {len(targets)} object(s)')
         return {'FINISHED'}
 

@@ -36,8 +36,9 @@ class WeightTransferObjectSettings(bpy.types.PropertyGroup):
     rigid: BoolProperty(
         name="Rigid",
         description=(
-            "Give the whole mesh one set of weights, so it moves as one piece, like metal parts. Also works "
-            "with Apply to All Selected, for each mesh that has it on"
+            "Give each piece of the mesh one set of weights, so it moves as one piece, like metal parts. Loose "
+            "parts that touch are one piece. Also works with Apply to All Selected, for each mesh that has it on: "
+            "the other meshes transferred with it hold onto it where they touch it"
         ),
         default=False,
     )

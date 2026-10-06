@@ -79,6 +79,27 @@ def flat_grid(xs, ys, z=0.0):
 
 
 class NumericalTests(unittest.TestCase):
+    def test_rigid_pieces_join_parts_that_touch(self):
+        parts, faces = [], []
+
+        def add(v, f):
+            faces.append(np.asarray(f) + sum(len(p) for p in parts))
+            parts.append(np.asarray(v, dtype=float))
+
+        xs, ys = np.linspace(0, 0.01, 3), np.linspace(0, 0.01, 3)
+        add(*flat_grid(xs, ys))                                    # 0: a plate
+        add(*flat_grid(xs + 0.01, ys))                             # 1: split from it along x = 0.01
+        v, f = flat_grid(np.linspace(0.002, 0.008, 3), np.linspace(-0.004, 0.004, 3))
+        add(v[:, [0, 2, 1]] + [0, 0.005, 0], f)                    # 2: a pin through it
+        add(*flat_grid(xs + 0.02, ys, 0.0002))                     # 3: 0.2 mm over part 1's far edge
+        add(*flat_grid(xs + 0.04, ys))                             # 4: 1 cm beyond part 3
+        pieces = transfer.rigid_pieces(np.vstack(parts), np.vstack(faces))
+        ends = np.cumsum([0] + [len(p) for p in parts])
+        labels = [np.unique(pieces[a:b]) for a, b in zip(ends[:-1], ends[1:])]
+        self.assertTrue(all(len(label) == 1 for label in labels))
+        self.assertEqual(len({int(label[0]) for label in labels[:4]}), 1)
+        self.assertNotEqual(int(labels[4][0]), int(labels[0][0]))
+
     def test_partial_distance_strength(self):
         distance = np.array([0, 0.5, 0.8, 0.85, 0.9, 0.95, 1, 2])
         np.testing.assert_allclose(transfer.distance_strength(distance ** 2, 1, 20),
@@ -1549,6 +1570,104 @@ class BlenderTests(TransferScene, unittest.TestCase):
         fit, *_ = np.linalg.lstsq(homogeneous, posed, rcond=None)
         self.assertLess(np.abs(homogeneous @ fit - posed).max(), 1e-5)
 
+    def test_rigid_moves_each_piece_on_its_own(self):
+        # Like the rings at both ends of a bra's straps: one Rigid mesh, two pieces far apart.
+        self.rigid_scene()
+        left, left_f = flat_grid(np.linspace(0.05, 0.15, 6), np.linspace(0.05, 0.15, 3), 0.001)
+        right, right_f = flat_grid(np.linspace(0.3, 0.45, 6), np.linspace(0.05, 0.15, 3), 0.001)
+        target = self.mesh('Rings', np.vstack((left, right)), np.vstack((left_f, right_f + len(left))))
+        self.select(target)
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        loose = self.read(target, self.RIGID_BONES)
+        for group in list(target.vertex_groups):
+            target.vertex_groups.remove(group)
+        target.magic_fit_transfer.rigid = True
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        rigid = self.read(target, self.RIGID_BONES)
+        vertices, triangles, _ = util.get_obj_arrs_world(target)
+        areas = transfer.vertex_areas(vertices, triangles)
+        for rows in (np.arange(len(left)), np.arange(len(left), len(left) + len(right))):
+            np.testing.assert_array_equal(rigid[rows], np.tile(rigid[rows[0]], (len(rows), 1)))
+            expected = (areas[rows, None] * loose[rows]).sum(axis=0) / areas[rows].sum()
+            np.testing.assert_allclose(rigid[rows[0]], expected / expected.sum(), atol=1e-5)
+        self.assertGreater(np.abs(rigid[0] - rigid[-1]).max(), 0.5)  # not one average for both
+
+    def test_meshes_hold_onto_rigid_pieces(self):
+        # A strap with a ring lying on its end: transferred together, the strap takes the ring's weights where it
+        # touches it, keeps its own beyond the blend, and blends in between.
+        strap = self.rigid_scene('Strap')
+        self.settings.apply_to_selected = True
+        self.select(strap)
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        loose = self.read(strap, self.RIGID_BONES)
+        for group in list(strap.vertex_groups):
+            strap.vertex_groups.remove(group)
+        v, f = flat_grid(np.linspace(0.385, 0.405, 3), np.linspace(0.07, 0.13, 3), 0.0015)
+        ring = self.mesh('Ring', v, f)
+        ring.magic_fit_transfer.rigid = True
+        self.select(ring, strap)
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        held, rigid = self.read(strap, self.RIGID_BONES), self.read(ring, self.RIGID_BONES)
+        np.testing.assert_array_equal(rigid, np.tile(rigid[0], (len(rigid), 1)))
+
+        points, _triangles, _ = util.get_obj_arrs_world(strap)
+        outside = np.maximum(np.abs(points[:, :2] - [0.395, 0.1]) - [0.01, 0.03], 0.0)
+        gap = np.hypot(np.linalg.norm(outside, axis=1), 0.0005)
+        reach = transfer.HOLD_DISTANCE + transfer.HOLD_BLEND * np.hypot(0.02, 0.06)
+        touching, far = gap <= transfer.HOLD_DISTANCE, gap > reach + 1e-3
+        self.assertTrue(touching.any() and far.any())
+        np.testing.assert_allclose(held[touching], np.tile(rigid[0], (touching.sum(), 1)), atol=1e-5)
+        np.testing.assert_allclose(held[far], loose[far], atol=1e-6)
+        between = ~touching & ~far
+        self.assertGreater(np.abs(held[between] - loose[between]).max(), 0.05)
+        np.testing.assert_allclose(held.sum(axis=1), 1.0, atol=1e-5)
+
+    def test_layers_on_a_held_mesh_stay_together(self):
+        # A trim lying 1 mm over a strap, in the same mesh, near the ring the strap holds: it blends with the
+        # strap, vertex for vertex, instead of keeping its own weights while the strap under it changes.
+        self.rigid_scene()
+        xs, ys = np.concatenate((np.linspace(0.05, 0.2, 16), np.linspace(0.23, 0.45, 5))), np.linspace(0.05, 0.15, 4)
+        strap, strap_f = flat_grid(xs, ys, 0.001)
+        trim, trim_f = flat_grid(xs[(xs > 0.22) & (xs < 0.35)], ys, 0.002)
+        target = self.mesh('Strap', np.vstack((strap, trim)), np.vstack((strap_f, trim_f + len(strap))))
+        v, f = flat_grid(np.linspace(0.385, 0.405, 3), np.linspace(0.07, 0.13, 3), 0.0015)
+        ring = self.mesh('Ring', v, f)
+        ring.magic_fit_transfer.rigid = True
+        self.settings.apply_to_selected = True
+        self.select(ring, target)
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        weights = self.read(target, self.RIGID_BONES)
+        from scipy.spatial import cKDTree
+        under = cKDTree(strap).query(trim)[1]
+        self.assertGreater(np.abs(weights[under] - self.read(self.body, self.RIGID_BONES)[:1]).max(), 0.0)
+        np.testing.assert_allclose(weights[len(strap):], weights[under], atol=0.02)
+
+    def test_the_hold_reaches_along_the_mesh(self):
+        # A strap bent into a U: one arm holds the ring, the other comes back right next to it, a long way round
+        # along the strap. Measured along the mesh, the hold doesn't reach the other arm, which keeps its weights.
+        self.rigid_scene()
+        v, f = flat_grid(np.concatenate((np.linspace(0.0, 0.2, 17), np.linspace(0.23, 0.45, 5))),
+                         np.array([0.05, 0.083, 0.117, 0.15, 0.17, 0.21, 0.25]), 0.001)
+        centre = v[f].mean(axis=1)
+        f = f[~((centre[:, 0] > 0.0125) & (centre[:, 1] > 0.15) & (centre[:, 1] < 0.17))]
+        target = self.mesh('Strap', v, f)
+        self.settings.apply_to_selected = True
+        self.select(target)
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        loose = self.read(target, self.RIGID_BONES)
+        for group in list(target.vertex_groups):
+            target.vertex_groups.remove(group)
+        ring_v, ring_f = flat_grid(np.linspace(0.385, 0.405, 3), np.linspace(0.07, 0.13, 3), 0.0015)
+        ring = self.mesh('Ring', ring_v, ring_f)
+        ring.magic_fit_transfer.rigid = True
+        self.select(ring, target)
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        held = self.read(target, self.RIGID_BONES)
+        near_arm = v[:, 1] < 0.16
+        other_arm = (v[:, 1] > 0.16) & (v[:, 0] > 0.3)  # 4 to 18 cm from the ring in a straight line
+        self.assertGreater(np.abs(held[near_arm] - loose[near_arm]).max(), 0.05)
+        np.testing.assert_allclose(held[other_arm], loose[other_arm], atol=1e-6)
+
     def test_rigid_weights_average_by_area_and_drop_what_rounds_away(self):
         values = np.array([[0.6, 0.399, 0.001, 0.5], [0.8, 0.199, 0.001, 0.5]])
         movable = np.array([True, True, True, False])
@@ -1587,7 +1706,8 @@ class BlenderTests(TransferScene, unittest.TestCase):
 
     def test_rigid_is_per_mesh_with_apply_to_selected(self):
         rigid = self.rigid_scene('Buckle')
-        loose = self.rigid_scene('Strap', offset=0.002)
+        # Farther from the buckle than HOLD_DISTANCE, so the strap doesn't hold onto it.
+        loose = self.rigid_scene('Strap', offset=0.005)
         rigid.magic_fit_transfer.rigid = True
         self.settings.apply_to_selected = True
         self.select(rigid, loose)

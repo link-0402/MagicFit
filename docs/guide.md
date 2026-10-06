@@ -73,9 +73,12 @@ Each mesh has two masks. **Apply to All Selected** ignores them.
 - **Inpaint Mask**: vertices in this group (above **Threshold**) are inpainted instead of copied. **Utilities → Inpaint** uses it on its own, to repair a mesh's existing weights.
   - A thong or a narrow crotch strip lying in the groove between the buttocks or thighs copies the walls on either side, so its halves pull apart when the legs spread wide. In the Inpaint Mask, it blends evenly between both legs instead, but thighs scaled up a lot (with Customize+) then press through it more.
 
-**Rigid** (the checkbox below the masks) is for hard parts like buckles, plates or jewellery. All its vertices get the same weights, so the part moves as one piece when posed or scaled.
+**Rigid** (the checkbox below the masks) is for hard parts like buckles, plates, rings or jewellery. Each piece of the mesh gets one set of weights, the average of what it would get otherwise, so it moves as one piece when posed or scaled. Loose parts that touch or pass through each other (within 0.3 mm) are one piece; pieces apart from each other keep their own weights, so the rings on both shoulder straps of a bra each stay on their strap.
 
 - It also works with Apply to All Selected, per mesh. Transfer to a coat and its buckles at once, and only the buckles come out rigid.
+- **Transfer it together with what it's attached to.** A piece the other meshes of the transfer touch (within 2 mm), like a ring a strap is looped through, moves as they do around it, over twice its size: a ring on a bra follows the bra's movements without bending. They hold onto it in turn: where they touch it they take its weights, and along the fabric, over three times the piece's size, that change fades out, so the strap stays on the ring as the breasts move or Customize+ scales them. Layers lying on each other there, like a trim on its panel, change together. Parts that don't touch the piece keep their weights.
+- A ring joining the cups between the breasts can't follow both cups when they swing apart: it holds them back, and right next to it they can touch the breasts in a strong outward swing.
+- Transferred on its own, a rigid piece moves as the body under it and doesn't change the meshes around it.
 - Locked groups keep their weights. If they differ between vertices, the part isn't fully rigid.
 - A blend of several bones can still stretch it slightly in extreme poses.
 
