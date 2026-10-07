@@ -32,6 +32,15 @@ on, until the ``with`` block ends. At the size the body shows, the clothing show
 even while it shows another size's key. Everything else (Smoothing, Bridge Creases...) is as set in the Resize
 panel.
 
+To resize one size at a time (VERSION 2 on), with a step of a modal operator per size so Blender's UI stays alive,
+make a Resizer, which reads the meshes and keeps what the sizes share, and resize it to each of its sizes:
+
+    resizer = api.Resizer(collection)
+    for size in resizer.sizes:
+        sized = resizer.resize(size)
+        with sized.shown():
+            export(collection, sized.name)
+
 Errors meant for the user raise ResizeError.
 """
 
@@ -44,10 +53,11 @@ import numpy as np
 from . import properties, resizing, sizing
 from .resizing import ResizeError
 
-# Raised when what this module offers changes; other add-ons check they know it.
-VERSION = 1
+# Raised when what this module offers changes; other add-ons check they know it. 2 added Resizer.
+VERSION = 2
 
-__all__ = ("VERSION", "ResizeError", "Size", "SizedMeshes", "body_sizes", "picked_sizes", "resize_collection")
+__all__ = ("VERSION", "ResizeError", "Resizer", "Size", "SizedMeshes", "body_sizes", "picked_sizes",
+           "resize_collection")
 
 
 class Size:
@@ -202,84 +212,93 @@ class SizeRun:
         self.stuck = {}
 
 
-def resize_meshes(meshes, sizes, job, labels, show=False, progress=None):
-    """Resize ``meshes`` (clothing) from the From shape to each of ``sizes`` (Size, or None for the To shape alone),
-    as ``job`` (Job) says, into a shape key per size named ``labels[i]``.
+class _Sizes:
+    """resize_meshes for ``meshes`` and ``job``, a size at a time: what it reads of the meshes and the From body
+    once and, with ``share`` (for several sizes), what resizing to each size shares (see resizing.Shared)."""
 
-    Each mesh starts from the shape it fits the From body in (see resizing.from_shape), whatever size it shows. A
-    key made before for the same size from the same inputs is kept, one changed by hand since too (with a note);
-    others are made again. With ``show``, each mesh's key is turned on. Returns ([SizeRun per size], notes for the
-    user). Raises ResizeError.
-    """
-    if not meshes:
-        return [SizeRun() for _size in sizes], []
-    body = job.body
-    other = job.sized
-    source = resizing._transform(resizing.rest_shape(body, job.source_values()), body.matrix_world)
-    from_print = resizing.fingerprint(source)
-    shapes, mixes = [], []
-    for obj in meshes:
-        shape, mix = resizing.from_shape(obj, from_print)
-        shapes.append(shape)
-        mixes.append(mix)
-    # The key values showing each mesh as it fits the From body, while it may be showing a size.
-    own = {obj: resizing.from_values(obj, from_print)[0] for obj in meshes}
-    shape_prints = [resizing.fingerprint(shape) for shape in shapes]
-    # Rigid parts are numbered across all meshes, and Keep Close spreads its corrections along the meshes' edges,
-    # numbered across them too.
-    groups, first_part = [], 0
-    for obj, shape in zip(meshes, shapes):
-        parts, count = rigid_parts(obj, shape, job.rigid_size)
-        groups.append(np.where(parts >= 0, parts + first_part, -1))
-        first_part += count
-    rigid = np.concatenate(groups) if groups else np.zeros(0, dtype=np.int64)
-    edges = None
-    if job.keep_close and meshes:
-        edges, first_vertex = [], 0
-        for obj, shape in zip(meshes, shapes):
-            pairs = np.empty(len(obj.data.edges) * 2, dtype=np.int64)
-            obj.data.edges.foreach_get("vertices", pairs)
-            edges.append(pairs.reshape(-1, 2) + first_vertex)
-            first_vertex += len(shape)
-        edges = np.concatenate(edges)
+    def __init__(self, meshes, job, share=True):
+        self.meshes, self.job = meshes, job
+        if not meshes:
+            return
+        body = job.body
+        # The weights of the groups the bodies' keys are limited to, read once (per body).
+        self.groups = {}
+        self.from_shape = resizing.rest_shape(body, job.source_values(), self.groups.setdefault(body, {}))
+        self.source = resizing._transform(self.from_shape, body.matrix_world)
+        self.from_print = resizing.fingerprint(self.source)
+        self.shapes, self.mixes = [], []
+        for obj in meshes:
+            shape, mix = resizing.from_shape(obj, self.from_print)
+            self.shapes.append(shape)
+            self.mixes.append(mix)
+        # The key values showing each mesh as it fits the From body, while it may be showing a size.
+        self.own = {obj: resizing.from_values(obj, self.from_print)[0] for obj in meshes}
+        self.shape_prints = [resizing.fingerprint(shape) for shape in self.shapes]
+        # Rigid parts are numbered across all meshes, and Keep Close spreads its corrections along the meshes'
+        # edges, numbered across them too.
+        groups, first_part = [], 0
+        for obj, shape in zip(meshes, self.shapes):
+            parts, count = rigid_parts(obj, shape, job.rigid_size)
+            groups.append(np.where(parts >= 0, parts + first_part, -1))
+            first_part += count
+        self.rigid = np.concatenate(groups)
+        self.edges = None
+        if job.keep_close:
+            edges, first_vertex = [], 0
+            for obj, shape in zip(meshes, self.shapes):
+                pairs = np.empty(len(obj.data.edges) * 2, dtype=np.int64)
+                obj.data.edges.foreach_get("vertices", pairs)
+                edges.append(pairs.reshape(-1, 2) + first_vertex)
+                first_vertex += len(shape)
+            self.edges = np.concatenate(edges)
+        self.points = np.concatenate(self.shapes)
+        self.shared = resizing.Shared() if share else None
 
-    runs, notes = [], []
-    for index, (size, label) in enumerate(zip(sizes, labels)):
-        def step(done, index=index):
+    def size(self, size, label, show=False, progress=None):
+        """Resize to ``size`` (Size, or None for the To shape alone) into keys named ``label``. Returns (SizeRun,
+        notes for the user)."""
+        run, notes = SizeRun(), []
+        meshes, job = self.meshes, self.job
+        if not meshes:
+            return run, notes
+
+        def step(done):
             if progress is not None:
-                progress((index + done) / len(sizes))
-        run = SizeRun()
-        run.rigid = len(np.unique(rigid[rigid >= 0]))
-        runs.append(run)
+                progress(done)
+        run.rigid = len(np.unique(self.rigid[self.rigid >= 0]))
+        body = job.body
+        other = job.sized
         to_values = sizing.size_values(other, size.values) if size is not None else None
-        target = resizing._transform(resizing.rest_shape(other, job.target_values(to_values)), other.matrix_world)
-        if other == body and np.array_equal(target, source):
+        to_shape = resizing.rest_shape(other, job.target_values(to_values), self.groups.setdefault(other, {}))
+        target = resizing._transform(to_shape, other.matrix_world)
+        if other == body and np.array_equal(target, self.source):
             run.keys = {obj: None for obj in meshes}
-            run.own = dict(own)
+            run.own = dict(self.own)
             step(1.0)
-            continue
-        inputs = resizing.fingerprint(source, target, job.options())
+            return run, notes
+        inputs = resizing.fingerprint(self.source, target, job.options())
         states = [resizing.key_state(obj, label, resizing.fingerprint(inputs, shape_print))
-                  for obj, shape_print in zip(meshes, shape_prints)]
+                  for obj, shape_print in zip(meshes, self.shape_prints)]
         needed = [state in ('NEW', 'STALE') for _block, state in states]
         moved = None
         if any(needed):
-            bodies = resizing.body_shapes(body, job.from_key, job.to_body, job.to_key, job.match, to_values)
-            change = bodies.change(radius=job.radius, bridge=job.bridge)
+            bodies = resizing.body_shapes(body, job.from_key, job.to_body, job.to_key, job.match, to_values,
+                                          shapes=(self.from_shape, to_shape))
+            change = bodies.change(radius=job.radius, bridge=job.bridge, shared=self.shared)
             run.steps, run.how, run.match = change.steps, bodies.how, bodies.match
             if change.largest <= 0.0:
                 run.keys = {obj: None for obj in meshes}
-                run.own = dict(own)
+                run.own = dict(self.own)
                 step(1.0)
-                continue
-            moved = change.apply(np.concatenate(shapes), rigid=rigid, edges=edges, progress=step)
+                return run, notes
+            moved = change.apply(self.points, rigid=self.rigid, edges=self.edges, progress=step)
         first = 0
-        for obj, shape, shape_print, mix, (block, state), need in zip(meshes, shapes, shape_prints, mixes, states,
-                                                                      needed):
+        for obj, shape, shape_print, mix, (block, state), need in zip(meshes, self.shapes, self.shape_prints,
+                                                                      self.mixes, states, needed):
             part = slice(first, first + len(shape))
             first += len(shape)
             if need:
-                record = {"from": from_print, "inputs": resizing.fingerprint(inputs, shape_print), "mix": mix}
+                record = {"from": self.from_print, "inputs": resizing.fingerprint(inputs, shape_print), "mix": mix}
                 block, stuck = resizing.write_resized_key(obj, label, moved[part], record, show=show)
                 run.made += 1
             else:
@@ -292,6 +311,27 @@ def resize_meshes(meshes, sizes, job, labels, show=False, progress=None):
             if stuck:
                 run.stuck[obj] = stuck
         step(1.0)
+        return run, notes
+
+
+def resize_meshes(meshes, sizes, job, labels, show=False, progress=None):
+    """Resize ``meshes`` (clothing) from the From shape to each of ``sizes`` (Size, or None for the To shape alone),
+    as ``job`` (Job) says, into a shape key per size named ``labels[i]``.
+
+    Each mesh starts from the shape it fits the From body in (see resizing.from_shape), whatever size it shows. A
+    key made before for the same size from the same inputs is kept, one changed by hand since too (with a note);
+    others are made again. With ``show``, each mesh's key is turned on. Returns ([SizeRun per size], notes for the
+    user). Raises ResizeError.
+    """
+    work = _Sizes(meshes, job, share=len(sizes) > 1)
+    runs, notes = [], []
+    for index, (size, label) in enumerate(zip(sizes, labels)):
+        def step(done, index=index):
+            if progress is not None:
+                progress((index + done) / len(sizes))
+        run, size_notes = work.size(size, label, show=show, progress=step)
+        runs.append(run)
+        notes.extend(size_notes)
     return runs, notes
 
 
@@ -394,6 +434,83 @@ def _object_mode():
             bpy.ops.object.mode_set(mode='EDIT')
 
 
+class Resizer:
+    """Resizes the clothing in ``target`` to one size at a time, as resize_collection does to all of them, for an
+    export that resizes a size per step of a modal operator and keeps Blender's UI alive meanwhile:
+
+        resizer = api.Resizer(collection)
+        for size in resizer.sizes:          # one per timer tick
+            sized = resizer.resize(size)
+            with sized.shown():
+                export(collection, sized.name)
+
+    ``target``, ``sizes``, ``scene`` and ``body`` are as for resize_collection, and making one raises the errors it
+    raises. ``sizes`` lists the sizes to resize to (Size, or None for the To shape alone). It reads the meshes and
+    bodies when made, and keeps what every size shares (the clothing's shape, its distances from the From body,
+    the From body's crease-free copy...) for all of them: make another after changing them.
+    """
+
+    def __init__(self, target, sizes=None, *, scene=None, body=None):
+        scene = scene if scene is not None else bpy.context.scene
+        brush = scene.body_fit_brush
+        job = self.job = Job(brush, body)
+        if job.body is None:
+            raise ResizeError("Pick the From Body in Magic Fit's Resize panel")
+        problem = resizing.check_shapes(job.body, job.from_key, job.to_body, job.to_key, job.match, True)
+        if problem is not None:
+            raise ResizeError(problem)
+        if sizes is None:
+            sizes = picked_sizes(scene) if body is None or body == brush.resize_from_object else []
+            if not sizes:
+                if resizing.check_shapes(job.body, job.from_key, job.to_body, job.to_key, job.match) is not None:
+                    raise ResizeError("Pick the sizes to resize to in Magic Fit's Resize panel")
+                sizes = [None]
+        else:
+            sizes = self._sizes(sizes)
+        self.sizes = list(sizes)
+        meshes = [obj for obj in _meshes(target) if obj not in (job.body, job.to_body)]
+        body_values = [sizing.size_values(job.sized, size.values) if size is not None else {} for size in sizes]
+        names = {name for size in sizes if size is not None for name in size.values}
+        changed = {name for values in body_values for name in values}
+        # Meshes whose keys follow the sizes (body parts) aren't resized.
+        self.parts = [obj for obj in meshes if names and sizing.follows(obj, names, changed)]
+        self.clothing = [obj for obj in meshes if obj not in self.parts]
+        with _object_mode():
+            self._work = _Sizes(self.clothing, job)
+
+    def _sizes(self, sizes):
+        """``sizes`` given as Size or as dicts of setting values, as Size."""
+        if all(isinstance(size, Size) for size in sizes):
+            return list(sizes)
+        settings, _problems = sizing.body_settings(self.job.sized)
+        now = {setting.name: setting.current for setting in settings}
+        given = [size if isinstance(size, Size) else sizing.apply_rules(settings, size, now) for size in sizes]
+        # Named like picked sizes: by what changes, and by the settings given several values.
+        plain = [size for size in given if not isinstance(size, Size)]
+        varied = {name for name in {name for size in plain for name in size}
+                  if len({size.get(name, now.get(name)) for size in plain}) > 1}
+        return [size if isinstance(size, Size) else Size(
+            sizing.size_label(settings, size, now, varied) or BASE_NAME, size, sizing.is_now(size, now))
+            for size in given]
+
+    def resize(self, size, progress=None):
+        """Resize the clothing to ``size``, one of ``sizes`` (or another Size, or a dict of setting values, named by
+        itself), into its shape key per size, kept and reused as resize_collection says. ``progress(fraction)`` is
+        called as it goes. Returns a SizedMeshes. Raises ResizeError."""
+        if size is not None and not isinstance(size, Size):
+            size = self._sizes([size])[0]
+        label = size.name if size is not None else _to_label(self.job)
+        with _object_mode():
+            run, notes = self._work.size(size, label, progress=progress)
+        values = sizing.size_values(self.job.sized, size.values) if size is not None else {}
+        part_values = {}
+        for part in self.parts:
+            changes = sizing.size_values(part, size.values, values) if size is not None else {}
+            if changes:
+                part_values[part] = changes
+        return SizedMeshes(label, size, dict(run.keys), part_values, notes, dict(run.own))
+
+
 def resize_collection(target, sizes=None, *, scene=None, body=None, progress=None):
     """Resize the clothing in ``target`` to ``sizes`` for an export, as the Resize panel of ``scene`` (the current
     scene when None) is set: from its From Body (or ``body``, a Mannequin-like mesh), with its options.
@@ -403,53 +520,24 @@ def resize_collection(target, sizes=None, *, scene=None, body=None, progress=Non
     Sizes, or the panel's To shape when it picks no sizes. Meshes whose shape keys follow the sizes' settings (body
     parts) aren't resized, nor are the bodies themselves; the others get a shape key per size, kept and reused (see
     resize_meshes). Returns a list of SizedMeshes, one per size; show one with its ``shown()``. Raises ResizeError.
+    To resize one size at a time, use a Resizer.
     """
-    scene = scene if scene is not None else bpy.context.scene
-    brush = scene.body_fit_brush
-    job = Job(brush, body)
-    if job.body is None:
-        raise ResizeError("Pick the From Body in Magic Fit's Resize panel")
-    problem = resizing.check_shapes(job.body, job.from_key, job.to_body, job.to_key, job.match, True)
-    if problem is not None:
-        raise ResizeError(problem)
-    if sizes is None:
-        sizes = picked_sizes(scene) if body is None or body == brush.resize_from_object else []
-        if not sizes:
-            if resizing.check_shapes(job.body, job.from_key, job.to_body, job.to_key, job.match) is not None:
-                raise ResizeError("Pick the sizes to resize to in Magic Fit's Resize panel")
-            sizes = [None]
-    else:
-        settings, _problems = sizing.body_settings(job.sized)
-        now = {setting.name: setting.current for setting in settings}
-        given = [size if isinstance(size, Size) else sizing.apply_rules(settings, size, now) for size in sizes]
-        # Named like picked sizes: by what changes, and by the settings given several values.
-        plain = [size for size in given if not isinstance(size, Size)]
-        varied = {name for name in {name for size in plain for name in size}
-                  if len({size.get(name, now.get(name)) for size in plain}) > 1}
-        sizes = [size if isinstance(size, Size) else Size(
-            sizing.size_label(settings, size, now, varied) or BASE_NAME, size, sizing.is_now(size, now))
-            for size in given]
-    meshes = [obj for obj in _meshes(target) if obj not in (job.body, job.to_body)]
-    body_values = [sizing.size_values(job.sized, size.values) if size is not None else {} for size in sizes]
-    names = {name for size in sizes if size is not None for name in size.values}
-    changed = {name for values in body_values for name in values}
-    parts = [obj for obj in meshes if names and sizing.follows(obj, names, changed)]
-    clothing = [obj for obj in meshes if obj not in parts]
-    labels = [size.name if size is not None else _to_label(job) for size in sizes]
     started = time.perf_counter()
     with _object_mode():
-        runs, notes = resize_meshes(clothing, sizes, job, labels, progress=progress)
-    results = []
-    for size, label, values, run in zip(sizes, labels, body_values, runs):
-        part_values = {}
-        for part in parts:
-            changes = sizing.size_values(part, size.values, values) if size is not None else {}
-            if changes:
-                part_values[part] = changes
-        results.append(SizedMeshes(label, size, dict(run.keys), part_values, list(notes), dict(run.own)))
+        resizer = Resizer(target, sizes, scene=scene, body=body)
+        results, notes = [], []
+        for index, size in enumerate(resizer.sizes):
+            def step(done, index=index):
+                if progress is not None:
+                    progress((index + done) / len(resizer.sizes))
+            sized = resizer.resize(size, progress=step)
+            notes.extend(sized.notes)
+            results.append(sized)
+    for sized in results:
+        sized.notes = list(notes)
     if results:
         results[0].notes.append("Resized {:d} mesh(es) to {:d} size(s) in {:.1f} s".format(
-            len(clothing), len(sizes), time.perf_counter() - started))
+            len(resizer.clothing), len(results), time.perf_counter() - started))
     return results
 
 
