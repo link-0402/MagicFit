@@ -549,6 +549,37 @@ def test_bridge_creases():
               1000 * error.max(), 1000 * np.median(error)))
 
 
+def test_shared():
+    """Changes from one source shape to several targets, sharing what they can (resizing.Shared), move clothing as
+    each does alone; with more first-step pairs than kept, too."""
+    co, _over_large, sheet_edges, _sheet_tris, large, small, tris = small_bridge()
+    resize.build()
+    suit = bpy.data.objects["Suit"]
+    clothing = ((resize.positions(suit), resize.edges(suit)), (co, sheet_edges))
+    rigid = np.full(len(co), -1, dtype=np.int64)
+    rigid[:40] = 0
+    targets = (large, small + 0.5 * (large - small), large)
+    for limit in (resizing.CACHED_PAIRS, 1000):
+        saved, resizing.CACHED_PAIRS = resizing.CACHED_PAIRS, limit
+        try:
+            shared = resizing.Shared()
+            worst, entries = 0.0, []
+            for target in targets:
+                for bridge in (0.0, resizing.BRIDGE_RADIUS):
+                    for (points, edges), labels in zip(clothing, (None, rigid)):
+                        alone = resizing.ShapeChange(small, target, tris, bridge=bridge).apply(
+                            points, rigid=labels, edges=edges)
+                        together = resizing.ShapeChange(small, target, tris, bridge=bridge, shared=shared).apply(
+                            points, rigid=labels, edges=edges)
+                        worst = max(worst, float(np.abs(together - alone).max()))
+                entries.append(len(shared._entries))
+        finally:
+            resizing.CACHED_PAIRS = saved
+        check(worst < 1e-6 and entries[0] == entries[-1] == 6,
+              "shared: as each change alone ({:.2g} m off, {!s} entries{:s})".format(
+                  worst, entries, ", pairs over the limit" if limit < saved else ""))
+
+
 def test_steps_and_limits():
     shape_change, large, small, _quads = change()
     largest = float(np.linalg.norm(small - large, axis=1).max())
@@ -1243,6 +1274,45 @@ def test_resize_collection_as_is():
     with medium.shown():
         check(np.allclose(evaluated(), resize.positions(suit, medium.keys[suit]), atol=1e-6),
               "as is: the other size still shows its key")
+
+
+def test_resizer():
+    """A size at a time (api.Resizer) makes the keys resize_collection makes."""
+    body, garments = resize.devkit_body()
+    settings = reset_settings()
+    settings.resize_from_object = body
+    settings.resize_use_sizes = True
+    bpy.ops.magic_fit.resize_pick(setting="chest_size", option=1)
+    bpy.ops.magic_fit.resize_pick(setting="chest_size", option=2, extend=True)
+    bpy.ops.magic_fit.resize_pick(setting="rue", option=1)
+    part = resize.devkit_part(body)
+    meshes = list(garments.values()) + [part]
+    resizer = api.Resizer(meshes)
+    names = [size.name for size in resizer.sizes]
+    check(names == [size.name for size in api.picked_sizes()] == ["Medium Rue", "Small Rue"]
+          and resizer.parts == [part] and set(resizer.clothing) == set(garments.values()),
+          "resizer: the sizes picked, the body part left out")
+    progress = []
+    one = [resizer.resize(size, progress=progress.append) for size in resizer.sizes]
+    check(progress and progress[-1] == 1.0 and all(0.0 <= done <= 1.0 for done in progress), "resizer: progress")
+
+    def made(results):
+        return {(sized.name, obj.name): resize.positions(obj, name)
+                for sized in results for obj, name in sized.keys.items() if name is not None}
+    first = made(one)
+    for obj in garments.values():
+        for name in resizing.resized_keys(obj):
+            obj.shape_key_remove(obj.data.shape_keys.key_blocks[name])
+        del obj.data.shape_keys[resizing.RECORD]
+    together = api.resize_collection(meshes)
+    again = made(together)
+    check(set(first) == set(again) and len(first) == 2 * len(garments)
+          and max(float(np.abs(first[key] - again[key]).max()) for key in first) < 1e-6
+          and [sized.parts == other.parts for sized, other in zip(one, together)] == [True, True],
+          "resizer: the keys and body part values resize_collection gives")
+    small = resizer.resize({"chest_size": 2, "rue": 1})
+    check(small.name == "Small Rue" and small.keys == together[1].keys, "resizer: a size given as values, kept")
+    check(api.VERSION >= 2, "resizer: VERSION 2 has it")
 
 
 def test_registered():

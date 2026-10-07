@@ -66,6 +66,8 @@ MAX_LEVELS = 12
 BINS_PER_OCTAVE = 4
 # Points handled at once (bounds the memory for their pairs of samples).
 CHUNK = 4096
+# Pairs of points and samples kept for the first step of each size, at most (12 bytes each).
+CACHED_PAIRS = 20_000_000
 
 # Keep Close: afterwards, points that lay this close to the source shape (tight clothing)...
 KEEP_CLOSE_DISTANCE = 0.005
@@ -120,10 +122,7 @@ def _vertex_areas(co, tris):
     """A third of the area of each triangle around each vertex: the surface a vertex stands for."""
     a, b, c = co[tris[:, 0]], co[tris[:, 1]], co[tris[:, 2]]
     area = np.linalg.norm(np.cross(b - a, c - a), axis=1) / 6.0
-    result = np.zeros(len(co))
-    for k in range(3):
-        np.add.at(result, tris[:, k], area)
-    return result
+    return np.bincount(tris.T.reshape(-1), weights=np.tile(area, 3), minlength=len(co))
 
 
 def _cells(co, size):
@@ -146,21 +145,47 @@ class _Grid:
     """Samples sorted into cubes half as wide as ``reach``, to find every sample within ``reach`` of a point."""
 
     def __init__(self, co, reach):
+        self.co = co
         self.size = 0.5 * reach
         keys = _cell_keys(_cells(co, self.size))
         self.order = np.argsort(keys, kind='stable')
         self.keys, self.starts, self.counts = np.unique(keys[self.order], return_index=True, return_counts=True)
 
-    def pairs(self, points):
-        """(point index, sample index) for every sample in the cubes around each point."""
+    def pairs(self, points, reach):
+        """(point index, sample index) for the samples in the cubes around each point, by point, then cube,
+        leaving out those farther than ``reach`` (per point) from every point of the point's own cube."""
+        if not len(points):
+            return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64)
         cells = _cells(points, self.size)
-        query = _cell_keys((cells[:, None, :] + _STENCIL[None, :, :]).reshape(-1, 3))
+        # Points in one cube look in the same cubes around it: look once per cube.
+        _keys, cube = np.unique(_cell_keys(cells), return_inverse=True)
+        cube = cube.reshape(-1)
+        cubes = int(cube.max()) + 1
+        first = np.zeros(cubes, dtype=np.int64)
+        first[cube[::-1]] = np.arange(len(cube))[::-1]
+        own = cells[first]
+        query = _cell_keys((own[:, None, :] + _STENCIL[None, :, :]).reshape(-1, 3))
         slot = np.minimum(np.searchsorted(self.keys, query), len(self.keys) - 1)
         found = np.flatnonzero(self.keys[slot] == query)
         counts = self.counts[slot[found]]
         run = np.repeat(np.arange(len(found)), counts)
         offsets = np.arange(len(run)) - (np.cumsum(counts) - counts)[run]
-        return found[run] // len(_STENCIL), self.order[self.starts[slot[found]][run] + offsets]
+        holder = found[run] // len(_STENCIL)
+        sample = self.order[self.starts[slot[found]][run] + offsets]
+        # Samples out of reach of the whole cube (by a margin over single precision's rounding) weigh nothing.
+        farthest = np.zeros(cubes)
+        np.maximum.at(farthest, cube, reach)
+        low = own[holder] * self.size
+        outside = np.maximum(np.maximum(low - self.co[sample], self.co[sample] - (low + self.size)), 0.0)
+        limit = farthest[holder] * 1.001 + 1e-6
+        near = np.einsum("ij,ij->i", outside, outside) <= limit * limit
+        holder, sample = holder[near], sample[near]
+        # Then each point takes its cube's samples.
+        start = np.searchsorted(holder, np.arange(cubes + 1))
+        counts = (start[1:] - start[:-1])[cube]
+        run = np.repeat(np.arange(len(cube)), counts)
+        offsets = np.arange(len(run)) - (np.cumsum(counts) - counts)[run]
+        return run, sample[start[:-1][cube][run] + offsets]
 
 
 class _Levels:
@@ -178,19 +203,49 @@ class _Levels:
             if len(_keys) <= 1:
                 break
 
-    def samples(self, level, co, area, displacement):
-        """Positions, areas and displacements of the samples at ``level`` for the body at ``co``."""
-        if level == 0:
-            return co, area, displacement
+    def _mean(self, level, area):
         members = self.members[min(level, len(self.members) - 1)]
         count = int(members.max()) + 1
         total = np.bincount(members, weights=area, minlength=count)
-        keep = total > 0.0
         weight = area / np.maximum(total[members], 1e-300)
 
         def mean(values):
             return np.stack([np.bincount(members, weights=weight * values[:, k], minlength=count) for k in range(3)], 1)
+        return mean, total, total > 0.0
+
+    def samples(self, level, co, area, displacement):
+        """Positions, areas and displacements of the samples at ``level`` for the body at ``co``."""
+        if level == 0:
+            return co, area, displacement
+        mean, total, keep = self._mean(level, area)
         return mean(co)[keep], total[keep], mean(displacement)[keep]
+
+    def moves(self, level, area, displacement):
+        """The displacements alone of `samples`."""
+        if level == 0:
+            return displacement
+        mean, _total, keep = self._mean(level, area)
+        return mean(displacement)[keep]
+
+
+def _weights(points, reach, co, area):
+    """The samples at ``co`` (areas ``area``) within ``reach`` of each of ``points``, weighted by their area
+    and (1 - (distance / reach)^2)^3. Yields, per chunk of the points, (its first point, its size, point
+    in the chunk, sample, weight) for every pair weighing anything, by point."""
+    grid = _Grid(co, float(reach.max()))
+    # Pairs are worked out in single precision, relative to each point, which is plenty for weights.
+    co = co.astype(np.float32)
+    area = area.astype(np.float32)
+    inverse = (1.0 / reach ** 2).astype(np.float32)
+    for first in range(0, len(points), CHUNK):
+        chunk = slice(first, first + CHUNK)
+        p = points[chunk].astype(np.float32)
+        owner, sample = grid.pairs(points[chunk], reach[chunk])
+        delta = co[sample] - p[owner]
+        falloff = np.maximum(1.0 - np.einsum("ij,ij->i", delta, delta) * inverse[chunk][owner], 0.0)
+        near = np.flatnonzero(falloff > 0.0)
+        owner, sample, falloff = owner[near], sample[near], falloff[near]
+        yield first, len(p), owner, sample, area[sample] * falloff * falloff * falloff
 
 
 def _average(points, reach, samples):
@@ -200,25 +255,98 @@ def _average(points, reach, samples):
     result = np.zeros_like(points)
     if not len(co):
         return result
-    grid = _Grid(co, float(reach.max()))
-    # Pairs are worked out in single precision, relative to each point, which is plenty for weights.
-    co = co.astype(np.float32)
-    area = area.astype(np.float32)
     displacement = displacement.astype(np.float32)
-    inverse = (1.0 / reach ** 2).astype(np.float32)
-    for first in range(0, len(points), CHUNK):
-        chunk = slice(first, first + CHUNK)
-        p = points[chunk].astype(np.float32)
-        owner, sample = grid.pairs(points[chunk])
-        delta = co[sample] - p[owner]
-        falloff = np.maximum(1.0 - np.einsum("ij,ij->i", delta, delta) * inverse[chunk][owner], 0.0)
-        weight = area[sample] * falloff * falloff * falloff
-        total = np.bincount(owner, weights=weight, minlength=len(p))
+    for first, size, owner, sample, weight in _weights(points, reach, co, area):
+        chunk = slice(first, first + size)
+        total = np.bincount(owner, weights=weight, minlength=size)
         moved = displacement[sample]
         for k in range(3):
-            result[chunk, k] = np.bincount(owner, weights=weight * moved[:, k], minlength=len(p))
+            result[chunk, k] = np.bincount(owner, weights=weight * moved[:, k], minlength=size)
         result[chunk] /= np.maximum(total, 1e-300)[:, None]
     return result
+
+
+class _FirstStep:
+    """Which samples each point averages in the first step of a change (see `ShapeChange._step`), and how
+    much each weighs. That step starts from the From shape, so these are the same whatever the To shape:
+    `Shared` keeps them for every size, and only the samples' displacements are worked out again.
+
+    ``points`` are the points, ``chosen`` those to work out (indices), ``distance`` their distances from
+    the body, which has vertices ``co`` and areas ``area`` (those used) clustered by ``levels``. ``full``
+    is False when the pairs would take more than CACHED_PAIRS: the step is then worked out as usual."""
+
+    def __init__(self, points, chosen, distance, radius, co, area, levels):
+        self.count = len(points)
+        self.levels = []
+        offsets, samples, size, kept = {}, {}, 0, 0
+        rows, cols, weights = [], [], []
+        reach, octave, groups = _reaches(distance, radius)
+        self.full = True
+        for level, which, share in _shares(groups, octave):
+            if level not in offsets:
+                # (The displacements, here the positions again, don't matter yet.)
+                samples[level] = levels.samples(level, co, area, co)
+                offsets[level] = size
+                size += len(samples[level][0])
+                self.levels.append(level)
+            level_co, level_area, _ = samples[level]
+            if not len(level_co):
+                continue
+            for first, count, owner, sample, weight in _weights(points[chosen[which]], reach[which], level_co,
+                                                                level_area):
+                total = np.bincount(owner, weights=weight, minlength=count)
+                rows.append(chosen[which[first + owner]].astype(np.int32))
+                cols.append((offsets[level] + sample).astype(np.int32))
+                weights.append((share[first + owner] * weight / np.maximum(total, 1e-300)[owner]).astype(np.float32))
+                kept += len(owner)
+                if kept > CACHED_PAIRS:
+                    self.full = False
+                    return
+        rows = np.concatenate(rows) if rows else np.zeros(0, dtype=np.int32)
+        order = np.argsort(rows, kind='stable')
+        self.rows = rows[order]
+        self.cols = np.concatenate(cols)[order] if cols else np.zeros(0, dtype=np.int32)
+        self.weights = np.concatenate(weights)[order] if weights else np.zeros(0, dtype=np.float32)
+        self.starts = np.concatenate(([0], np.cumsum(np.bincount(self.rows, minlength=self.count))))
+
+    def moves(self, which, area, displacement, levels):
+        """How the points ``which`` (indices) move in the first step, the body's vertices (those used, with
+        areas ``area``) moving by ``displacement``."""
+        values = np.concatenate([levels.moves(level, area, displacement) for level in self.levels]) \
+            if self.levels else np.zeros((0, 3))
+        if len(which) == self.count:
+            rows, cols, weights = self.rows, self.cols, self.weights
+        else:
+            start = self.starts[which]
+            counts = self.starts[which + 1] - start
+            rows = np.repeat(np.arange(len(which)), counts)
+            entries = np.arange(len(rows)) - (np.cumsum(counts) - counts)[rows] + start[rows]
+            cols, weights = self.cols[entries], self.weights[entries]
+        moved = values[cols]
+        return np.stack([np.bincount(rows, weights=weights * moved[:, k], minlength=len(which))
+                         for k in range(3)], axis=1)
+
+
+def _reaches(distance, radius):
+    """For points at ``distance`` from the body: how far their averages reach, their octave (doublings of the
+    width over ``radius``) and their group by width (see BINS_PER_OCTAVE)."""
+    width = np.maximum(radius, SPREAD * distance)
+    reach = np.sqrt(distance * distance + (KERNEL_REACH * width) ** 2)
+    octave = np.log2(width / radius)
+    return reach, octave, np.floor(octave * BINS_PER_OCTAVE).astype(np.int64)
+
+
+def _shares(groups, octave):
+    """(level, points, their shares) for the levels of samples that points in ``groups`` average over: one
+    level, or two neighbouring ones in between, so the average changes smoothly with the width."""
+    for group in np.unique(groups):
+        which = np.flatnonzero(groups == group)
+        low = int(group) // BINS_PER_OCTAVE
+        blend = octave[which] - low
+        for level, share in ((low, 1.0 - blend), (low + 1, blend)):
+            active = share > 0.0
+            if active.any():
+                yield level, which[active], share[active]
 
 
 def bridged(co, tris, radius):
@@ -242,9 +370,8 @@ def bridged(co, tris, radius):
     corners = weld[tris]
     a, b, c = (welded[corners[:, k]] for k in range(3))
     face = np.cross(b - a, c - a)
-    normals = np.zeros((count, 3))
-    for k in range(3):
-        np.add.at(normals, corners[:, k], face)
+    normals = np.stack([np.bincount(corners.T.reshape(-1), weights=np.tile(face[:, k], 3), minlength=count)
+                        for k in range(3)], axis=1)
     center = welded.mean(axis=0)
     # Normals point away from the enclosed volume, even when the mesh is inside out.
     if np.einsum("ij,ij->", a - center, np.cross(b - center, c - center)) < 0.0:
@@ -274,18 +401,76 @@ def bridged(co, tris, radius):
         first, second = pairs[:, 0], pairs[:, 1]
         edge = float(np.median(np.linalg.norm(welded[first] - welded[second], axis=1)))
         passes = min(BRIDGE_PASSES, int(math.ceil(2.0 * (BRIDGE_SMOOTHING / edge) ** 2))) if edge > 0.0 else 0
-        degree = np.maximum(np.bincount(first, minlength=count) + np.bincount(second, minlength=count), 1)[:, None]
+        # Each edge both ways, and the lifts by axis (rows), for quick sums over neighbours.
+        into, out_of = np.concatenate((first, second)), np.concatenate((second, first))
+        degree = np.maximum(np.bincount(into, minlength=count), 1)
+        lift = np.ascontiguousarray(lift.T)
+        total = np.empty((3, count))
         for _ in range(passes):
-            average = np.stack([
-                np.bincount(first, weights=lift[second, k], minlength=count)
-                + np.bincount(second, weights=lift[first, k], minlength=count)
-                for k in range(3)
-            ], axis=1) / degree
-            lift = 0.5 * (lift + average)
+            for k in range(3):
+                total[k] = np.bincount(into, weights=lift[k][out_of], minlength=count)
+            lift = 0.5 * (lift + total / degree)
+        lift = lift.T.copy()
     unfaced = np.ones(count, dtype=bool)
     unfaced[faced] = False
     lift[unfaced] = 0.0
     return co + lift[weld]
+
+
+class Shared:
+    """What resizes from one From shape share, whatever their To shapes, kept for a batch of them (sizes):
+    pass one to each of their ShapeChanges. That's the From shape's clusters and crease-free copy, and for
+    the same clothing, its distances from the body, how it blends the two moves (Bridge Creases), the
+    first step's averages and Keep Close's measurements. Each is found by the exact values it's made
+    from, so changed inputs just make another."""
+
+    def __init__(self):
+        self._entries = {}
+
+    def get(self, key, make):
+        """What's kept under ``key``, made by ``make()`` the first time."""
+        entry = self._entries.get(key)
+        if entry is None:
+            entry = self._entries[key] = make()
+        return entry
+
+
+def _shared(shared, key, make):
+    return make() if shared is None else shared.get(key, make)
+
+
+def _digest(*parts):
+    """A key for ``parts``: arrays by their exact values, anything else by its repr."""
+    digest = hashlib.blake2b(digest_size=16)
+    for part in parts:
+        if isinstance(part, np.ndarray):
+            digest.update(repr((part.dtype.str, part.shape)).encode())
+            digest.update(np.ascontiguousarray(part).tobytes())
+        else:
+            digest.update(repr(part).encode())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+class _FromShape:
+    """What a ShapeChange takes from its source shape alone (see `Shared`)."""
+
+    def __init__(self, source, tris, radius, bridge):
+        area = _vertex_areas(source, tris) if len(tris) else np.zeros(len(source))
+        if area.sum() <= 0.0:
+            raise ResizeError("The body has no faces")
+        edges = np.linalg.norm(source[tris] - source[np.roll(tris, 1, axis=1)], axis=2)
+        self.radius = max(float(radius), MIN_RADIUS_EDGES * float(np.median(edges)), 1e-6)
+        # Vertices of no face (loose ones) stand for no surface and are left out.
+        self.used = area > 0.0
+        self.area = area[self.used]
+        self.levels = _Levels(source[self.used], self.radius)
+        self.tree_tris = tris.tolist()
+        self.bridged = None
+        if bridge > 0.0:
+            bridged_from = bridged(source, tris, bridge)
+            self.bridged = (bridged_from, _vertex_areas(bridged_from, tris)[self.used],
+                            _Levels(bridged_from[self.used], self.radius))
 
 
 class ShapeChange:
@@ -301,33 +486,35 @@ class ShapeChange:
     ``to_body`` (positions and triangles) is the To body itself when ``target`` was matched onto it by
     shape, and ``known`` which vertices of ``target`` lie on it (see `match_by_shape`): Keep Close then
     brings clothing back to its distance from the To body itself, over those vertices only.
+
+    ``shared`` (a Shared) keeps what changes from the same source shape share, for several target shapes.
     """
 
-    def __init__(self, source, target, tris, radius=DEFAULT_RADIUS, bridge=0.0, to_body=None, known=None):
+    def __init__(self, source, target, tris, radius=DEFAULT_RADIUS, bridge=0.0, to_body=None, known=None,
+                 shared=None):
         self.source = np.asarray(source, dtype=np.float64).reshape(-1, 3)
         self.target = np.asarray(target, dtype=np.float64).reshape(-1, 3)
         self.tris = np.asarray(tris, dtype=np.int64).reshape(-1, 3)
         self.to_body, self.known = to_body, known
         if self.source.shape != self.target.shape:
             raise ResizeError("The two body shapes have different vertex counts")
-        area = _vertex_areas(self.source, self.tris) if len(self.tris) else np.zeros(len(self.source))
-        if area.sum() <= 0.0:
-            raise ResizeError("The body has no faces")
-        edges = np.linalg.norm(self.source[self.tris] - self.source[np.roll(self.tris, 1, axis=1)], axis=2)
-        self.radius = max(float(radius), MIN_RADIUS_EDGES * float(np.median(edges)), 1e-6)
-        # Vertices of no face (loose ones) stand for no surface and are left out.
-        self._used = area > 0.0
-        self._levels = _Levels(self.source[self._used], self.radius)
-        self._tree_tris = self.tris.tolist()
+        self.bridge = max(float(bridge), 0.0)
+        self._shared = shared
+        self._key = _digest(self.source, self.tris, float(radius), self.bridge)
+        self._from = _shared(shared, ("from", self._key),
+                             lambda: _FromShape(self.source, self.tris, float(radius), self.bridge))
+        self.radius = self._from.radius
+        self._used = self._from.used
+        self._levels = self._from.levels
+        self._tree_tris = self._from.tree_tris
         moves = np.linalg.norm(self.target - self.source, axis=1)[self._used]
         # Bridge Creases: crease-free versions of both shapes (and their clusters), for clothing that
         # doesn't lie on the skin.
-        self.bridge = max(float(bridge), 0.0)
         self._bridged = None
         if self.bridge > 0.0:
-            bridged_from = bridged(self.source, self.tris, self.bridge)
+            bridged_from, _area, levels = self._from.bridged
             bridged_to = bridged(self.target, self.tris, self.bridge)
-            self._bridged = (bridged_from, bridged_to, _Levels(bridged_from[self._used], self.radius))
+            self._bridged = (bridged_from, bridged_to, levels)
             moves = np.maximum(moves, np.linalg.norm(bridged_to - bridged_from, axis=1)[self._used])
             # Where both shapes of a vertex are unlifted the two moves agree; they differ only within reach
             # of the lifted ones, in either shape.
@@ -337,37 +524,39 @@ class ShapeChange:
         self.largest = float(moves.max()) if len(moves) else 0.0
         self.steps = min(MAX_STEPS, max(1, math.ceil(self.largest / (STEP_RADII * self.radius))))
 
-    def _step(self, points, source, target, levels, step):
-        """How ``points`` move in step ``step`` of the change from shape ``source`` to ``target``,
-        whose vertices ``levels`` clusters."""
+    def _path(self, crease_free):
+        """The source and target shapes clothing moves between, their clusters and the source's areas (of
+        the vertices used): the body's, or with ``crease_free``, its crease-free versions'."""
+        if crease_free:
+            bridged_from, bridged_to, levels = self._bridged
+            return bridged_from, bridged_to, levels, self._from.bridged[1]
+        return self.source, self.target, self._levels, self._from.area
+
+    def _step(self, points, which, crease_free, step, clothing):
+        """How ``points[which]`` move in step ``step`` of the change, between the body's shapes or their
+        crease-free versions (``crease_free``). ``clothing`` (a _Clothing of ``points`` as they were before
+        the first step) keeps that step's averages, for other changes sharing it."""
+        source, target, levels, area = self._path(crease_free)
         before = source + (target - source) * (step / self.steps)
         after = source + (target - source) * ((step + 1) / self.steps)
         used = self._used
-        distance = _distances(points, before, self._tree_tris)
-        width = np.maximum(self.radius, SPREAD * distance)
-        reach = np.sqrt(distance * distance + (KERNEL_REACH * width) ** 2)
-        # A point averages over one level of samples, or two neighbouring ones in between, so the
-        # average changes smoothly with the width.
-        octave = np.log2(width / self.radius)
-        groups = np.floor(octave * BINS_PER_OCTAVE).astype(np.int64)
-
-        co = before[used]
-        area = _vertex_areas(before, self.tris)[used]
         displacement = (after - before)[used]
+        if step == 0 and self._shared is not None:
+            first = clothing.first_step(self, crease_free)
+            if first.full:
+                return first.moves(which, area, displacement, levels)
+        else:
+            area = _vertex_areas(before, self.tris)[used]
+        points = points[which]
+        distance = _distances(points, before, self._tree_tris)
+        reach, octave, groups = _reaches(distance, self.radius)
+        co = before[used]
         samples = {}
         moved = np.zeros_like(points)
-        for group in np.unique(groups):
-            which = np.flatnonzero(groups == group)
-            low = int(group) // BINS_PER_OCTAVE
-            blend = octave[which] - low
-            for level, share in ((low, 1.0 - blend), (low + 1, blend)):
-                active = share > 0.0
-                if not active.any():
-                    continue
-                if level not in samples:
-                    samples[level] = levels.samples(level, co, area, displacement)
-                chosen = which[active]
-                moved[chosen] += share[active, None] * _average(points[chosen], reach[chosen], samples[level])
+        for level, chosen, share in _shares(groups, octave):
+            if level not in samples:
+                samples[level] = levels.samples(level, co, area, displacement)
+            moved[chosen] += share[:, None] * _average(points[chosen], reach[chosen], samples[level])
         return moved
 
     def apply(self, points, progress=None, rigid=None, edges=None):
@@ -381,18 +570,16 @@ class ShapeChange:
         start = np.array(points, dtype=np.float64).reshape(-1, 3)
         if not len(start) or self.largest <= 0.0:
             return start
-        # Points at the same spot (split seams, touching parts) go the same way: work each out once.
-        points, copies = np.unique(start, axis=0, return_inverse=True)
-        copies = copies.reshape(-1)
+        clothing = _shared(self._shared, ("clothing", self._key, _digest(start)), lambda: _Clothing(self, start))
+        points, copies = clothing.points, clothing.copies
         first = points
         rounds = KEEP_ROUNDS if edges is not None else 0
         total = self.steps + rounds
-        tris = self.tris
         # Clothing on the skin follows it; farther out it moves with the crease-free shapes.
         free = None
         if self._bridged is not None:
-            distance = _distances(points, self.source, self._tree_tris)
-            free = _blend_shares(points, _smoothstep(BRIDGE_HUG, BRIDGE_HUG + BRIDGE_BLEND, distance))
+            distance = clothing.distance
+            free = clothing.free.copy()
             # Points whose averages never reach a lifted vertex move alike either way: work out one move.
             spanning = np.flatnonzero(free > 0.0)
             if len(spanning):
@@ -410,18 +597,15 @@ class ShapeChange:
                 free[spanning[gap > reach + self.largest]] = 0.0
         for step in range(self.steps):
             if free is None:
-                moved = self._step(points, self.source, self.target, self._levels, step)
+                moved = self._step(points, np.arange(len(points)), False, step, clothing)
             else:
                 moved = np.zeros_like(points)
                 on_skin = np.flatnonzero(free < 1.0)
                 if len(on_skin):
-                    moved[on_skin] = (1.0 - free[on_skin, None]) * self._step(
-                        points[on_skin], self.source, self.target, self._levels, step)
+                    moved[on_skin] = (1.0 - free[on_skin, None]) * self._step(points, on_skin, False, step, clothing)
                 spanning = np.flatnonzero(free > 0.0)
                 if len(spanning):
-                    bridged_from, bridged_to, levels = self._bridged
-                    moved[spanning] += free[spanning, None] * self._step(
-                        points[spanning], bridged_from, bridged_to, levels, step)
+                    moved[spanning] += free[spanning, None] * self._step(points, spanning, True, step, clothing)
             points = points + moved
             if progress is not None:
                 progress((step + 1) / total)
@@ -434,13 +618,54 @@ class ShapeChange:
                 if progress is not None:
                     progress((self.steps + done * rounds) / total)
             to_co, to_tris = self.to_body if self.to_body is not None else (self.target, None)
-            points = keep_close(first, points, copies[np.asarray(edges, dtype=np.int64).reshape(-1, 2)],
-                                self.source, to_co, tris, anchors=loose, progress=keep_progress,
-                                target_tris=to_tris, known=self.known)
+            pairs = copies[np.asarray(edges, dtype=np.int64).reshape(-1, 2)]
+            points = keep_close(first, points, pairs, self.source, to_co, self.tris, anchors=loose,
+                                progress=keep_progress, target_tris=to_tris, known=self.known,
+                                measured=clothing.keep_close(self, pairs, loose))
         result = points[copies]
         if rigid is not None:
             keep_rigid(start, result, np.asarray(rigid))
         return result
+
+
+class _Clothing:
+    """What ShapeChange.apply works out for clothing at ``start`` on the source shape of ``change``, the same
+    whatever the target shape (see `Shared`)."""
+
+    def __init__(self, change, start):
+        # Points at the same spot (split seams, touching parts) go the same way: work each out once.
+        self.points, copies = np.unique(start, axis=0, return_inverse=True)
+        self.copies = copies.reshape(-1)
+        self.distance = self.free = None
+        if change.bridge > 0.0:
+            self.distance = _distances(self.points, change.source, change._tree_tris)
+            self.free = _blend_shares(self.points, _smoothstep(BRIDGE_HUG, BRIDGE_HUG + BRIDGE_BLEND, self.distance))
+        self._first = {}
+        self._kept = {}
+
+    def first_step(self, change, crease_free):
+        """The first step's averages (a _FirstStep) of the points that may move with the body's shapes (all
+        of them), or with ``crease_free``, with their crease-free versions (those blending towards them)."""
+        if crease_free not in self._first:
+            source, _target, levels, area = change._path(crease_free)
+            if crease_free:
+                chosen = np.flatnonzero(self.free > 0.0)
+                distance = _distances(self.points[chosen], source, change._tree_tris)
+            else:
+                chosen = np.arange(len(self.points))
+                distance = self.distance if self.distance is not None else \
+                    _distances(self.points, source, change._tree_tris)
+            self._first[crease_free] = _FirstStep(self.points, chosen, distance, change.radius,
+                                                  source[change._used], area, levels)
+        return self._first[crease_free]
+
+    def keep_close(self, change, edges, anchors):
+        """Keep Close's measurements (a _KeepClose) of these points, joined by ``edges``, held where not in
+        ``anchors``."""
+        key = _digest(edges, anchors)
+        if key not in self._kept:
+            self._kept[key] = _KeepClose(self.points, edges, change.source, change.tris, anchors)
+        return self._kept[key]
 
 
 def _blend_shares(points, shares):
@@ -458,8 +683,43 @@ def _blend_shares(points, shares):
     return np.where(shares < 0.01, 0.0, np.where(shares > 0.99, 1.0, shares))
 
 
+def _surface(co, tris, like=None):
+    from .fitting import BodySurface
+    return BodySurface(co, tris, BVHTree.FromPolygons(co.tolist(), tris.tolist(), all_triangles=True), like)
+
+
+class _KeepClose:
+    """What Keep Close measures of clothing on the source shape, the same whatever the target shape (see
+    `keep_close` for the arguments)."""
+
+    def __init__(self, start, edges, source, tris, anchors=None):
+        start = np.asarray(start, dtype=np.float64)
+        # Points at the same spot are one.
+        _spots, weld = np.unique(start, axis=0, return_inverse=True)
+        self.weld = weld.reshape(-1)
+        count = self.count = int(self.weld.max()) + 1 if len(self.weld) else 0
+        self.first = np.zeros(count, dtype=np.int64)
+        self.first[self.weld[::-1]] = np.arange(len(self.weld))[::-1]
+        source_surface = self.surface = _surface(np.asarray(source, dtype=np.float64),
+                                                 np.asarray(tris, dtype=np.int64))
+        near = source_surface.nearest(start[self.first])
+        self.height = near.distance
+        self.close = near.found & ~near.beyond & (np.abs(self.height) < KEEP_CLOSE_DISTANCE)
+        self.corners, self.source_weld, self.source_count = near.corners, source_surface._weld, len(source_surface.co)
+        if anchors is not None:
+            free = np.ones(count, dtype=bool)
+            np.logical_and.at(free, self.weld, np.asarray(anchors, dtype=bool))
+            self.close &= free
+        pairs = np.sort(self.weld[np.asarray(edges, dtype=np.int64).reshape(-1, 2)], axis=1)
+        pairs = np.unique(pairs[pairs[:, 0] != pairs[:, 1]], axis=0)
+        # Each edge both ways, for sums over each point's neighbours.
+        self.into = np.concatenate((pairs[:, 0], pairs[:, 1]))
+        self.out_of = np.concatenate((pairs[:, 1], pairs[:, 0]))
+        self.degree = np.maximum(np.bincount(self.into, minlength=count), 1)
+
+
 def keep_close(start, moved, edges, source, target, tris, anchors=None, progress=None, target_tris=None,
-               known=None):
+               known=None, measured=None):
     """Bring tight clothing back to its old distance from the body after a smooth move (Keep Close).
 
     ``start`` are the points fitted to the body's ``source`` shape, ``moved`` where the move took them
@@ -474,60 +734,52 @@ def keep_close(start, moved, edges, source, target, tris, anchors=None, progress
     to by shape), and with ``known`` (per vertex of ``source``), only points over source triangles most
     of whose corners are known count (where the matched shape lies on that mesh: over a heel left to
     follow the leg, Keep Close would press a boot onto the To body's flat foot).
+
+    ``measured`` is a _KeepClose of the same ``start``, ``edges``, ``source``, ``tris`` and ``anchors``, made
+    before for another target.
     """
-    from .fitting import BodySurface
-
-    def surface(co, faces=tris):
-        return BodySurface(co, faces, BVHTree.FromPolygons(co.tolist(), faces.tolist(), all_triangles=True))
-
-    start = np.asarray(start, dtype=np.float64)
-    moved = np.asarray(moved, dtype=np.float64)
-    # Points at the same spot are one.
-    _spots, weld = np.unique(start, axis=0, return_inverse=True)
-    weld = weld.reshape(-1)
-    count = int(weld.max()) + 1 if len(weld) else 0
-    first = np.zeros(count, dtype=np.int64)
-    first[weld[::-1]] = np.arange(len(weld))[::-1]
-    points = moved[first]
-    source_surface = surface(np.asarray(source, dtype=np.float64))
-    near = source_surface.nearest(start[first])
-    height = near.distance
-    close = near.found & ~near.beyond & (np.abs(height) < KEEP_CLOSE_DISTANCE)
+    tris = np.asarray(tris, dtype=np.int64)
+    kept = measured if measured is not None else _KeepClose(start, edges, source, tris, anchors)
+    count, into, out_of, degree = kept.count, kept.into, kept.out_of, kept.degree
+    points = np.asarray(moved, dtype=np.float64)[kept.first]
+    height, close = kept.height, kept.close
     if known is not None:
-        welded = np.zeros(len(source_surface.co), dtype=bool)
-        welded[source_surface._weld] = np.asarray(known, dtype=bool)
-        close &= welded[near.corners].sum(axis=1) >= 2
-    if anchors is not None:
-        free = np.ones(count, dtype=bool)
-        np.logical_and.at(free, weld, np.asarray(anchors, dtype=bool))
-        close &= free
-    pairs = np.sort(weld[np.asarray(edges, dtype=np.int64).reshape(-1, 2)], axis=1)
-    pairs = np.unique(pairs[pairs[:, 0] != pairs[:, 1]], axis=0)
-    a, b = pairs[:, 0], pairs[:, 1]
-    degree = np.maximum(np.bincount(a, minlength=count) + np.bincount(b, minlength=count), 1)[:, None]
-    body = surface(np.asarray(target, dtype=np.float64),
-                   tris if target_tris is None else np.asarray(target_tris, dtype=np.int64).reshape(-1, 3))
+        welded = np.zeros(kept.source_count, dtype=bool)
+        welded[kept.source_weld] = np.asarray(known, dtype=bool)
+        close = close & (welded[kept.corners].sum(axis=1) >= 2)
+    if target_tris is None:
+        # The source's triangles: what they decide is the source's, where the vertices weld alike.
+        body = _surface(np.asarray(target, dtype=np.float64), tris, like=kept.surface)
+    else:
+        body = _surface(np.asarray(target, dtype=np.float64), np.asarray(target_tris, dtype=np.int64).reshape(-1, 3))
     which = np.flatnonzero(close)
+    settled = False
     for done in range(KEEP_ROUNDS if len(which) else 0):
-        near = body.nearest(points[which])
-        ok = near.found & ~near.beyond
-        need = np.where(ok, height[which] - near.distance, 0.0)
-        need = np.where(need > 0.0, np.maximum(need - PUSH_SLACK, 0.0), np.minimum(need + PULL_SLACK, 0.0))
-        own = np.zeros((count, 3))
-        own[which] = need[:, None] * near.normal
-        held = np.zeros(count, dtype=bool)
-        held[which[ok]] = True
-        spread = own
-        for _ in range(KEEP_PASSES):
-            average = np.stack([
-                np.bincount(a, weights=spread[b, k], minlength=count) + np.bincount(b, weights=spread[a, k], minlength=count)
-                for k in range(3)
-            ], axis=1) / degree
-            spread = np.where(held[:, None], KEEP_SHARE * own + (1.0 - KEEP_SHARE) * average, KEEP_FADE * average)
-        points = points + spread
+        if not settled:
+            near = body.nearest(points[which])
+            ok = near.found & ~near.beyond
+            need = np.where(ok, height[which] - near.distance, 0.0)
+            need = np.where(need > 0.0, np.maximum(need - PUSH_SLACK, 0.0), np.minimum(need + PULL_SLACK, 0.0))
+            # Nothing to correct: nor will there be in the rounds left.
+            settled = not need.any()
+        if not settled:
+            # By axis (rows), for quick sums over neighbours.
+            own = np.zeros((3, count))
+            own[:, which] = (need[:, None] * near.normal).T
+            held = np.zeros(count, dtype=bool)
+            held[which[ok]] = True
+            keep = np.where(held, KEEP_SHARE, 0.0) * own
+            scale = np.where(held, 1.0 - KEEP_SHARE, KEEP_FADE) / degree
+            spread = own
+            total = np.empty((3, count))
+            for _ in range(KEEP_PASSES):
+                for k in range(3):
+                    total[k] = np.bincount(into, weights=spread[k][out_of], minlength=count)
+                spread = keep + scale * total
+            points = points + spread.T
         if progress is not None:
             progress((done + 1) / KEEP_ROUNDS)
-    return points[weld]
+    return points[kept.weld]
 
 
 def keep_rigid(before, after, groups):
@@ -930,11 +1182,13 @@ def contributing_keys(obj):
             if block != keys.reference_key and not block.mute and block.value != 0.0]
 
 
-def rest_shape(obj, values=None):
+def rest_shape(obj, values=None, groups=None):
     """Vertex positions (object space) of mesh ``obj`` shaped by its shape keys, before any modifier.
 
     Keys are mixed at their current values, like Blender does, except for those named in ``values``
-    (name -> value), which are used at the value given there even if they're muted.
+    (name -> value), which are used at the value given there even if they're muted. ``groups`` (a dict)
+    keeps the weights of the vertex groups keys are limited to, read for one shape, for the next (of
+    ``obj`` with the same weights).
     """
     mesh = obj.data
     keys = mesh.shape_keys
@@ -961,7 +1215,14 @@ def rest_shape(obj, values=None):
         if value == 0.0:
             continue
         delta = co_of(block) - co_of(block.relative_key)
-        weights = _group_weights(obj, block.vertex_group) if block.vertex_group else None
+        weights = None
+        if block.vertex_group:
+            if groups is None:
+                weights = _group_weights(obj, block.vertex_group)
+            else:
+                if block.vertex_group not in groups:
+                    groups[block.vertex_group] = _group_weights(obj, block.vertex_group)
+                weights = groups[block.vertex_group]
         if weights is not None:
             delta *= weights[:, None]
         result += value * delta
@@ -1107,15 +1368,15 @@ class BodyShapes:
         self.source, self.target, self.tris, self.how = source, target, tris, how
         self.to_co = self.to_tris = self.match = None
 
-    def change(self, radius=DEFAULT_RADIUS, bridge=0.0):
-        """The ShapeChange between the two shapes."""
+    def change(self, radius=DEFAULT_RADIUS, bridge=0.0, shared=None):
+        """The ShapeChange between the two shapes (``shared``: see ShapeChange)."""
         if self.match is None:
-            return ShapeChange(self.source, self.target, self.tris, radius=radius, bridge=bridge)
+            return ShapeChange(self.source, self.target, self.tris, radius=radius, bridge=bridge, shared=shared)
         return ShapeChange(self.source, self.target, self.tris, radius=radius, bridge=bridge,
-                           to_body=(self.to_co, self.to_tris), known=self.match.known)
+                           to_body=(self.to_co, self.to_tris), known=self.match.known, shared=shared)
 
 
-def body_shapes(body, from_key, to_body, to_key, match='AUTO', to_values=None):
+def body_shapes(body, from_key, to_body, to_key, match='AUTO', to_values=None, shapes=None):
     """The From and To shapes of the body (a BodyShapes, on the vertices of ``body``).
 
     From is ``body`` with its shape key ``from_key`` fully on, To is ``to_body`` (``body`` when None)
@@ -1125,7 +1386,8 @@ def body_shapes(body, from_key, to_body, to_key, match='AUTO', to_values=None):
     A To body with other vertices is matched to ``body`` as ``match`` says (see `matching`): by their UV
     maps, keeping only the vertices of ``body`` found on it, or by shape. Matched by vertices or UV map,
     the To shape is taken in its own object space and placed like ``body``, so the To body can stand
-    anywhere; matched by shape, the bodies must lie on each other.
+    anywhere; matched by shape, the bodies must lie on each other. ``shapes`` are the From and To shapes as
+    `rest_shape` gives them (in their objects' space), when they've been read already.
     """
     problem = check_shapes(body, from_key, to_body, to_key, match, to_values)
     if problem is not None:
@@ -1141,8 +1403,10 @@ def body_shapes(body, from_key, to_body, to_key, match='AUTO', to_values=None):
             target_values[from_key] = 0.0
         if to_key and to_key not in source_values:
             source_values[to_key] = 0.0
-    source = rest_shape(body, source_values)
-    target = rest_shape(other, target_values)
+    if shapes is not None:
+        source, target = shapes
+    else:
+        source, target = rest_shape(body, source_values), rest_shape(other, target_values)
     tris = _tris(body.data)
     way = matching(body, to_body, match)
     if way in ('UV', 'AUTO'):
