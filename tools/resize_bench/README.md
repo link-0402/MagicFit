@@ -51,6 +51,7 @@ them.
 |---|---|
 | tight / near / mid | Mean change of the distance from the skin, for cloth 0-3, 3-6 and 6-15 mm off it (mm, area weighted) |
 | clip_out | Vertices that were outside the skin and end up more than 1 mm inside |
+| poke, poke_2mm, poke_max | Body vertices that come out through the clothing's faces (between its vertices) by more than 0.5 mm, 2 mm, and the farthest: each body vertex's line out meets the clothing's first triangle within 2 cm on the From shape, and that spot is measured again |
 | rigid_max, rigid_1mm | Clearance change of rigid parts worn on the skin (piercings, studs), per part |
 | thick_p95, thick_1mm | Change of the distance between layers (a vertex and the next sheet along its normal, within 6 mm) |
 | detail_p95, detail_max | Change of each vertex's Laplacian along its normal, in its own frame: bumps and folds flattened or exaggerated. The body's own change under the garment is in the JSON as `body_floor_mm` |

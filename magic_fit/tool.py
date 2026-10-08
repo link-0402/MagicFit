@@ -30,6 +30,7 @@ from .operators import (
     MAGIC_FIT_OT_resize,
     MAGIC_FIT_OT_resize_pick,
     MAGIC_FIT_OT_resize_sizes_read,
+    MAGIC_FIT_OT_resize_subdivide,
     MAGIC_FIT_OT_skirt_weights,
     MAGIC_FIT_OT_texture_relax,
     MAGIC_FIT_OT_use_tool,
@@ -1213,6 +1214,8 @@ class VIEW3D_PT_resize_sidebar(tabs.TabPanel, bpy.types.Panel):
         if problem is not None:
             col.box().label(text=problem, icon='ERROR')
         col.separator()
+        # Low-poly clothing gets more faces where the sizes reshape the body within its faces, before resizing.
+        col.operator(MAGIC_FIT_OT_resize_subdivide.bl_idname, icon='MOD_SUBSURF')
         row = col.row()
         row.scale_y = 1.4
         picks = resize_sizes(settings) if problem is None else None

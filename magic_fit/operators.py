@@ -15,7 +15,7 @@ from mathutils.bvhtree import BVHTree
 from mathutils.geometry import intersect_line_line, intersect_line_plane
 
 from . import (api, connecting, facedata, facing, fitting, goals, hairing, hairlineup, heeling, lineup, moving, painting,
-               relaxing, resizing, sizing, skirting, smoothing, straighten)
+               refining, relaxing, resizing, sizing, skirting, smoothing, straighten)
 from .cplus import rig as cplus_rig
 from .properties import COMING_MODES, sync_sizes
 
@@ -3028,6 +3028,83 @@ class MAGIC_FIT_OT_resize(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class MAGIC_FIT_OT_resize_subdivide(bpy.types.Operator):
+    """Cut the faces of the selected meshes where the body changes shape within them between the From body and the
+    sizes picked (or the To body), so Auto Resize can follow it there: a nipple or the underside of a breast under a
+    low-poly top. Keeps vertex groups, UV maps, shape keys and custom normals"""
+    bl_idname = "magic_fit.resize_subdivide"
+    bl_label = "Subdivide for Sizes"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    levels: IntProperty(name="Levels", description="How many times over to cut, looking again after each cut",
+                        default=1, min=1, max=refining.MAX_LEVELS)
+    tolerance: FloatProperty(name="Tolerance", description="Cut a face where its middle would move this much "
+                             "differently from its corners", default=refining.CUT_TOLERANCE, min=0.0001, max=0.01,
+                             subtype='DISTANCE', unit='LENGTH', precision=4)
+
+    @classmethod
+    def poll(cls, context):
+        problem = check_resize_ready(context)
+        if problem is not None:
+            cls.poll_message_set(problem)
+            return False
+        return True
+
+    def execute(self, context):
+        settings = context.scene.body_fit_brush
+        job = api.Job(settings)
+        body = job.body
+        picks = resize_sizes(settings)
+        sizes = picks.changed if picks is not None and picks.changed else [None]
+        targets = resize_targets(context)
+        edit = context.mode == 'EDIT_MESH'
+        if edit:
+            bpy.ops.object.mode_set(mode='OBJECT')
+        try:
+            shapes = []
+            for size in sizes:
+                to_values = sizing.size_values(job.sized, size.values) if size is not None else None
+                shapes.append(resizing.body_shapes(body, job.from_key, job.to_body, job.to_key, job.match, to_values))
+            source, body_tris = shapes[0].source, shapes[0].tris
+            from_print = resizing.fingerprint(resizing._transform(
+                resizing.rest_shape(body, job.source_values()), body.matrix_world))
+            if picks is not None:
+                # Meshes whose keys follow the sizes themselves (a devkit's body parts) aren't resized, nor cut.
+                changed = {name for size in sizes if size is not None
+                           for name in sizing.size_values(job.sized, size.values)}
+                names = {setting.name for setting in picks.settings}
+                targets = [obj for obj in targets if not sizing.follows(obj, names, changed)]
+            cut = added = meshes = 0
+            skin = []
+            for obj in targets:
+                shape = resizing.from_shape(obj, from_print)[0]
+                # Skin follows the body's surface exactly, whatever its faces.
+                if resizing.skin_vertices(obj).mean() > 0.5 or resizing.is_skin(shape, source, body_tris):
+                    skin.append(obj)
+                    continue
+                faces, vertices = refining.refine(
+                    obj, lambda mesh_obj: resizing.from_shape(mesh_obj, from_print)[0], source,
+                    [bodies.target for bodies in shapes], body_tris, self.levels, self.tolerance)
+                if faces:
+                    meshes += 1
+                    cut += faces
+                    added += vertices
+        except resizing.ResizeError as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
+        finally:
+            if edit:
+                bpy.ops.object.mode_set(mode='EDIT')
+        skipped = ", {:d} skin mesh(es) left as they are".format(len(skin)) if skin else ""
+        if not cut:
+            self.report({'INFO'}, "No face needs cutting for {:s}{:s}".format(
+                "these sizes" if len(sizes) > 1 else "this shape", skipped))
+            return {'FINISHED'}
+        self.report({'INFO'}, "Cut {:d} face(s) on {:d} mesh(es), {:d} vertices added{:s}: resize again to remake their "
+                              "keys".format(cut, meshes, added, skipped))
+        return {'FINISHED'}
+
+
 def _joints_note(result):
     """Where Line Up found the model's joints, for its report."""
     if result.how == "bones":
@@ -3357,6 +3434,7 @@ classes = (
     MAGIC_FIT_OT_resize_pick,
     MAGIC_FIT_OT_resize_sizes_read,
     MAGIC_FIT_OT_resize,
+    MAGIC_FIT_OT_resize_subdivide,
     MAGIC_FIT_OT_line_up,
     MAGIC_FIT_OT_line_up_hair,
     MAGIC_FIT_OT_use_tool,

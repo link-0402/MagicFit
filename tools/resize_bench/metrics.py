@@ -13,6 +13,10 @@ the same way. Clothing is welded first (split seams joined), and every metric is
 - detail: each vertex's Laplacian (cotangent weights of the From shape) in its own frame (normal and a tangent
   towards a fixed neighbour), before and after; the change says how much a bump or fold was flattened or
   exaggerated. The body's own change under the clothing is the floor.
+- poke: the body coming out through the faces of the clothing over it (between its vertices, which clearance doesn't
+  see: a nipple through a low-poly top). Each body vertex's line out along its normal meets the clothing's first
+  triangle within POKE_REACH on the From shape; on the To shape, how far that spot of the triangle is over the
+  vertex, along its normal. ``through`` counts body vertices that end up more than POKE mm outside it.
 - rigid: how much the clearance of rigid parts worn on the skin (piercings, studs) changed, per part.
 - round trip: how far a vertex lands from where it was after going to a size and back.
 - flips and stretch: triangles turned over, edges stretched.
@@ -32,6 +36,8 @@ SKIN_MATERIAL = re.compile(r"(mt_c\d{4}b\d{4}_(bibo|eve|b|a)\b|(^|[/_])skin)", r
 BANDS = ((-0.05, 0.0, "inside"), (0.0, 0.003, "0-3mm"), (0.003, 0.006, "3-6mm"), (0.006, 0.015, "6-15mm"),
          (0.015, 0.05, "15-50mm"))
 CLIP = 0.001
+POKE = 0.0005
+POKE_REACH = 0.02
 LAYER_REACH = 0.006
 LAYER_MIN = 1e-4
 LAYER_FACING = 0.5
@@ -213,6 +219,31 @@ def layer_pairs(co, tris, normals):
     return rows, faces, bary, np.array(dists)
 
 
+def body_pokes(surface, co, tris):
+    """For each vertex of the body ``surface`` under the welded clothing (``co``, ``tris``) within POKE_REACH along its
+    normal: (body vertex, clothing triangle, barycentric coordinates, distance)."""
+    empty = np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros((0, 3)), np.zeros(0)
+    if not len(tris):
+        return empty
+    bvh = BVHTree.FromPolygons(co.tolist(), tris.tolist(), all_triangles=True)
+    # One per welded body vertex.
+    _u, first = np.unique(surface.weld, return_index=True)
+    rows, faces, hits, dists = [], [], [], []
+    for v, p, n in zip(first.tolist(), surface.co[first].tolist(), surface.normals[first].tolist()):
+        hit, _normal, t, dist = bvh.ray_cast(p, n, POKE_REACH)
+        if hit is not None:
+            rows.append(v)
+            faces.append(t)
+            hits.append(tuple(hit))
+            dists.append(dist)
+    if not rows:
+        return empty
+    faces = np.array(faces)
+    corners = tris[faces]
+    bary = _barycentric(np.array(hits), co[corners[:, 0]], co[corners[:, 1]], co[corners[:, 2]])
+    return np.array(rows), faces, bary, np.array(dists)
+
+
 class Detail:
     """Each vertex's Laplacian in its own frame, with weights and frames' neighbours fixed on the start shape."""
 
@@ -319,6 +350,7 @@ class Garment:
         self.detail = Detail(self.co, mt) if len(mt) else None
         self.edges = edges_of(mt) if len(mt) else np.zeros((0, 2), np.int64)
         self.moving_tris = mt
+        self.pokes = body_pokes(from_surface, self.co, mt)
 
     def welded(self, positions):
         return np.asarray(positions, dtype=np.float64)[self.first]
@@ -380,6 +412,17 @@ class Garment:
             part_at = np.stack([np.bincount(inverse, co[rigid][:, k]) / np.bincount(inverse) for k in range(3)], 1)
             out["rigid"] = dict(stats(np.abs(part_err)), over_1mm=int((np.abs(part_err) > 1.0).sum()),
                                 worst=worst(np.abs(part_err), part_at, {"signed": part_err, "h0": part_h0}))
+        rows, faces, bary, d0 = self.pokes
+        if len(rows):
+            spot = (moved[self.moving_tris[faces]] * bary[:, :, None]).sum(axis=1)
+            over = ((spot - to_surface.co[rows]) * to_surface.normals[rows]).sum(axis=1)
+            through = over < -POKE
+            out["poke"] = {"n": int(len(rows)), "through": int(through.sum()),
+                           "through_2mm": int((over < -0.002).sum()),
+                           "deepest_mm": float(max(-over.min(), 0.0) * MM),
+                           "worst": worst(-over * MM, to_surface.co[rows], {"d0": d0 * MM})}
+        else:
+            out["poke"] = {"n": 0, "through": 0, "through_2mm": 0, "deepest_mm": 0.0}
         skin = ok & ~self.moving
         if skin.any():
             out["skin"] = stats(np.abs(h1[skin]) * MM, self.area[skin])

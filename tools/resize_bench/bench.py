@@ -153,7 +153,7 @@ class Job:
 def apply_inputs(apply, work):
     """What api._Sizes passes ShapeChange.apply besides the points, as far as the checkout's apply takes it."""
     taken = inspect.signature(apply).parameters
-    return {name: getattr(work, name) for name in ("rigid", "edges", "bound", "faces")
+    return {name: getattr(work, name) for name in ("rigid", "edges", "bound", "faces", "cover")
             if name in taken and hasattr(work, name)}
 
 
