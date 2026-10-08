@@ -42,6 +42,7 @@ Like `painting`, the engine (`ShapeChange`) works on world space arrays and does
 
 import hashlib
 import math
+import re
 
 import numpy as np
 from mathutils.bvhtree import BVHTree
@@ -84,6 +85,37 @@ KEEP_FADE = 0.9
 KEEP_PASSES = 80
 # Rounds of measuring and correcting (each measures the distances anew).
 KEEP_ROUNDS = 8
+
+# Rigid parts with this share of their points closer to the body than this lie on it: they follow its surface, as
+# skin does (see ShapeChange.bind), and grow or shrink with it (see keep_rigid).
+RIGID_ON_BODY = 0.005
+RIGID_ON_BODY_SHARE = 0.9
+
+# Skin: a mesh with this share of its vertices within this distance of the From shape (a mod's own skin, a
+# copy of the body's) follows the body's surface exactly (see ShapeChange.bind) instead of moving like
+# clothing, which only approximates it.
+SKIN_DISTANCE = 0.001
+SKIN_SHARE = 0.9
+# So does what's drawn with the game's skin material (mt_c0201b0001_bibo, _b, _a or _eve for the bibo, gen3, gen2
+# and Eve layouts: the skin a top's author reshaped under it, lifted or pressed in by a few millimetres)...
+SKIN_MATERIAL = re.compile(r"mt_c\d{4}b\d{4}_(bibo|eve|b|a)\b", re.IGNORECASE)
+# ...fully within this distance of the From shape, fading into moving like clothing by this distance (skin standing
+# farther off the body isn't its surface, and following the body's surface from there isn't undone going back).
+SKIN_NEAR = 0.003
+SKIN_FAR = 0.006
+# Keep Close keeps clothing lying on the mesh's own skin (closer to it than to the body) as far out from that skin as
+# it was, but for rounding (the skin's slack, in either direction): skin and clothing are drawn together, and any
+# clothing sinking into it, or lifting off it, shows.
+SKIN_PUSH_SLACK = 0.0001
+SKIN_PULL_SLACK = 0.0001
+# Clothing this close to the mesh's own skin takes the skin's correction (how far following the body's surface moves
+# it beyond the smooth move) in full, fading out by this distance, averaged over this many skin points around it
+# within this distance more than the nearest: clothing made over the skin keeps lying over it, at the gap it was
+# made with.
+SKIN_FOLLOW_NEAR = 0.005
+SKIN_FOLLOW_FAR = 0.015
+SKIN_FOLLOW_COUNT = 16
+SKIN_FOLLOW_WIDTH = 0.01
 
 # Bridge Creases: clothing off the skin moves with crease-free versions of both shapes, in which the skin
 # that a ball of this radius rolled over the body can't reach is lifted onto the balls (the setting's
@@ -471,6 +503,13 @@ class _FromShape:
             bridged_from = bridged(source, tris, bridge)
             self.bridged = (bridged_from, _vertex_areas(bridged_from, tris)[self.used],
                             _Levels(bridged_from[self.used], self.radius))
+        self._surface = None
+
+    def surface(self, source, tris):
+        """The source shape as a BodySurface (made when first asked for), for binding skin to it."""
+        if self._surface is None:
+            self._surface = _surface(source, tris)
+        return self._surface
 
 
 class ShapeChange:
@@ -559,15 +598,43 @@ class ShapeChange:
             moved[chosen] += share[:, None] * _average(points[chosen], reach[chosen], samples[level])
         return moved
 
-    def apply(self, points, progress=None, rigid=None, edges=None):
+    def apply(self, points, progress=None, rigid=None, edges=None, bound=None, faces=None, skin=None, follow=None):
         """Where ``points`` (n x 3, world space, fitted to the source shape) go with the target shape.
 
         ``rigid`` optionally labels points that move together without changing shape (a label per
         point, -1 for none): each such group is moved the rigid way closest to how the others would
         move it. ``edges`` (pairs of point indices: the clothing's edges), when given, turn on Keep
-        Close, see `keep_close`. ``progress(fraction)`` is called after every step.
+        Close, see `keep_close`. ``bound`` (a mask, or a share from 0 to 1, per point) marks skin: points
+        lying on the source shape that follow its surface exactly (see `bind`), taking no part in the
+        smooth move, in Keep Close or in rigid groups; a share between blends the two moves (see
+        `skin_shares`). Clothing near the skin takes the skin's correction (see SKIN_FOLLOW_NEAR).
+        ``faces`` (triples of point indices: the meshes' triangles) give Keep Close the skin's surface, so
+        clothing lying on it keeps its distance from it (see `keep_close`). ``progress(fraction)`` is called
+        after every step. ``skin`` (that surface, as `keep_close` takes it) and ``follow`` (the skin's
+        points, where they go and their shares) are for the move without the skin.
         """
         start = np.array(points, dtype=np.float64).reshape(-1, 3)
+        if bound is not None:
+            bound = np.clip(np.asarray(bound, dtype=np.float64).reshape(-1), 0.0, 1.0)
+            if bound.any():
+                held = np.flatnonzero(bound > 0.0)
+                skin_at = self.bind(start[held])
+                if edges is not None and faces is not None:
+                    # The skin's surface where it follows the body fully: elsewhere it's partly clothing.
+                    index = np.full(len(start), -1, dtype=np.int64)
+                    index[held] = np.where(bound[held] >= 1.0, np.arange(len(held)), -1)
+                    skin_tris = index[np.asarray(faces, dtype=np.int64).reshape(-1, 3)]
+                    skin_tris = skin_tris[(skin_tris >= 0).all(axis=1)]
+                    if len(skin_tris):
+                        skin = (start[held], skin_at, skin_tris)
+                if rigid is not None:
+                    rigid = np.array(rigid, dtype=np.int64).reshape(-1)
+                    rigid[held] = -1
+                # Everything moves smoothly, the skin too, so the clothing around it can take its correction.
+                result = self.apply(start, progress, rigid, edges, skin=skin, follow=(held, skin_at, bound[held]))
+                share = bound[held, None]
+                result[held] = share * skin_at + (1.0 - share) * result[held]
+                return result
         if not len(start) or self.largest <= 0.0:
             return start
         clothing = _shared(self._shared, ("clothing", self._key, _digest(start)), lambda: _Clothing(self, start))
@@ -609,10 +676,22 @@ class ShapeChange:
             points = points + moved
             if progress is not None:
                 progress((step + 1) / total)
+        if follow is not None:
+            # The skin's correction, carried over to the clothing around it.
+            held, skin_at, held_share = follow
+            spots = copies[held]
+            correction = (np.asarray(skin_at) - points[spots]) * np.asarray(held_share)[:, None]
+            rows, cols, weights = clothing.followers(spots)
+            carried = np.zeros_like(points)
+            np.add.at(carried, rows, weights[:, None] * correction[cols])
+            points = points + carried
+            points[spots] = points[spots] - carried[spots] + correction
         if edges is not None:
             loose = np.ones(len(points), dtype=bool)
             if rigid is not None:
                 loose[copies[np.asarray(rigid) >= 0]] = False
+            if follow is not None:
+                loose[copies[follow[0]]] = False
 
             def keep_progress(done):
                 if progress is not None:
@@ -620,12 +699,58 @@ class ShapeChange:
             to_co, to_tris = self.to_body if self.to_body is not None else (self.target, None)
             pairs = copies[np.asarray(edges, dtype=np.int64).reshape(-1, 2)]
             points = keep_close(first, points, pairs, self.source, to_co, self.tris, anchors=loose,
-                                progress=keep_progress, target_tris=to_tris, known=self.known,
-                                measured=clothing.keep_close(self, pairs, loose))
+                                progress=keep_progress, target_tris=to_tris, known=self.known, skin=skin,
+                                measured=clothing.keep_close(self, pairs, loose, skin))
         result = points[copies]
         if rigid is not None:
-            keep_rigid(start, result, np.asarray(rigid))
+            # Rigid parts lying on the body (piercings, studs, a ring on the skin) follow its surface exactly, as
+            # the mesh's skin does (see `bind`), rather than the smooth move, which lags it. Only whole: a part
+            # partly off the body, aimed two ways at once, can come out turned over.
+            rigid = np.asarray(rigid)
+            on_body = np.zeros(len(rigid), dtype=bool)
+            members = np.flatnonzero(rigid >= 0)
+            share = owner = near = None
+            if len(members):
+                _labels, owner = np.unique(rigid[members], return_inverse=True)
+                owner = owner.reshape(-1)
+                near = clothing.near(self)[copies][members] <= RIGID_ON_BODY
+                share = np.bincount(owner, weights=near) / np.bincount(owner)
+                on_body[members] = share[owner] >= RIGID_ON_BODY_SHARE
+            if on_body.any():
+                result[on_body] = self.bind(start[on_body])
+            keep_rigid(start, result, rigid, on_body=on_body)
+            # A part partly on the body is moved, without turning, as far as its points on the body fall short of
+            # following it.
+            partly = near & ~on_body[members] if near is not None else None
+            if partly is not None and partly.any():
+                rows = members[partly]
+                short = self.bind(start[rows]) - result[rows]
+                shift = np.stack([np.bincount(owner[partly], weights=short[:, k], minlength=len(share))
+                                  for k in range(3)], axis=1)
+                shift /= np.maximum(np.bincount(owner[partly], minlength=len(share)), 1)[:, None]
+                moved = ~on_body[members]
+                result[members[moved]] += shift[owner[moved]]
         return result
+
+    def bind(self, points):
+        """Where ``points`` lying on the source shape (skin) go with the target shape: each keeps its spot
+        on its closest triangle of the source and its (small) distance from it along the normal there.
+
+        That is exact for a copy of the body's skin, which the smooth move only approximates: it averages
+        the body's move around each point, and Keep Close leaves tight clothing some slack. A point past
+        an open edge of the body keeps its offset from the edge.
+        """
+        points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+        if not len(points) or self.largest <= 0.0:
+            return points.copy()
+        source = self._from.surface(self.source, self.tris)
+        near = _shared(self._shared, ("bound", self._key, _digest(points)), lambda: source.nearest(points))
+        target = _surface(self.target, self.tris, like=source)
+        normal = np.einsum("ij,ijk->ik", near.bary, target.normals[near.corners])
+        normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-12)
+        location = np.einsum("ij,ijk->ik", near.bary, target.co[near.corners])
+        offset = np.where(near.beyond[:, None], points - near.location, near.distance[:, None] * normal)
+        return np.where(near.found[:, None], location + offset, points)
 
 
 class _Clothing:
@@ -642,6 +767,43 @@ class _Clothing:
             self.free = _blend_shares(self.points, _smoothstep(BRIDGE_HUG, BRIDGE_HUG + BRIDGE_BLEND, self.distance))
         self._first = {}
         self._kept = {}
+        self._followers = {}
+
+    def followers(self, spots):
+        """For each point within SKIN_FOLLOW_FAR of the skin (``spots``, indices of these points), the skin points
+        around it whose correction it takes and their weights (see SKIN_FOLLOW_NEAR), as (point, index into
+        ``spots``, weight) rows."""
+        key = _digest(spots)
+        if key not in self._followers:
+            from mathutils.kdtree import KDTree
+            tree = KDTree(len(spots))
+            for index, point in enumerate(self.points[spots].tolist()):
+                tree.insert(point, index)
+            tree.balance()
+            rows, cols, weights = [], [], []
+            for k, point in enumerate(self.points.tolist()):
+                found = tree.find_n(point, SKIN_FOLLOW_COUNT)
+                if not found or found[0][2] >= SKIN_FOLLOW_FAR:
+                    continue
+                fade = 1.0 - _smoothstep(SKIN_FOLLOW_NEAR, SKIN_FOLLOW_FAR, found[0][2])
+                # A smooth average over the skin around (as wide as the nearest is far, and SKIN_FOLLOW_WIDTH more),
+                # so the clothing takes the skin's correction without its small bumps.
+                reach = found[0][2] + SKIN_FOLLOW_WIDTH
+                near = [max(1.0 - (distance / reach) ** 2, 0.0) ** 3 for _co, _index, distance in found]
+                total = sum(near)
+                for (_co, index, _distance), weight in zip(found, near):
+                    rows.append(k)
+                    cols.append(index)
+                    weights.append(fade * weight / total)
+            self._followers[key] = (np.array(rows, dtype=np.int64), np.array(cols, dtype=np.int64),
+                                    np.array(weights, dtype=np.float64))
+        return self._followers[key]
+
+    def near(self, change):
+        """How far each point is from the source shape of ``change``."""
+        if self.distance is None:
+            self.distance = _distances(self.points, change.source, change._tree_tris)
+        return self.distance
 
     def first_step(self, change, crease_free):
         """The first step's averages (a _FirstStep) of the points that may move with the body's shapes (all
@@ -659,13 +821,32 @@ class _Clothing:
                                                   source[change._used], area, levels)
         return self._first[crease_free]
 
-    def keep_close(self, change, edges, anchors):
+    def keep_close(self, change, edges, anchors, skin=None):
         """Keep Close's measurements (a _KeepClose) of these points, joined by ``edges``, held where not in
-        ``anchors``."""
-        key = _digest(edges, anchors)
+        ``anchors``, with the mesh's own ``skin`` (see `keep_close`)."""
+        key = _digest(edges, anchors, *(() if skin is None else (skin[0], skin[2])))
         if key not in self._kept:
-            self._kept[key] = _KeepClose(self.points, edges, change.source, change.tris, anchors)
+            self._kept[key] = _KeepClose(self.points, edges, change.source, change.tris, anchors,
+                                         None if skin is None else (skin[0], skin[2]))
         return self._kept[key]
+
+
+def _turned_like(surface, body, turns=None):
+    """Turn the normals of ``surface`` (a mesh's own skin: open, so which side is out can't be told from it) per
+    connected part to face the way those of the ``body`` surface do where it lies, or as ``turns`` (whether to turn
+    each of the points it was made from) say. Returns ``turns``."""
+    if turns is None:
+        near = body.nearest(surface.co)
+        vote = np.einsum("ij,ij->i", surface.normals, near.normal) * near.found
+        turns = (np.bincount(surface.parts, weights=vote, minlength=int(surface.parts.max()) + 1) < 0.0)[
+            surface.parts[surface._weld]]
+    # By the points (a surface of them moved can weld differently).
+    sign = np.ones(len(surface.co))
+    sign[surface._weld[turns]] = -1.0
+    surface.normals = surface.normals * sign[:, None]
+    surface.area_normals = surface.area_normals * sign[:, None]
+    surface.tri_normals = surface.tri_normals * sign[surface.corners[:, 0], None]
+    return turns
 
 
 def _blend_shares(points, shares):
@@ -692,7 +873,7 @@ class _KeepClose:
     """What Keep Close measures of clothing on the source shape, the same whatever the target shape (see
     `keep_close` for the arguments)."""
 
-    def __init__(self, start, edges, source, tris, anchors=None):
+    def __init__(self, start, edges, source, tris, anchors=None, skin=None):
         start = np.asarray(start, dtype=np.float64)
         # Points at the same spot are one.
         _spots, weld = np.unique(start, axis=0, return_inverse=True)
@@ -706,6 +887,19 @@ class _KeepClose:
         self.height = near.distance
         self.close = near.found & ~near.beyond & (np.abs(self.height) < KEEP_CLOSE_DISTANCE)
         self.corners, self.source_weld, self.source_count = near.corners, source_surface._weld, len(source_surface.co)
+        # Points closer to the mesh's own skin (its points on the source shape and its triangles) than to the body
+        # keep their distance from the skin.
+        self.on_skin = np.zeros(count, dtype=bool)
+        self.skin_surface = self.skin_turns = None
+        if skin is not None:
+            skin_surface = self.skin_surface = _surface(np.asarray(skin[0], dtype=np.float64),
+                                                        np.asarray(skin[1], dtype=np.int64))
+            self.skin_turns = _turned_like(skin_surface, source_surface)
+            on = skin_surface.nearest(start[self.first])
+            body_gap = np.where(near.found & ~near.beyond, np.abs(self.height), np.inf)
+            self.on_skin = on.found & ~on.beyond & (np.abs(on.distance) < body_gap)
+            self.height = np.where(self.on_skin, on.distance, self.height)
+            self.close = (self.close & ~self.on_skin) | (self.on_skin & (np.abs(self.height) < KEEP_CLOSE_DISTANCE))
         if anchors is not None:
             free = np.ones(count, dtype=bool)
             np.logical_and.at(free, self.weld, np.asarray(anchors, dtype=bool))
@@ -719,7 +913,7 @@ class _KeepClose:
 
 
 def keep_close(start, moved, edges, source, target, tris, anchors=None, progress=None, target_tris=None,
-               known=None, measured=None):
+               known=None, measured=None, skin=None):
     """Bring tight clothing back to its old distance from the body after a smooth move (Keep Close).
 
     ``start`` are the points fitted to the body's ``source`` shape, ``moved`` where the move took them
@@ -735,31 +929,48 @@ def keep_close(start, moved, edges, source, target, tris, anchors=None, progress
     of whose corners are known count (where the matched shape lies on that mesh: over a heel left to
     follow the leg, Keep Close would press a boot onto the To body's flat foot).
 
-    ``measured`` is a _KeepClose of the same ``start``, ``edges``, ``source``, ``tris`` and ``anchors``, made
-    before for another target.
+    With ``skin`` (the mesh's own skin: its points on the source shape, where they went, and its triangles), points
+    closer to the skin than to the body keep their distance from the skin instead, and never come closer to it
+    than they were (SKIN_PUSH_SLACK): a garment's skin is drawn with it, and clothing sinking into it shows.
+
+    ``measured`` is a _KeepClose of the same ``start``, ``edges``, ``source``, ``tris``, ``anchors`` and ``skin``,
+    made before for another target.
     """
     tris = np.asarray(tris, dtype=np.int64)
-    kept = measured if measured is not None else _KeepClose(start, edges, source, tris, anchors)
+    kept = measured if measured is not None else _KeepClose(
+        start, edges, source, tris, anchors, None if skin is None else (skin[0], skin[2]))
     count, into, out_of, degree = kept.count, kept.into, kept.out_of, kept.degree
     points = np.asarray(moved, dtype=np.float64)[kept.first]
     height, close = kept.height, kept.close
     if known is not None:
         welded = np.zeros(kept.source_count, dtype=bool)
         welded[kept.source_weld] = np.asarray(known, dtype=bool)
-        close = close & (welded[kept.corners].sum(axis=1) >= 2)
+        close = close & (kept.on_skin | (welded[kept.corners].sum(axis=1) >= 2))
+    skin_surface = None
+    if kept.skin_surface is not None and skin is not None:
+        skin_surface = _surface(np.asarray(skin[1], dtype=np.float64), kept.skin_surface.tris,
+                                like=kept.skin_surface)
+        _turned_like(skin_surface, None, kept.skin_turns)
     if target_tris is None:
         # The source's triangles: what they decide is the source's, where the vertices weld alike.
         body = _surface(np.asarray(target, dtype=np.float64), tris, like=kept.surface)
     else:
         body = _surface(np.asarray(target, dtype=np.float64), np.asarray(target_tris, dtype=np.int64).reshape(-1, 3))
     which = np.flatnonzero(close)
+    on_skin = kept.on_skin[which] if skin_surface is not None else np.zeros(len(which), dtype=bool)
+    push_slack = np.where(on_skin, SKIN_PUSH_SLACK, PUSH_SLACK)
+    pull_slack = np.where(on_skin, SKIN_PULL_SLACK, PULL_SLACK)
     settled = False
     for done in range(KEEP_ROUNDS if len(which) else 0):
         if not settled:
             near = body.nearest(points[which])
+            if on_skin.any():
+                on = skin_surface.nearest(points[which[on_skin]])
+                for name in ("found", "beyond", "distance", "normal"):
+                    getattr(near, name)[on_skin] = getattr(on, name)
             ok = near.found & ~near.beyond
             need = np.where(ok, height[which] - near.distance, 0.0)
-            need = np.where(need > 0.0, np.maximum(need - PUSH_SLACK, 0.0), np.minimum(need + PULL_SLACK, 0.0))
+            need = np.where(need > 0.0, np.maximum(need - push_slack, 0.0), np.minimum(need + pull_slack, 0.0))
             # Nothing to correct: nor will there be in the rounds left.
             settled = not need.any()
         if not settled:
@@ -782,9 +993,14 @@ def keep_close(start, moved, edges, source, target, tris, anchors=None, progress
     return points[kept.weld]
 
 
-def keep_rigid(before, after, groups):
+def keep_rigid(before, after, groups, on_body=None):
     """Move each group of points (label >= 0 in ``groups``) from ``before`` the rigid way (rotation and
-    translation) that comes closest to where they are in ``after``, in place."""
+    translation) that comes closest to where they are in ``after``, in place.
+
+    With ``on_body`` (a mask per point: those lying on the body), each group also scales by the share of its points
+    on the body, uniformly, as much as the space it is in grows or shrinks (the least-squares scale). A chain link,
+    a ring or a band on the body grows with it, so a chain doesn't come apart between its links, and a pendant
+    hanging off it keeps its size."""
     members = np.flatnonzero(groups >= 0)
     if not len(members):
         return
@@ -806,7 +1022,15 @@ def keep_rigid(before, after, groups):
         flip[:, 2] = -1.0
         v = np.transpose(vt[mirror], (0, 2, 1)) * flip[:, None, :]
         turn[mirror] = v @ np.transpose(u[mirror], (0, 2, 1))
-    after[members] = center_after[owner] + np.einsum("nij,nj->ni", turn[owner], p)
+    turned = np.einsum("nij,nj->ni", turn[owner], p)
+    if on_body is not None:
+        spread = np.bincount(owner, weights=np.einsum("ij,ij->i", turned, turned), minlength=len(count))
+        scale = np.bincount(owner, weights=np.einsum("ij,ij->i", turned, q), minlength=len(count))
+        scale = np.where(spread > 1e-18, scale / np.maximum(spread, 1e-30), 1.0)
+        share = np.bincount(owner, weights=np.asarray(on_body, dtype=np.float64)[members], minlength=len(count))
+        scale = 1.0 + (share / count[:, 0]) * (scale - 1.0)
+        turned *= scale[owner, None]
+    after[members] = center_after[owner] + turned
 
 
 def loose_parts(co, edges):
@@ -838,6 +1062,52 @@ def _distances(points, co, tris):
     return distance
 
 
+def is_skin_material(name):
+    """Whether a material (by ``name``) is the game's skin (see SKIN_MATERIAL)."""
+    return bool(SKIN_MATERIAL.search(name or ""))
+
+
+def skin_vertices(obj):
+    """Which vertices of mesh ``obj`` belong to faces drawn with the game's skin material."""
+    mesh = obj.data
+    skin = np.array([slot.material is not None and is_skin_material(slot.material.name)
+                     for slot in obj.material_slots] + [False], dtype=bool)
+    marked = np.zeros(len(mesh.vertices), dtype=bool)
+    if not skin.any() or not len(mesh.polygons):
+        return marked
+    index = np.empty(len(mesh.polygons), dtype=np.int64)
+    mesh.polygons.foreach_get("material_index", index)
+    sizes = np.empty(len(mesh.polygons), dtype=np.int64)
+    mesh.polygons.foreach_get("loop_total", sizes)
+    vertex = np.empty(len(mesh.loops), dtype=np.int64)
+    mesh.loops.foreach_get("vertex_index", vertex)
+    marked[vertex[np.repeat(skin[np.minimum(index, len(skin) - 1)], sizes)]] = True
+    return marked
+
+
+def skin_shares(points, co, tris, marked):
+    """How much each of ``points`` (``marked`` as skin) follows the body (``co``, ``tris``) as skin (see
+    ShapeChange.bind) rather than moving like clothing: fully within SKIN_NEAR of it, fading out by SKIN_FAR."""
+    shares = np.zeros(len(points))
+    marked = np.asarray(marked, dtype=bool)
+    if marked.any():
+        distance = _distances(np.asarray(points, dtype=np.float64)[marked], np.asarray(co, dtype=np.float64),
+                              np.asarray(tris, dtype=np.int64).tolist())
+        shares[marked] = 1.0 - _smoothstep(SKIN_NEAR, SKIN_FAR, distance)
+    return shares
+
+
+def is_skin(points, co, tris):
+    """Whether a mesh (its vertices ``points``) is skin lying on the body (``co``, triangles ``tris``): SKIN_SHARE of
+    its vertices within SKIN_DISTANCE of it, like a mod's copy of the body's skin. Such a mesh follows the body's
+    surface exactly (see ShapeChange.bind)."""
+    if not len(points):
+        return False
+    distance = _distances(np.asarray(points, dtype=np.float64), np.asarray(co, dtype=np.float64),
+                          np.asarray(tris, dtype=np.int64).tolist())
+    return bool((distance <= SKIN_DISTANCE).mean() >= SKIN_SHARE)
+
+
 # -----------------------------------------------------------------------------
 # Matching two different bodies
 
@@ -854,6 +1124,15 @@ MAX_MATCH_DISTANCE = 0.15
 # half of those land farther than this from where they are.
 MIN_MATCHED = 0.9
 MAX_MEDIAN_GAP = 0.03
+# A texture repeats, so a spot of the UV map a whole square away from another is the same spot (Bibo+ keeps its
+# legs a square below where Neolithe keeps them): spots are compared within one square, and those this close to
+# its sides are looked for across them too, in triangles reaching over from the next square.
+UV_WRAP_MARGIN = 0.1
+# Islands of the UV map that the other body lacks altogether (less than this share of their vertices found, like
+# a gen3 body's extra crotch detail in texture space no other layout uses) don't count against MIN_MATCHED, as
+# long as they're at most this share of the body; the parts of the body around them carry the clothing there.
+ISLAND_FOUND = 0.05
+MAX_MISSING_ISLANDS = 1.0 / 3.0
 
 
 def _uv_islands(tri_verts, tri_uv):
@@ -889,10 +1168,80 @@ def _barycentric(points, corners):
     denominator = d11 * d22 - d12 * d12
     flat = np.abs(denominator) <= 1e-30
     denominator = np.where(flat, 1.0, denominator)
-    # A triangle without area in the UV map gives its three corners the same weight.
+    # A triangle without area in the UV map gives its three corners the same weight (see `_along_flat` for
+    # what match_by_uv makes of one).
     v = np.where(flat, 1.0 / 3.0, (d22 * p1 - d12 * p2) / denominator)
     w = np.where(flat, 1.0 / 3.0, (d11 * p2 - d12 * p1) / denominator)
     return np.clip(np.column_stack((1.0 - v - w, v, w)), 0.0, 1.0)
+
+
+def _flat_in_uv(corners):
+    """Which triangles (``corners``, n x 3 x 2 UVs) have no area in the UV map: lines, or a point."""
+    e1, e2 = corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]
+    cross = np.abs(e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0])
+    size = np.maximum(np.einsum("ij,ij->i", e1, e1), np.einsum("ij,ij->i", e2, e2))
+    return cross <= 1e-9 * np.maximum(size, 1e-30)
+
+
+def _along_flat(spot, corners, points, near):
+    """Barycentric weights of the UV ``spot`` in a triangle with no area in the UV map (``corners``, its
+    corners' UVs, ``points`` their positions), whose spot is closest to the position ``near``.
+
+    Such a triangle is a line in the UV map (two corners sharing a UV: Neolithe's neck opening is a ring of
+    them), and a spot on it is a spot of each of its sides that pass there: on the side between the two corners
+    sharing a UV, anywhere. Equal weights would put a vertex in the triangle's middle, several centimetres off.
+    """
+    best, weights = np.inf, np.full(3, 1.0 / 3.0)
+    for a, b in ((0, 1), (1, 2), (2, 0)):
+        side = corners[b] - corners[a]
+        length = float(side @ side)
+        if length <= 1e-18:
+            # Both ends at one spot of the UV map: the spot is anywhere along the side.
+            offset, span = points[b] - points[a], float((points[b] - points[a]) @ (points[b] - points[a]))
+            ts = (min(max(float((near - points[a]) @ offset) / span, 0.0), 1.0),) if span > 0.0 else (0.0,)
+        else:
+            ts = (min(max(float((spot - corners[a]) @ side) / length, 0.0), 1.0),)
+        for t in ts:
+            candidate = np.zeros(3)
+            candidate[a], candidate[b] = 1.0 - t, t
+            off = float(np.linalg.norm(candidate @ points - near))
+            if off < best:
+                best, weights = off, candidate
+    return weights
+
+
+def _flat_strips(tri_uv):
+    """Strips UV_TOLERANCE wide around the sides of the triangles without area in the UV map (``tri_uv``, n x 3 x 2),
+    two triangles each (m x 3 x 2), and the triangle each belongs to."""
+    flat = np.flatnonzero(_flat_in_uv(tri_uv))
+    if not len(flat):
+        return np.zeros((0, 3, 2)), np.zeros(0, dtype=np.int64)
+    start = tri_uv[flat].reshape(-1, 2)
+    end = tri_uv[flat][:, [1, 2, 0]].reshape(-1, 2)
+    along = end - start
+    length = np.linalg.norm(along, axis=1, keepdims=True)
+    # A side whose ends share a spot is a point: a square around it.
+    along = np.where(length > 1e-12, along / np.maximum(length, 1e-30), (1.0, 0.0)) * (0.5 * UV_TOLERANCE)
+    across = along[:, ::-1] * (-1.0, 1.0)
+    a, b = start - along - across, end + along - across
+    c, d = end + along + across, start - along + across
+    strips = np.concatenate((np.stack((a, b, c), axis=1), np.stack((a, c, d), axis=1)))
+    owner = np.tile(np.repeat(flat, 3), 2)
+    return strips, owner
+
+
+def _wrapped_triangles(tri_uv):
+    """``tri_uv`` (n x 3 x 2) each moved by whole squares of the UV map into the square at its middle's spot."""
+    return tri_uv - np.floor(tri_uv.mean(axis=1))[:, None, :]
+
+
+def _wrapped_spots(u, v):
+    """The spots to look for UV (``u``, ``v``) at: in the first square, and across its sides near them (see
+    UV_WRAP_MARGIN)."""
+    u, v = u - math.floor(u), v - math.floor(v)
+    us = (u,) + ((u + 1.0,) if u < UV_WRAP_MARGIN else ()) + ((u - 1.0,) if u > 1.0 - UV_WRAP_MARGIN else ())
+    vs = (v,) + ((v + 1.0,) if v < UV_WRAP_MARGIN else ()) + ((v - 1.0,) if v > 1.0 - UV_WRAP_MARGIN else ())
+    return [(a, b) for a in us for b in vs]
 
 
 def match_by_uv(uv, co, tri_verts, tri_uv, other_co):
@@ -900,36 +1249,47 @@ def match_by_uv(uv, co, tri_verts, tri_uv, other_co):
     mesh with triangles ``tri_verts``, their corners' UVs ``tri_uv`` and positions ``other_co``.
 
     Returns the triangle and its barycentric weights per vertex; triangle -1 where no triangle is
-    within UV_TOLERANCE of its spot, or the spot lands more than MAX_MATCH_DISTANCE away. Where
-    islands of the UV map overlap (hands and body can share texture space), the island landing closest
-    to the vertex wins.
+    within UV_TOLERANCE of its spot, or the spot lands more than MAX_MATCH_DISTANCE away. Spots are
+    compared within one square of the UV map (see UV_WRAP_MARGIN). Where islands of the UV map overlap
+    (hands and body can share texture space), the island landing closest to the vertex wins.
     """
     island = _uv_islands(tri_verts, tri_uv)
-    flat = np.concatenate((tri_uv, np.zeros(tri_uv.shape[:2] + (1,))), axis=2).reshape(-1, 3)
+    tri_uv = _wrapped_triangles(tri_uv)
+    # Triangles without area in the UV map are lines in it, which a BVH tree never finds: each side is looked for
+    # as a thin strip around it instead (see `_flat_strips`).
+    strips, owner = _flat_strips(tri_uv)
+    searched = np.concatenate((tri_uv, strips))
+    flat = np.concatenate((searched, np.zeros(searched.shape[:2] + (1,))), axis=2).reshape(-1, 3)
     find = BVHTree.FromPolygons(flat.tolist(), np.arange(len(flat)).reshape(-1, 3).tolist(),
                                 all_triangles=True).find_nearest_range
+    owner = np.concatenate((np.arange(len(tri_uv)), owner))
     vertex, tri, spot, gap = [], [], [], []
     for k, (u, v) in enumerate(uv.tolist()):
         if u != u:
             continue
-        for location, _normal, index, distance in find((u, v, 0.0), UV_TOLERANCE):
-            vertex.append(k)
-            tri.append(index)
-            spot.append((location[0], location[1]))
-            gap.append(distance)
+        for au, av in _wrapped_spots(u, v):
+            for location, _normal, index, distance in find((au, av, 0.0), UV_TOLERANCE):
+                vertex.append(k)
+                tri.append(index)
+                spot.append((location[0], location[1]))
+                gap.append(distance)
     triangle = np.full(len(uv), -1, dtype=np.int64)
     weights = np.zeros((len(uv), 3))
     if not vertex:
         return triangle, weights
-    vertex, tri, gap = np.array(vertex), np.array(tri), np.array(gap)
-    bary = _barycentric(np.array(spot), tri_uv[tri])
+    vertex, tri, gap = np.array(vertex), owner[np.array(tri)], np.array(gap)
+    spot = np.array(spot)
+    bary = _barycentric(spot, tri_uv[tri])
+    for row in np.flatnonzero(_flat_in_uv(tri_uv[tri])):
+        bary[row] = _along_flat(spot[row], tri_uv[tri[row]], other_co[tri_verts[tri[row]]], co[vertex[row]])
     miss = np.linalg.norm(np.einsum("ij,ijk->ik", bary, other_co[tri_verts[tri]]) - co[vertex], axis=1)
-    # For each vertex and island the triangle closest in the UV map, then the island landing closest.
+    # For each vertex and island the triangles closest in the UV map, then of those the landing closest. Where
+    # several are as close (an island meets itself across a side of the square), they're all landings.
     island = island[tri]
-    order = np.lexsort((gap, island, vertex))
-    first = np.ones(len(order), dtype=bool)
-    first[1:] = (vertex[order][1:] != vertex[order][:-1]) | (island[order][1:] != island[order][:-1])
-    best = order[first]
+    pair = np.unique(np.stack((vertex, island), axis=1), axis=0, return_inverse=True)[1].reshape(-1)
+    closest = np.full(pair.max() + 1, np.inf)
+    np.minimum.at(closest, pair, gap)
+    best = np.flatnonzero(gap <= closest[pair] + 1e-7)
     best = best[np.lexsort((miss[best], vertex[best]))]
     first = np.ones(len(best), dtype=bool)
     first[1:] = vertex[best][1:] != vertex[best][:-1]
@@ -1439,6 +1799,27 @@ def _shape_bodies(body, source, other, target, tris):
     return result
 
 
+def _matched_share(found, mapped, tris, tri_uv):
+    """The share of the vertices with a spot in the UV map (``mapped``) that were ``found`` on the other body,
+    leaving out the islands of the UV map (of triangles ``tris``, their corners' UVs ``tri_uv``) it lacks
+    altogether, while those are at most MAX_MISSING_ISLANDS of them (see ISLAND_FOUND)."""
+    total = max(int(mapped.sum()), 1)
+    share = found.sum() / total
+    if share >= MIN_MATCHED or not len(tris):
+        return share
+    island = np.full(len(found), -1, dtype=np.int64)
+    tri_island = _uv_islands(tris, tri_uv)
+    for k in range(3):
+        island[tris[:, k]] = tri_island
+    counted = mapped & (island >= 0)
+    members = np.bincount(island[counted], minlength=int(tri_island.max()) + 1)
+    hits = np.bincount(island[counted & found], minlength=len(members))
+    missing = (hits < ISLAND_FOUND * members)[np.maximum(island, 0)] & counted
+    if missing.sum() > MAX_MISSING_ISLANDS * total:
+        return share
+    return found[mapped & ~missing].sum() / max(int((mapped & ~missing).sum()), 1)
+
+
 def _match_bodies(body, source, other, target, tris):
     """The shape ``target`` of ``other`` on the vertices of ``body`` (shape ``source``, triangles
     ``tris``), matched by their UV maps: (the vertices of ``body`` found on ``other``, in ``source``
@@ -1452,7 +1833,7 @@ def _match_bodies(body, source, other, target, tris):
     other_tris = _tris(other.data)
     triangle, weights = match_by_uv(uv, source, other_tris, other_corners[_tris(other.data, "loops")], target)
     found = triangle >= 0
-    share = found.sum() / max(int((~np.isnan(uv[:, 0])).sum()), 1)
+    share = _matched_share(found, ~np.isnan(uv[:, 0]), tris, corners[_tris(body.data, "loops")])
     if share < MIN_MATCHED:
         raise ResizeError("Only {:.0f}% of '{:s}' could be matched to '{:s}' by their UV maps: the bodies need the "
                           "same UV layout".format(100.0 * share, body.name, other.name))

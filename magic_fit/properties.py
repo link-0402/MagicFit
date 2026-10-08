@@ -1055,7 +1055,7 @@ class BodyFitBrushSettings(bpy.types.PropertyGroup):
         name="Rigid Parts",
         description=(
             "Separate parts smaller than this, like rings, studs, buttons and buckles, move as one piece "
-            "without changing shape. 0: none"
+            "without changing shape; those lying on the body grow or shrink with it. 0: none"
         ),
         subtype='DISTANCE',
         default=0.04,

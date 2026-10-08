@@ -266,6 +266,54 @@ def test_matched_bodies():
             check("UV" in str(error), "matched: refused with {:s} ({:s})".format(label, str(error)))
     check(resizing.body_shapes(coarse, "", mirrored, "Small").how == 'SHAPE',
           "matched: Auto matches bodies whose UV maps don't match by shape")
+    # A UV map a whole square away is the same layout (Bibo+ keeps its legs a square below Neolithe's), and so is
+    # one spanning two squares, where the triangles crossing between them reach over the side.
+    for label, from_shift, to_shift in (("a square below", None, (0.0, -1.0)),
+                                        ("across two squares", (0.5, 0.0), (-0.5, 0.0))):
+        moved = resize.body_object("Moved", large, small, quads, resize.body_uvs(large) + to_shift)
+        start = coarse if from_shift is None else resize.coarse_body(
+            "Shifted", uv=lambda co, shift=from_shift: resize.body_uvs(co) + shift)
+        moved_shapes = resizing.body_shapes(start, "", moved, "Small", 'UV')
+        check(len(moved_shapes.source) == len(source) and np.abs(moved_shapes.target - target).max() < 1e-6,
+              "matched: a UV map {:s} lands the same ({:.2e} m off)".format(
+                  label, np.abs(moved_shapes.target - target).max() if len(moved_shapes.target) == len(target) else -1))
+        bpy.data.objects.remove(moved)
+        if start != coarse:
+            bpy.data.objects.remove(start)
+
+    # A triangle without area in the UV map (Neolithe's neck opening is a ring of them, two corners sharing a UV)
+    # is a line in it: a spot on it lies on the side closest to the vertex, not in the triangle's middle.
+    line = np.array([[0.5, 0.5], [0.5, 0.5], [0.6, 0.5]])
+    corners = np.array([[0.0, 0.0, 0.0], [0.0, 0.03, 0.0], [0.1, 0.0, 0.0]])
+    triangle, weights = resizing.match_by_uv(np.array([[0.55, 0.5]]), np.array([[0.05, 0.014, 0.0]]),
+                                             np.array([[0, 1, 2]]), line[None], corners)
+    check(triangle[0] == 0 and np.allclose(weights[0], (0.0, 0.5, 0.5)),
+          "matched: a spot on a triangle without area in the UV map lies on its closest side ({!s})".format(
+              np.round(weights[0], 3).tolist()))
+
+    # An island of the UV map the To body lacks altogether (a gen3 body's extra detail in texture space no other
+    # layout uses) doesn't count against the share matched, up to a third of the body.
+    c_uv = resize.body_uvs(c_large) * 0.7
+    for label, rows, accepted in (("a fifth", np.linspace(-0.13, -0.05, 21), True),
+                                  ("half", np.linspace(-0.13, 0.12, 60), False)):
+        island, island_quads = resize.grid(np.linspace(-0.05, 0.05, 21), rows, resize.body_front)
+        island = island + (0.0, -0.3, 0.0)
+        island_uv = 0.8 + 0.15 * resize.body_uvs(island)
+        own = resize.body_object("Own Island", np.concatenate([c_large, island]), np.concatenate([c_small, island]),
+                                 np.concatenate([c_quads, island_quads + len(c_large)]),
+                                 np.concatenate([c_uv, island_uv]))
+        lacking = resize.body_object("Lacking", large, small, quads, resize.body_uvs(large) * 0.7)
+        share = len(island) / (len(island) + len(c_large))
+        try:
+            island_shapes = resizing.body_shapes(own, "", lacking, "Small", 'UV')
+            check(accepted and len(island_shapes.source) == len(c_large) and np.allclose(island_shapes.source, source),
+                  "matched: an island the To body lacks, {:s} of the body ({:.0f}%), is left out".format(label, 100 * share))
+        except resizing.ResizeError as error:
+            check(not accepted, "matched: an island the To body lacks, {:s} of the body ({:.0f}%), is refused ({:s})".format(
+                label, 100 * share, str(error)))
+        bpy.data.objects.remove(own)
+        bpy.data.objects.remove(lacking)
+
     # The same vertices joined the same way are a copy, matched vertex by vertex whatever their UVs.
     copy = resize.coarse_body("Copy", uv=lambda co: np.zeros((len(co), 2)))
     check(resizing.matching(coarse, copy) == 'VERTICES' and resizing.body_shapes(coarse, "", copy, "Small").how == 'VERTICES',
@@ -454,6 +502,25 @@ def test_rigid_parts():
     check(resize.stretch(before, after, edge_list) < 1.0 + 1e-9, "pendant: rigid, it keeps its shape")
     check(np.allclose(after.mean(axis=0), free.mean(axis=0)), "pendant: and goes where the space around it goes")
 
+    # A piece lying on the body (a ring, a chain link) grows and shrinks with it, keeping its shape.
+    _large, small, quads = resize.body_shapes()
+    plate, plate_quads = resize.offset_sheet(np.linspace(-0.085, -0.055, 7), np.linspace(-0.015, 0.015, 7), 0.002)
+    plate_edges = np.concatenate([plate_quads[:, [0, 1]], plate_quads[:, [1, 2]], plate_quads[:, [2, 3]],
+                                  plate_quads[:, [3, 0]]])
+    stiff = shape_change.apply(plate, rigid=np.zeros(len(plate), dtype=np.int64))
+    l0 = np.linalg.norm(plate[plate_edges[:, 0]] - plate[plate_edges[:, 1]], axis=1)
+    l1 = np.linalg.norm(stiff[plate_edges[:, 0]] - stiff[plate_edges[:, 1]], axis=1)
+    ratio = l1 / l0
+    unscaled = shape_change.apply(plate)
+    resizing.keep_rigid(plate, unscaled, np.zeros(len(plate), dtype=np.int64))
+    off =np.abs(signed_distance(stiff, small, quads))
+    off_unscaled = np.abs(signed_distance(unscaled, small, quads))
+    check(ratio.max() - ratio.min() < 1e-6 and ratio.mean() < 0.9,
+          "plate on the breast: rigid, it shrinks with it as one piece ({:.2f}x)".format(ratio.mean()))
+    check(np.median(off) < 0.75 * np.median(off_unscaled),
+          "plate on the breast: and stays closer to it than without shrinking ({:.1f} mm, {:.1f} mm)".format(
+              np.median(off) * 1000, np.median(off_unscaled) * 1000))
+
     co = np.concatenate([before, before + (0.1, 0.0, 0.0), before + (0.0, 0.0, 0.2)])
     edge_list = np.concatenate([edge_list, edge_list + 8, edge_list + 16])
     parts, count = resizing.loose_parts(co, edge_list)
@@ -463,6 +530,123 @@ def test_rigid_parts():
     check(count == 2 and parts[0] == parts[16], "loose parts: parts at the same spot are one (split seams)")
     sizes = resizing.part_sizes(co, parts, count)
     check(np.allclose(sizes, 0.02 * np.sqrt(3.0)), "loose parts: sized by their bounding box")
+
+
+def test_skin_follows_body():
+    shape_change, large, small, quads = change()
+    tris = np.concatenate([quads[:, [0, 1, 2]], quads[:, [0, 2, 3]]])
+    resize.build()
+    suit = bpy.data.objects["Suit"]
+    before = resize.positions(suit)
+    # Skin: every third vertex of the body (a mod's copy of the body's skin) and the centres of its triangles.
+    skin = np.concatenate([large[::3], large[tris].mean(axis=1)])
+    expected = np.concatenate([small[::3], small[tris].mean(axis=1)])
+    check(resizing.is_skin(skin, large, tris) and not resizing.is_skin(before, large, tris),
+          "skin: the body's own vertices are skin, a suit 3 mm off it isn't")
+    points = np.concatenate([before, skin])
+    bound = np.concatenate([np.zeros(len(before), dtype=bool), np.ones(len(skin), dtype=bool)])
+    edge_list = resize.edges(suit)
+    after = shape_change.apply(points, edges=edge_list, bound=bound)
+    gap = np.abs(after[len(before):] - expected).max()
+    check(gap < 1e-6, "skin: lands on the small shape ({:.2e} m off)".format(gap))
+    alone = shape_change.apply(before, edges=edge_list)
+    off = np.abs(signed_distance(after[:len(before)], small, quads) - 0.003)
+    off_alone = np.abs(signed_distance(alone, small, quads) - 0.003)
+    check(np.percentile(off, 95) <= np.percentile(off_alone, 95) + 1e-4,
+          "skin: the suit over it keeps its 3 mm from the body as well as without it ({:.2f}, {:.2f} mm, 95th percentile)".format(
+              np.percentile(off, 95) * 1000, np.percentile(off_alone, 95) * 1000))
+    loose = shape_change.apply(skin, edges=np.zeros((0, 2), dtype=np.int64))
+    check(np.abs(loose - expected).max() > 0.001, "skin: moved like clothing, it would miss the body ({:.1f} mm)".format(
+        np.abs(loose - expected).max() * 1000))
+
+    # Through the API, a skin mesh is told apart from the clothing.
+    body, garments = resize.devkit_body()
+    skin_obj = resize.mesh_object("Skin", resizing.rest_shape(body)[::2], [])
+    settings = reset_settings()
+    settings.resize_from_object = body
+    settings.resize_use_sizes = True
+    bpy.ops.magic_fit.resize_pick(setting="chest_size", option=1)
+    sizes = api.picked_sizes()
+    runs, _notes = api.resize_meshes([garments["Suit"], skin_obj], sizes, api.Job(settings), ["Medium"])
+    check(runs[0].skin == [skin_obj], "api: the skin mesh listed ({!s})".format(runs[0].skin))
+    medium_body = resizing.rest_shape(body, sizing.size_values(body, sizes[0].values))
+    check(np.abs(resize.positions(skin_obj, "Medium") - medium_body[::2]).max() < 1e-6,
+          "api: its key is the body's shape at the size")
+    bpy.data.objects.remove(skin_obj)
+
+
+def test_sculpted_skin():
+    shape_change, large, small, quads = change()
+    tris = np.concatenate([quads[:, [0, 1, 2]], quads[:, [0, 2, 3]]])
+    resize.build()
+    check(all(resizing.is_skin_material(name) for name in (
+        "mt_c0201b0001_bibo.mtrl", "/mt_c0201b0001_bibo.mtrl", "mt_c1401b0001_b.mtrl [faf614cb]", "mt_c0201b0001_a",
+        "mt_c0201b0101_eve.mtrl.001")) and not any(resizing.is_skin_material(name) for name in (
+        "mt_c0201b0001_piercings.mtrl", "mt_c0201b0001_bibopube.mtrl", "mt_c0201e0239_top_a.mtrl",
+        "mt_c0201b0001_a_nails.mtrl", "Material", "")),
+          "skin material: the game's skin, not piercings, pubes, nails or clothing")
+
+    # Skin a top's author lifted 2 mm off the breast (too far off to count as a copy of the body's), drawn with the
+    # skin material, and a lining 0.5 mm over it.
+    xs, zs = np.linspace(-0.11, -0.03, 21), np.linspace(-0.04, 0.04, 21)
+    skin, skin_quads = resize.offset_sheet(xs, zs, 0.002)
+    check(not resizing.is_skin(skin, large, tris), "sculpted skin: 2 mm off the body, it isn't a copy of it")
+    obj = resize.mesh_object("Lifted Skin", skin, skin_quads)
+    obj.data.materials.append(bpy.data.materials.new("Cloth"))
+    obj.data.materials.append(bpy.data.materials.new("mt_c0201b0001_bibo.mtrl"))
+    half = np.zeros(len(obj.data.polygons), dtype=np.int64)
+    half[: len(half) // 2] = 1
+    obj.data.polygons.foreach_set("material_index", half)
+    marked = resizing.skin_vertices(obj)
+    used = np.unique(skin_quads[: len(half) // 2])
+    check(marked[used].all() and marked.sum() == len(used), "skin vertices: those of the faces drawn with skin")
+    for polygon in obj.data.polygons:
+        polygon.material_index = 1
+    check(resizing.skin_vertices(obj).all(), "skin vertices: the whole mesh drawn with skin")
+    bpy.data.objects.remove(obj)
+
+    far = resize.offset_sheet(xs, zs, 0.0045)[0][:3]
+    farther = resize.offset_sheet(xs, zs, 0.007)[0][:3]
+    shares = resizing.skin_shares(np.concatenate([skin[:3], far, farther]), large, tris, np.ones(9, dtype=bool))
+    check(np.allclose(shares[:3], 1.0) and np.all((shares[3:6] > 0.3) & (shares[3:6] < 0.7)) and np.allclose(shares[6:], 0.0),
+          "skin shares: skin follows the body fully when close, fades out from 3 to 6 mm off ({:s})".format(
+              str(np.round(shares, 2).tolist())))
+
+    # Growing breasts, which the smooth move lags behind (see Keep Close): the skin and the lining laid over the small
+    # ones instead.
+    grow = resizing.ShapeChange(small, large, tris)
+    surface = resizing._surface(small, tris)
+    normals = surface.normals[surface._weld]
+    columns = np.flatnonzero((resize.XS >= -0.11) & (resize.XS <= -0.03))
+    rows = np.flatnonzero((resize.ZS >= -0.04) & (resize.ZS <= 0.04))
+    region = np.add.outer(columns * len(resize.ZS), rows).ravel()
+    sheet_quads = resize.grid(np.arange(len(columns)), np.arange(len(rows)), lambda x, z: 0.0 * x)[1]
+    skin = small[region] + 0.002 * normals[region]
+    lining = small[region] + 0.0025 * normals[region]
+    points = np.concatenate([skin, lining])
+    bound = np.concatenate([np.ones(len(skin)), np.zeros(len(lining))])
+    edge_list = np.concatenate([np.concatenate([q[:, [0, 1]], q[:, [1, 2]], q[:, [2, 3]], q[:, [3, 0]]])
+                                for q in (sheet_quads, sheet_quads + len(skin))])
+    faces = np.concatenate([sheet_quads[:, [0, 1, 2]], sheet_quads[:, [0, 2, 3]]])
+    after = grow.apply(points, edges=edge_list, bound=bound, faces=faces)
+    # The lining moved on its own, the skin following the body: what Resize did before it knew about the skin.
+    alone = grow.apply(lining, edges=np.concatenate([sheet_quads[:, [0, 1]], sheet_quads[:, [1, 2]],
+                                                     sheet_quads[:, [2, 3]], sheet_quads[:, [3, 0]]]))
+    without = np.concatenate([grow.bind(skin), alone])
+    skin_off = signed_distance(after[:len(skin)], large, quads)
+    # About: its spot on the breast keeps its offset along the normal there, which curves less on the large breast.
+    check(np.abs(skin_off - 0.002).max() < 0.00075,
+          "sculpted skin: keeps its 2 mm off the grown breast ({:.2f} to {:.2f} mm)".format(
+              skin_off.min() * 1000, skin_off.max() * 1000))
+    # Over the skin, not past its edges.
+    inner = np.add.outer(np.arange(2, len(columns) - 2) * len(rows), np.arange(2, len(rows) - 2)).ravel()
+    gap = signed_distance(after[len(skin):][inner], after[:len(skin)], sheet_quads)
+    gap_without = signed_distance(without[len(skin):][inner], without[:len(skin)], sheet_quads)
+    check(gap.min() > 0.0005 - 0.00015,
+          "lining: stays over its own skin ({:.2f} mm closest, authored 0.5 mm)".format(gap.min() * 1000))
+    check(gap_without.min() < gap.min() - 0.0002,
+          "lining: moved without the skin, it would sink into it ({:.2f} mm)".format(
+              gap_without.min() * 1000))
 
 
 def test_round_trip():
