@@ -20,7 +20,9 @@ Creases are bridged: the movement is taken from crease-free versions of both sha
 that a large ball rolled over the body can't reach (the underbust, the cleavage) is lifted onto the
 balls. A dress spanning the underbust then keeps spanning it when the breasts grow, moving out with the
 breast above it, instead of sinking into the deeper crease with the skin. Clothing that lay on the skin
-is fitted back to the real body afterwards (Keep Close).
+is fitted back to the real body afterwards (Keep Close), and where the body would come out between the
+clothing's vertices (a pointier breast under a low-poly top), the faces over it are pushed back out (Keep
+Covered). `refining` cuts such faces beforehand, so the clothing can take the body's shape there.
 
 The mesh keeps its relation to the first shape: a part clipping into it by 2 mm clips into the second
 one about as much. Body Fit fixes that afterwards.
@@ -85,6 +87,26 @@ KEEP_FADE = 0.9
 KEEP_PASSES = 80
 # Rounds of measuring and correcting (each measures the distances anew).
 KEEP_ROUNDS = 8
+
+# Keep Covered: last, clothing that came apart from the body is pushed back out over it. The clothing over a vertex of
+# the body is the first triangle its line out meets within this distance...
+COVER_REACH = 0.02
+# ...where that faces along the line at least this much (the cosine; the side of a strap covers nothing) and lies over
+# this part of the body: at least this share as far from the body as from the vertex.
+COVER_FACING = 0.5
+COVER_OVER = 0.5
+# Clothing is kept as far over the body as it was, up to this much (a cape far out over a breast only stays out of
+# it), less Keep Close's slack (PUSH_SLACK): what Keep Close lets sink, this does too.
+COVER_KEEP = 0.002
+# A vertex of the body counts as out through a triangle within this share of the triangle past its edges.
+COVER_EDGE = 0.2
+# Rounds of measuring and pushing (a push can uncover another vertex); each push is spread to the clothing around it
+# this far away, fading smoothly, as far as this many edges reach (its own piece).
+COVER_ROUNDS = 2
+COVER_SPREAD = 0.02
+COVER_RINGS = 16
+# A push that would turn triangles over is halved at their corners up to this many times, then left out.
+COVER_HALVINGS = 4
 
 # Rigid parts with this share of their points closer to the body than this lie on it: they follow its surface, as
 # skin does (see ShapeChange.bind), and grow or shrink with it (see keep_rigid).
@@ -598,7 +620,8 @@ class ShapeChange:
             moved[chosen] += share[:, None] * _average(points[chosen], reach[chosen], samples[level])
         return moved
 
-    def apply(self, points, progress=None, rigid=None, edges=None, bound=None, faces=None, skin=None, follow=None):
+    def apply(self, points, progress=None, rigid=None, edges=None, bound=None, faces=None, skin=None, follow=None,
+              cover=None):
         """Where ``points`` (n x 3, world space, fitted to the source shape) go with the target shape.
 
         ``rigid`` optionally labels points that move together without changing shape (a label per
@@ -609,9 +632,11 @@ class ShapeChange:
         smooth move, in Keep Close or in rigid groups; a share between blends the two moves (see
         `skin_shares`). Clothing near the skin takes the skin's correction (see SKIN_FOLLOW_NEAR).
         ``faces`` (triples of point indices: the meshes' triangles) give Keep Close the skin's surface, so
-        clothing lying on it keeps its distance from it (see `keep_close`). ``progress(fraction)`` is called
-        after every step. ``skin`` (that surface, as `keep_close` takes it) and ``follow`` (the skin's
-        points, where they go and their shares) are for the move without the skin.
+        clothing lying on it keeps its distance from it (see `keep_close`). ``cover`` (the triangles of all the
+        meshes, likewise) turns on Keep Covered: clothing the body came out through, between its points or at them,
+        is pushed back out over it (see `keep_covered`). ``progress(fraction)`` is called after every step. ``skin``
+        (that surface, as `keep_close` takes it) and ``follow`` (the skin's points, where they go and their shares) are
+        for the move without the skin.
         """
         start = np.array(points, dtype=np.float64).reshape(-1, 3)
         if bound is not None:
@@ -634,6 +659,9 @@ class ShapeChange:
                 result = self.apply(start, progress, rigid, edges, skin=skin, follow=(held, skin_at, bound[held]))
                 share = bound[held, None]
                 result[held] = share * skin_at + (1.0 - share) * result[held]
+                if cover is not None:
+                    # The skin stays on the body.
+                    result = self.keep_covered(start, result, cover, rigid, fixed=bound >= 0.5)
                 return result
         if not len(start) or self.largest <= 0.0:
             return start
@@ -730,7 +758,22 @@ class ShapeChange:
                 shift /= np.maximum(np.bincount(owner[partly], minlength=len(share)), 1)[:, None]
                 moved = ~on_body[members]
                 result[members[moved]] += shift[owner[moved]]
+        if cover is not None:
+            result = self.keep_covered(start, result, cover, rigid)
         return result
+
+    def keep_covered(self, start, moved, cover, rigid=None, fixed=None):
+        """``moved`` (where `apply` took ``start``) with the clothing pushed back out over the body (Keep Covered, see
+        `keep_covered`). ``cover`` are the triangles of all the meshes (point indices), ``rigid`` labels rigid parts as
+        `apply` takes it, and ``fixed`` (a mask) marks points that stay where they are (skin)."""
+        tris = np.asarray(cover, dtype=np.int64).reshape(-1, 3)
+        if not len(tris) or not len(start) or self.largest <= 0.0:
+            return moved
+        source = self._from.surface(self.source, self.tris)
+        fixed = np.zeros(len(start), dtype=bool) if fixed is None else np.asarray(fixed, dtype=bool)
+        found = _shared(self._shared, ("cover", self._key, _digest(start, tris, fixed)),
+                        lambda: _Cover(start, tris, source, fixed))
+        return keep_covered(found, moved, _surface(self.target, self.tris, like=source), rigid)
 
     def bind(self, points):
         """Where ``points`` lying on the source shape (skin) go with the target shape: each keeps its spot
@@ -991,6 +1034,223 @@ def keep_close(start, moved, edges, source, target, tris, anchors=None, progress
         if progress is not None:
             progress((done + 1) / KEEP_ROUNDS)
     return points[kept.weld]
+
+
+class _Cover:
+    """What Keep Covered finds of clothing at ``start`` (n x 3) on the source shape (``body``, a BodySurface), with
+    the meshes' triangles ``tris`` and their ``fixed`` points (skin, a mask), the same whatever the target shape: the
+    body under each point and the clothing over each vertex of the body (see `keep_covered`)."""
+
+    def __init__(self, start, tris, body, fixed=None):
+        start = np.asarray(start, dtype=np.float64)
+        # Points at the same spot are one.
+        _spots, weld = np.unique(start, axis=0, return_inverse=True)
+        self.weld = weld.reshape(-1)
+        count = self.count = int(self.weld.max()) + 1
+        self.first = np.zeros(count, dtype=np.int64)
+        self.first[self.weld[::-1]] = np.arange(len(self.weld))[::-1]
+        points = start[self.first]
+        tris = self.weld[tris]
+        tris = self.tris = tris[(tris[:, 0] != tris[:, 1]) & (tris[:, 1] != tris[:, 2]) & (tris[:, 2] != tris[:, 0])]
+        # How the triangles face (unscaled), which pushes mustn't turn over.
+        self.normals = np.cross(points[tris[:, 1]] - points[tris[:, 0]], points[tris[:, 2]] - points[tris[:, 0]])
+        self.fixed = np.zeros(count, dtype=bool)
+        if fixed is not None:
+            np.logical_or.at(self.fixed, self.weld, np.asarray(fixed, dtype=bool))
+        # How far out over the body each point is.
+        near = body.nearest(points)
+        height = self.height = np.where(near.found & ~near.beyond, near.distance, np.nan)
+        # Over each vertex of the body: the first triangle of clothing its line out meets within COVER_REACH (not the
+        # skin's, which lies on it; nor one along the line, the side of a strap), where that lies over this part of
+        # the body: about as far from the body as from the vertex, not closer to another part (a sleeve on the arm,
+        # seen from the side of a breast).
+        self.over = np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64), np.zeros(0)
+        clothing = ~self.fixed[tris].all(axis=1)
+        if clothing.any():
+            cloth = np.flatnonzero(clothing)
+            cast = BVHTree.FromPolygons(points.tolist(), tris[cloth].tolist(), all_triangles=True).ray_cast
+            rows, found, distances = [], [], []
+            for k, origin, ray in zip(range(len(body.co)), (body.co + 1e-6 * body.normals).tolist(),
+                                      body.normals.tolist()):
+                hit, facing, index, distance = cast(origin, ray, COVER_REACH)
+                if hit is not None and abs(facing.dot(ray)) >= COVER_FACING:
+                    rows.append(k)
+                    found.append(cloth[index])
+                    distances.append(distance)
+            rows, found, distances = (np.array(rows, dtype=np.int64), np.array(found, dtype=np.int64),
+                                      np.array(distances))
+            if len(rows):
+                lies = np.nan_to_num(height, nan=0.0)[tris[found]].mean(axis=1) >= COVER_OVER * distances
+                self.over = rows[lies], found[lies], distances[lies]
+        # The meshes' edges (welded), each both ways, for spreading pushes.
+        pairs = np.sort(np.concatenate([tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]]]), axis=1)
+        pairs = np.unique(pairs, axis=0)
+        self.into = np.concatenate((pairs[:, 0], pairs[:, 1]))
+        self.out_of = np.concatenate((pairs[:, 1], pairs[:, 0]))
+
+
+def _kept(height):
+    """How far over the body clothing that lay ``height`` over it is kept: as far, up to COVER_KEEP, less PUSH_SLACK."""
+    return np.minimum(height, COVER_KEEP) - PUSH_SLACK
+
+
+def keep_covered(found, moved, body, rigid=None):
+    """Push clothing back out over the body after a move (Keep Covered).
+
+    ``found`` (a _Cover) holds, from the source shape, the body under each point of the clothing and the clothing's
+    triangle over each vertex of the body. ``moved`` are the points after the move and ``body`` the target shape (a
+    BodySurface with the source's welding). The move and Keep Close keep the clothing's points out of the body, but
+    not its faces: a low-poly top over a breast that grew pointier, or a nipple, lets the body out between its points.
+    So a point that sank closer to the body than it lay (up to COVER_KEEP, less PUSH_SLACK) is pushed back out, and
+    where a vertex of the body comes out through the triangle that covered it (inside its edges, seen along its
+    normal), the triangle's corners are pushed out until it covers the vertex as it did, each by its share of the
+    spot over the vertex. Pushes go along the body's normal, and are spread to the clothing around within
+    COVER_SPREAD so it comes along smoothly; rigid parts (``rigid``, a label per point, -1 for none) move whole, as far
+    as their point that needs it most, and fixed points (skin) never move. Only ever pushes out. Returns the new
+    positions.
+    """
+    from .fitting import _barycentric
+    weld, first, count, tris = found.weld, found.first, found.count, found.tris
+    points = np.asarray(moved, dtype=np.float64)[first]
+    still = found.fixed
+    group = np.full(count, -1, dtype=np.int64)
+    if rigid is not None:
+        np.maximum.at(group, weld, np.asarray(rigid, dtype=np.int64))
+    # Points that lay over the body, near enough to sink into it.
+    on_body = np.flatnonzero(np.isfinite(found.height) & (found.height > 0.0) & (found.height < COVER_REACH) & ~still)
+    body_kept = _kept(found.height[on_body])
+    rows, over_tri, distances = found.over
+    corners, under, outward = tris[over_tri], body.co[rows], body.normals[rows]
+    over_kept = _kept(distances)
+    total = np.zeros((count, 3))
+    for _ in range(COVER_ROUNDS):
+        now = points + total
+        need = np.zeros(count)
+        direction = np.zeros((count, 3))
+
+        def offer(which, amount, way):
+            """Push ``which`` by ``amount`` along ``way``, where that's more than they're pushed already."""
+            more = amount > need[which]
+            which, amount, way = which[more], amount[more], way[more]
+            # Of repeats, the largest (assigned last) wins.
+            order = np.argsort(amount)
+            need[which[order]] = amount[order]
+            direction[which[order]] = way[order]
+
+        # Points sunk toward the body, from where it is closest now.
+        near = body.nearest(now[on_body])
+        offer(on_body, np.where(near.found & ~near.beyond, body_kept - near.distance, 0.0), near.normal)
+        # Vertices of the body out through the triangles over them: where the line out along the vertex's normal meets
+        # the triangle's plane (within its edges), how far over the vertex that is.
+        if len(rows):
+            a, b, c = (now[corners[:, k]] for k in range(3))
+            unit = np.cross(b - a, c - a)
+            unit /= np.maximum(np.linalg.norm(unit, axis=1, keepdims=True), 1e-30)
+            facing = np.einsum("ij,ij->i", unit, outward)
+            across = np.abs(facing) >= COVER_FACING
+            height = np.einsum("ij,ij->i", a - under, unit) / np.where(across, facing, 1.0)
+            bary = _barycentric(under + height[:, None] * outward, a, b, c)
+            within = (bary.min(axis=1) >= -COVER_EDGE) & across
+            short = np.where(within, over_kept - height, 0.0)
+            share = np.clip(bary, 0.0, None)
+            share /= np.maximum(share.sum(axis=1, keepdims=True), 1e-12)
+            share /= np.maximum((share * share).sum(axis=1, keepdims=True), 1e-12)
+            for k in range(3):
+                offer(corners[:, k], short * share[:, k], outward)
+        need[still] = 0.0
+        # A push farther than clothing is looked for is clothing lost, not body coming out.
+        need[need > COVER_REACH] = 0.0
+        pushed = need > 1e-6
+        if not pushed.any():
+            break
+        push = np.where(pushed[:, None], need[:, None] * direction, 0.0)
+        step = np.zeros((count, 3))
+        # Rigid parts move whole: along their points' pushes, as far as the one that needs it most.
+        members = np.flatnonzero((group >= 0) & pushed)
+        if len(members):
+            labels, owner = np.unique(group[members], return_inverse=True)
+            owner = owner.reshape(-1)
+            way = np.stack([np.bincount(owner, weights=push[members, k], minlength=len(labels)) for k in range(3)], 1)
+            way /= np.maximum(np.linalg.norm(way, axis=1, keepdims=True), 1e-12)
+            reach = need[members] / np.maximum(np.einsum("ij,ij->i", direction[members], way[owner]), 0.3)
+            far = np.zeros(len(labels))
+            np.maximum.at(far, owner, reach)
+            whole = np.flatnonzero(np.isin(group, labels))
+            step[whole] = (way * far[:, None])[np.searchsorted(labels, group[whole])]
+        # The rest: each pushed point as far as it can without turning triangles over, the points around it along,
+        # fading with the distance (a push held back isn't spread, or the clothing around would rise in its place).
+        loose = pushed & (group < 0)
+        if loose.any():
+            own = _unflipped(tris, found.normals, now, np.where(loose[:, None], push, 0.0))
+            loose &= np.einsum("ij,ij->i", own, push) > 1e-12
+            if loose.any():
+                step += _spread_pushes(found, own, loose, still | (group >= 0), now)
+        total += _unflipped(tris, found.normals, now, step)
+    return np.asarray(moved, dtype=np.float64) + total[weld]
+
+
+def _unflipped(tris, normals, points, step):
+    """``step`` (a move of ``points``), less where it would turn triangles over from how they faced (``normals``, on the
+    source shape): the corners of such triangles move half as far, up to COVER_HALVINGS times, then not at all (pushed
+    corners of a triangle spanning a crease can go two ways). Triangles the move turned over already don't count."""
+
+    def turned(at):
+        faces = np.cross(at[tris[:, 1]] - at[tris[:, 0]], at[tris[:, 2]] - at[tris[:, 0]])
+        return np.einsum("ij,ij->i", normals, faces) <= 0.0
+    # Triangles with no area have no side to turn to.
+    sided = (np.einsum("ij,ij->i", normals, normals) > 1e-20) & ~turned(points)
+    scale = np.ones(len(points))
+    for halving in range(COVER_HALVINGS + len(tris)):
+        over = sided & turned(points + step * scale[:, None])
+        if not over.any():
+            break
+        corners = np.unique(tris[over])
+        scale[corners] = scale[corners] * 0.5 if halving < COVER_HALVINGS else 0.0
+    return step * scale[:, None]
+
+
+def _spread_pushes(found, push, pushed, still, points):
+    """``push`` (per welded point, at ``points``) at the ``pushed`` points, spread to the points around them within
+    COVER_SPREAD (weighted along a smooth bump): those of the same piece of clothing (within COVER_RINGS edges of
+    ``found``, a _Cover), and those of any piece lying farther out than the pushed point (a strap over a cup that's
+    pushed out comes along), not those under it. ``still`` points take none."""
+    from mathutils.kdtree import KDTree
+    into, out_of, count = found.into, found.out_of, found.count
+    piece = pushed.copy()
+    for _ in range(COVER_RINGS):
+        reached = np.bincount(into, weights=piece[out_of], minlength=count) > 0.0
+        if not (reached & ~piece).any():
+            break
+        piece |= reached
+    sources = np.flatnonzero(pushed)
+    tree = KDTree(len(sources))
+    for index, point in enumerate(points[sources].tolist()):
+        tree.insert(point, index)
+    tree.balance()
+    # Only points within reach of the pushes' box are looked at.
+    low = points[sources].min(axis=0) - COVER_SPREAD
+    high = points[sources].max(axis=0) + COVER_SPREAD
+    near = (~still | pushed) & (points >= low).all(axis=1) & (points <= high).all(axis=1)
+    height = np.nan_to_num(found.height, nan=-np.inf)
+    rows, cols, weights = [], [], []
+    for row, point in zip(np.flatnonzero(near).tolist(), points[near].tolist()):
+        for _co, index, distance in tree.find_range(point, COVER_SPREAD):
+            source = sources[index]
+            if piece[row] or height[row] >= height[source]:
+                rows.append(row)
+                cols.append(source)
+                weights.append((1.0 - (distance / COVER_SPREAD) ** 2) ** 2)
+    rows, cols, weights = np.array(rows, dtype=np.int64), np.array(cols, dtype=np.int64), np.array(weights)
+    # The pushes around each point, by their weights, as a share of one at most: a lone push fades out from its
+    # point, and among many the point takes their average.
+    total = np.maximum(np.bincount(rows, weights=weights, minlength=count), 1.0)
+    result = np.stack([np.bincount(rows, weights=weights * push[cols, k], minlength=count) for k in range(3)], 1)
+    result /= total[:, None]
+    # A pushed point goes at least as far as it needs itself.
+    own = np.einsum("ij,ij->i", result[pushed], push[pushed]) / np.maximum(np.einsum("ij,ij->i", push[pushed],
+                                                                                     push[pushed]), 1e-30)
+    result[pushed] += np.maximum(1.0 - own, 0.0)[:, None] * push[pushed]
+    return result
 
 
 def keep_rigid(before, after, groups, on_body=None):

@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(ROOT, "tests"))
 
 import resize  # noqa: E402
 import magic_fit  # noqa: E402
-from magic_fit import api, fitting, lineup, operators, properties, resizing, sizing  # noqa: E402
+from magic_fit import api, fitting, lineup, operators, properties, refining, resizing, sizing  # noqa: E402
 
 FAILURES = []
 
@@ -69,6 +69,15 @@ def garment_edges(objects):
     result, first = [], 0
     for obj in objects:
         result.append(resize.edges(obj) + first)
+        first += len(obj.data.vertices)
+    return np.concatenate(result)
+
+
+def garment_tris(objects):
+    """The triangles of ``objects``, numbered across them in order (as the operator numbers them)."""
+    result, first = [], 0
+    for obj in objects:
+        result.append(resize.triangles(obj) + first)
         first += len(obj.data.vertices)
     return np.concatenate(result)
 
@@ -870,6 +879,97 @@ def test_keep_close_suit():
     check(np.array_equal(moved[seam_a], moved[seam_b]), "keep close: the strap's seam between its objects stays closed")
 
 
+def test_keep_covered():
+    # A flat chest (facing -y, 2 mm vertices) that grows a bump 8 mm high and 4 mm wide (a nipple) in the middle of a
+    # face of a coarse sheet 2 mm in front of it, its vertices 15 mm apart.
+    steps = np.linspace(-0.05, 0.05, 51)
+    flat, body_quads = resize.grid(steps, steps, lambda x, z: np.zeros_like(x))
+    bumped = flat.copy()
+    bumped[:, 1] -= 0.008 * np.exp(-(flat[:, 0] ** 2 + flat[:, 2] ** 2) / (2.0 * 0.004 ** 2))
+    body_tris = np.concatenate([body_quads[:, [0, 1, 2]], body_quads[:, [0, 2, 3]]])
+    sheet_steps = np.arange(-0.0375, 0.0375 + 1e-9, 0.015)
+    sheet, sheet_quads = resize.grid(sheet_steps, sheet_steps, lambda x, z: np.full_like(x, -0.002))
+    sheet_tris = np.concatenate([sheet_quads[:, [0, 1, 2]], sheet_quads[:, [0, 2, 3]]])
+    edge_list = np.concatenate([sheet_quads[:, [0, 1]], sheet_quads[:, [1, 2]], sheet_quads[:, [2, 3]],
+                                sheet_quads[:, [3, 0]]])
+    grow = resizing.ShapeChange(flat, bumped, body_tris)
+
+    def through(points):
+        """How far the bump's tip comes out in front of the sheet (positive: through it)."""
+        bvh = BVHTree.FromPolygons(points.tolist(), sheet_tris.tolist(), all_triangles=True)
+        hit = bvh.ray_cast(bumped[np.argmin(bumped[:, 1])].tolist(), (0.0, 1.0, 0.0), 0.05)
+        return 0.0 if hit[0] is None else hit[3]
+
+    plain = grow.apply(sheet, edges=edge_list)
+    covered = grow.apply(sheet, edges=edge_list, cover=sheet_tris)
+    check(through(plain) > 0.004, "covered: without it, the bump comes out through the sheet ({:.1f} mm)".format(
+        through(plain) * 1000))
+    check(through(covered) == 0.0, "covered: the sheet covers the bump ({:.1f} mm through)".format(
+        through(covered) * 1000))
+    tip = bumped[:, 1].min()
+    check(covered[:, 1].min() < tip, "covered: the face over it lifts in front of it ({:.1f} mm ahead)".format(
+        (tip - covered[:, 1].min()) * 1000))
+    pushed = covered - plain
+    check(pushed[:, 1].max() <= 1e-9, "covered: only ever pushes out")
+    check(resize.flipped(sheet, covered, sheet_tris) == 0, "covered: no face of the sheet turned over")
+    far = np.abs(sheet[:, [0, 2]]).max(axis=1) > 0.03
+    check(np.abs(pushed[far]).max() < 1e-9, "covered: the sheet away from the bump stays where the move put it")
+    same = resizing.ShapeChange(flat, flat, body_tris)
+    check(np.array_equal(same.apply(sheet, edges=edge_list, cover=sheet_tris), sheet),
+          "covered: no change, nothing moves")
+
+
+def test_subdivide_for_sizes():
+    # The same chest and bump as test_keep_covered, and the coarse sheet as a mesh with a shape key, a vertex group, a
+    # UV map and custom normals.
+    steps = np.linspace(-0.05, 0.05, 51)
+    flat, body_quads = resize.grid(steps, steps, lambda x, z: np.zeros_like(x))
+    bumped = flat.copy()
+    bumped[:, 1] -= 0.008 * np.exp(-(flat[:, 0] ** 2 + flat[:, 2] ** 2) / (2.0 * 0.004 ** 2))
+    body_tris = np.concatenate([body_quads[:, [0, 1, 2]], body_quads[:, [0, 2, 3]]])
+    sheet_steps = np.arange(-0.0375, 0.0375 + 1e-9, 0.015)
+    sheet, sheet_quads = resize.grid(sheet_steps, sheet_steps, lambda x, z: np.full_like(x, -0.002))
+    sheet_tris = np.concatenate([sheet_quads[:, [0, 1, 2]], sheet_quads[:, [0, 2, 3]]])
+    bending = refining.faces_to_cut(sheet, sheet_tris, flat, [bumped], body_tris)
+    centres = sheet[sheet_tris].mean(axis=1)
+    over = np.abs(centres[:, [0, 2]]).max(axis=1) < 0.0075
+    check(bending[over].all() and not bending[np.abs(centres[:, [0, 2]]).max(axis=1) > 0.02].any(),
+          "subdivide: the faces over the bump bend, those far from it don't ({:d} of {:d})".format(
+              int(bending.sum()), len(bending)))
+    check(not refining.faces_to_cut(sheet, sheet_tris, flat, [flat * 1.2], body_tris).any(),
+          "subdivide: a body that just grows needs no cut")
+
+    obj = resize.mesh_object("Coarse Sheet", sheet, sheet_tris)
+    mesh = obj.data
+    obj.shape_key_add(name="Basis", from_mix=False)
+    key = obj.shape_key_add(name="Moved", from_mix=False)
+    key.data.foreach_set("co", (sheet + (0.0, -0.01, 0.0)).astype(np.float32).ravel())
+    group = obj.vertex_groups.new(name="j_mune_l")
+    group.add(list(range(len(sheet))), 0.5, 'REPLACE')
+    resize.add_uvs(obj, resize.body_uvs(sheet))
+    # Custom normals tilted toward +x, as a game model's are, unlike the faces'.
+    tilted = np.tile(np.array([0.3, -1.0, 0.0]) / np.linalg.norm([0.3, -1.0, 0.0]), (len(mesh.loops), 1))
+    mesh.normals_split_custom_set(tilted.tolist())
+    polygon = np.empty(len(mesh.loop_triangles), dtype=np.int64)
+    mesh.calc_loop_triangles()
+    mesh.loop_triangles.foreach_get("polygon_index", polygon)
+    count = len(mesh.vertices)
+    added = refining.subdivide(mesh, np.unique(polygon[bending]))
+    check(added > 0 and len(mesh.vertices) == count + added and all(len(p.vertices) == 3 for p in mesh.polygons),
+          "subdivide: {:d} vertices added, all faces triangles".format(added))
+    moved = resize.positions(obj, "Moved") - resize.positions(obj)
+    check(np.abs(moved - (0.0, -0.01, 0.0)).max() < 1e-6, "subdivide: the shape key moves the new vertices alike")
+    weights = [v.groups[0].weight if len(v.groups) else 0.0 for v in mesh.vertices]
+    check(np.allclose(weights, 0.5), "subdivide: the new vertices are weighted as their neighbours")
+    normals = np.array([n.vector[:] for n in mesh.corner_normals])
+    # Blender keeps custom normals to about 1e-4.
+    check(mesh.has_custom_normals and np.abs(normals - tilted[0]).max() < 1e-3,
+          "subdivide: custom normals kept, on the new corners too ({:.1e} off)".format(
+              np.abs(normals - tilted[0]).max()))
+    check(mesh.attributes.get(refining.ORIGIN) is None, "subdivide: leaves no attribute of its own behind")
+    bpy.data.objects.remove(obj)
+
+
 # -----------------------------------------------------------------------------
 # The operator
 
@@ -905,7 +1005,8 @@ def test_operator():
     rigid = np.full(sum(len(co) for co in before.values()), -1)
     rigid[-8:] = 0  # the pendant is the only part smaller than Rigid Parts
     expected = shape_change.apply(np.concatenate(list(before.values())), rigid=rigid,
-                                  edges=garment_edges(garments.values()))
+                                  edges=garment_edges(garments.values()),
+                                  cover=garment_tris(garments.values()))
     got = np.concatenate([resize.positions(obj, "Small") for obj in garments.values()])
     check(np.abs(got - expected).max() < 1e-5, "button: every selected mesh got the resized shape, kept close ({:.2g} m off)".format(
         np.abs(got - expected).max()))
@@ -972,7 +1073,8 @@ def test_operator_matched_bodies():
                                                                          bridge=settings.resize_bridge)
     rigid = np.full(len(before), -1)
     rigid[-8:] = 0  # the pendant
-    expected = shape_change.apply(before, rigid=rigid, edges=garment_edges(garments.values()))
+    expected = shape_change.apply(before, rigid=rigid, edges=garment_edges(garments.values()),
+                                  cover=garment_tris(garments.values()))
     got = np.concatenate([resize.positions(obj, "Small") for obj in garments.values()])
     check(np.abs(got - expected).max() < 1e-5, "matched button: the meshes got the resized shape")
     check(not resizing.shows_to_shape(coarse, "", body, "Small"), "matched hint: the To body doesn't show its To key")
@@ -1006,7 +1108,8 @@ def test_operator_shape_matched():
           "shape button: keeps clothing close to the To body itself")
     rigid = np.full(len(before), -1)
     rigid[-8:] = 0  # the pendant
-    expected = change.apply(before, rigid=rigid, edges=garment_edges(garments.values()))
+    expected = change.apply(before, rigid=rigid, edges=garment_edges(garments.values()),
+                            cover=garment_tris(garments.values()))
     got = np.concatenate([resize.positions(obj, "Small") for obj in garments.values()])
     check(np.abs(got - expected).max() < 1e-5, "shape button: the meshes got the resized shape ({:.2g} m off)".format(
         np.abs(got - expected).max()))
@@ -1242,7 +1345,8 @@ def test_plain_key_sizes():
     change = resizing.body_shapes(body, "", None, "Small").change(radius=brush.resize_radius, bridge=brush.resize_bridge)
     rigid = np.full(len(before), -1)
     rigid[-8:] = 0
-    expected = change.apply(before, rigid=rigid, edges=garment_edges(garments.values()))
+    expected = change.apply(before, rigid=rigid, edges=garment_edges(garments.values()),
+                            cover=garment_tris(garments.values()))
     got = np.concatenate([resize.positions(obj, "Small") for obj in garments.values()])
     check(np.abs(got - expected).max() < 1e-5, "plain keys: as resizing to the key ({:.2g} m off)".format(
         np.abs(got - expected).max()))
@@ -1292,7 +1396,8 @@ def test_sizes_operator():
     rigid = np.full(sum(len(co) for co in before.values()), -1)
     rigid[-8:] = 0
     expected = shape_change.apply(np.concatenate(list(before.values())), rigid=rigid,
-                                  edges=garment_edges(garments.values()))
+                                  edges=garment_edges(garments.values()),
+                                  cover=garment_tris(garments.values()))
     got = np.concatenate([resize.positions(obj, "Medium Rue") for obj in garments.values()])
     check(np.abs(got - expected).max() < 1e-5, "sizes: as resizing to a hand-set copy ({:.2g} m off)".format(
         np.abs(got - expected).max()))
@@ -1310,7 +1415,8 @@ def test_sizes_operator():
           "several: a key per size, the one made before kept")
     small = resizing.body_shapes(body, "", None, "", 'AUTO', sizing.size_values(body, picks.changed[1].values))
     expected = small.change(radius=settings.resize_radius, bridge=settings.resize_bridge).apply(
-        np.concatenate(list(before.values())), rigid=rigid, edges=garment_edges(garments.values()))
+        np.concatenate(list(before.values())), rigid=rigid, edges=garment_edges(garments.values()),
+        cover=garment_tris(garments.values()))
     got = np.concatenate([resize.positions(obj, "Small Rue") for obj in garments.values()])
     check(np.abs(got - expected).max() < 1e-5, "several: from the clothing's own shape, not the size it shows "
                                                "({:.2g} m off)".format(np.abs(got - expected).max()))

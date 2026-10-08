@@ -37,6 +37,9 @@ METRICS = (
     ("tight_p95", band("0-3mm", "p95"), False, 3, "95th percentile of the above, 0-3 mm (mm)"),
     ("clip_out", part("clearance", "clip_out"), True, 0, "vertices that were outside the skin, now 1 mm+ inside"),
     ("deepest", lambda t: -t["clearance"]["deepest_mm"], False, 2, "deepest vertex inside the body (mm)"),
+    ("poke", part("poke", "through"), True, 0, "body vertices out through the clothing's faces by 0.5 mm+"),
+    ("poke_2mm", part("poke", "through_2mm"), True, 0, "the same by 2 mm+"),
+    ("poke_max", part("poke", "deepest_mm"), False, 2, "farthest body vertex out through the clothing (mm)"),
     ("rigid_max", part("rigid", "max"), False, 2, "worst clearance change of a rigid part on the skin (mm)"),
     ("rigid_1mm", part("rigid", "over_1mm"), True, 0, "rigid parts on the skin off by 1 mm+"),
     ("thick_p95", part("thickness", "p95"), False, 3, "95th percentile of layer thickness change (mm)"),
@@ -49,9 +52,9 @@ METRICS = (
 )
 # Changes smaller than these (relative, or absolute in the metric's unit) are ties.
 TIE_RELATIVE = 0.05
-TIE_ABSOLUTE = {"seconds": 0.2, "clip_out": 2, "rigid_1mm": 1, "thick_1mm": 5, "flipped": 1}
-WORST = (("clearance", ("clearance", "worst")), ("thickness", ("thickness", "worst")), ("rigid", ("rigid", "worst")),
-         ("detail", ("detail", "worst")), ("round trip", ("round_trip", "worst")))
+TIE_ABSOLUTE = {"seconds": 0.2, "clip_out": 2, "poke": 2, "poke_2mm": 2, "rigid_1mm": 1, "thick_1mm": 5, "flipped": 1}
+WORST = (("clearance", ("clearance", "worst")), ("poke", ("poke", "worst")), ("thickness", ("thickness", "worst")),
+         ("rigid", ("rigid", "worst")), ("detail", ("detail", "worst")), ("round trip", ("round_trip", "worst")))
 
 
 def load(folder):

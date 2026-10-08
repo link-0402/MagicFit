@@ -239,19 +239,24 @@ class _Sizes:
         # Skin (a mod's copy of the body's lying on the From body, or what's drawn with the game's skin material)
         # follows the body's surface exactly, and clothing lying on it keeps its distance from it.
         tris = resizing._tris(body.data)
-        self.skin, shares, faces, first_vertex = [], [], [], 0
+        self.skin, shares, faces, cover, first_vertex = [], [], [], [], 0
         for obj, shape in zip(meshes, self.shapes):
             marked = resizing.skin_vertices(obj)
             if not marked.all() and resizing.is_skin(shape, self.source, tris):
                 marked[:] = True
             followed = resizing.skin_shares(shape, self.source, tris, marked)
+            own = resizing._tris(obj.data) + first_vertex
             if followed.any():
                 self.skin.append(obj)
-                faces.append(resizing._tris(obj.data) + first_vertex)
+                faces.append(own)
+            cover.append(own)
             shares.append(followed)
             first_vertex += len(shape)
         self.bound = np.concatenate(shares) if shares else np.zeros(0)
         self.faces = np.concatenate(faces) if faces else None
+        # With Keep Close, Keep Covered pushes the clothing back out over the body too, through the triangles of all
+        # the meshes.
+        self.cover = np.concatenate(cover) if cover and job.keep_close else None
         # Rigid parts are numbered across all meshes, and Keep Close spreads its corrections along the meshes'
         # edges, numbered across them too.
         groups, first_part = [], 0
@@ -312,7 +317,7 @@ class _Sizes:
                 step(1.0)
                 return run, notes
             moved = change.apply(self.points, rigid=self.rigid, edges=self.edges, bound=self.bound, faces=self.faces,
-                                 progress=step)
+                                 cover=self.cover, progress=step)
         first = 0
         for obj, shape, shape_print, mix, (block, state), need in zip(meshes, self.shapes, self.shape_prints,
                                                                       self.mixes, states, needed):

@@ -591,7 +591,7 @@ How it works:
 - **Large changes are done in small steps,** so cloth doesn't fold where the body changes a lot in a short distance.
 - **Bridge Creases** (8 cm) keeps clothing from sinking into creases that get deeper. A dress hanging from medium breasts keeps hanging from large ones instead of wrapping into the fold under them. Skin-tight clothing still follows the skin. 0 turns it off.
 - **Rigid Parts** smaller than 4 cm (rings, studs, buckles) move without changing shape. So do meshes set to Rigid in [Weight Transfer](#weight-transfer). Parts lying on the body (piercings, the links of a chain on the skin) follow its surface like skin and grow or shrink with it, so a chain doesn't come apart between its links; parts hanging off it, like a pendant, keep their size, and parts partly on it (a ring on a strap) move along with the body without turning.
-- **Keep Close** (on) brings tight clothing that ended up hanging off the body, or sinking in, back to its old distance.
+- **Keep Close** (on) brings tight clothing that ended up hanging off the body, or sinking in, back to its old distance. It also keeps the body covered: where the body would come out between the clothing's vertices (a nipple or a breast growing under a low-poly top), the faces over it are pushed out, and so is clothing that sank into the body, smoothly with the clothing around. It only ever pushes outward, never turns a face over, and leaves the skin where it is.
 - The clothing keeps its distance to the body: where it clipped before, it clips about as much after.
 - Custom normals turn with the shape, so they need no fixing.
 
@@ -599,6 +599,7 @@ Good to know:
 
 - **From must be the shape the clothing fits.** For clothing made on a real body, resize from that body, not from a devkit's conversion key, which only approximates it.
 - **Small details** of the change, like a deeper navel, are smoothed over. Fix what's left with Body Fit.
+- **Low-poly clothing** can't take the shape of a body that bends within its faces, like a pointier nipple or the underside of a bigger breast: Keep Close lifts the faces over it, which can show as a small tent. **Subdivide for Sizes** (above Resize) cuts the faces of the selected meshes where the body changes shape within them between the From Body and the sizes picked (or the To Body), so they can follow it. Faces where the body just grows or shrinks evenly aren't cut. It keeps vertex groups, UV maps, shape keys and custom normals, and leaves skin meshes alone. **Levels** cuts again where it still needs to (up to 3), **Tolerance** (0.5 mm) is how far a face's middle must move differently from its corners to be cut. It adds vertices for the game too (a top's chest went from 61,800 to 65,900): use it on clothing that needs it, then resize again, since the keys made before were made for the old faces.
 - **Very large changes** (RueXB to Rue with a medium chest) can leave a few small creases under the breasts.
 - **Bridge Creases bridges in a curve.** Raise it (15 cm) to bridge more, but it can push out clothing meant to hug the body.
 - **Hanging parts keep their angle.** A necktie that stuck out over large breasts still sticks out over small ones.
@@ -617,7 +618,8 @@ Good to know:
 | Smoothing | How widely the body's change is averaged at the skin (about 1 cm). |
 | Bridge Creases | Clothing spans creases a ball this size can't roll into. 0 follows the skin everywhere. |
 | Rigid Parts | Loose parts smaller than this keep their shape. 0 turns it off. |
-| Keep Close | Brings tight clothing back to its old distance from the body afterwards. |
+| Keep Close | Brings tight clothing back to its old distance from the body afterwards, and pushes clothing the body came out through back over it. |
+| Subdivide for Sizes | Cuts the selected meshes' faces where the body changes shape within them, before resizing. |
 | Key Name | Name of the new shape key. Empty: the To Shapekey's name, the sizes that change, the To Body's, or "Resized". With several sizes, each key is named after its size, after the Key Name. |
 
 ### Sizes
