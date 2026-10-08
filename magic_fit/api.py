@@ -200,8 +200,9 @@ class SizeRun:
     ``own`` ({mesh shown as it is: the key values giving it the shape it fits the From body in, see
     resizing.from_values}), how many keys it ``made`` and ``kept``, the meshes' ``rigid`` parts, and from the
     resize: its ``steps``, how the bodies were matched (``how``, see resizing.BodyShapes), the ShapeMatch
-    (``match``) when by shape, and the keys that still shape a mesh on top of its new one (``stuck``, {mesh: key
-    names}: driven ones)."""
+    (``match``) when by shape, the keys that still shape a mesh on top of its new one (``stuck``, {mesh: key
+    names}: driven ones), and the ``skin`` meshes, which lie on the From body or are drawn with the game's skin
+    material, and follow its surface exactly (see resizing.is_skin and resizing.skin_shares)."""
 
     def __init__(self):
         self.keys = {}
@@ -210,6 +211,7 @@ class SizeRun:
         self.how = None
         self.match = None
         self.stuck = {}
+        self.skin = []
 
 
 class _Sizes:
@@ -234,12 +236,29 @@ class _Sizes:
         # The key values showing each mesh as it fits the From body, while it may be showing a size.
         self.own = {obj: resizing.from_values(obj, self.from_print)[0] for obj in meshes}
         self.shape_prints = [resizing.fingerprint(shape) for shape in self.shapes]
+        # Skin (a mod's copy of the body's lying on the From body, or what's drawn with the game's skin material)
+        # follows the body's surface exactly, and clothing lying on it keeps its distance from it.
+        tris = resizing._tris(body.data)
+        self.skin, shares, faces, first_vertex = [], [], [], 0
+        for obj, shape in zip(meshes, self.shapes):
+            marked = resizing.skin_vertices(obj)
+            if not marked.all() and resizing.is_skin(shape, self.source, tris):
+                marked[:] = True
+            followed = resizing.skin_shares(shape, self.source, tris, marked)
+            if followed.any():
+                self.skin.append(obj)
+                faces.append(resizing._tris(obj.data) + first_vertex)
+            shares.append(followed)
+            first_vertex += len(shape)
+        self.bound = np.concatenate(shares) if shares else np.zeros(0)
+        self.faces = np.concatenate(faces) if faces else None
         # Rigid parts are numbered across all meshes, and Keep Close spreads its corrections along the meshes'
         # edges, numbered across them too.
         groups, first_part = [], 0
-        for obj, shape in zip(meshes, self.shapes):
+        for obj, shape, followed in zip(meshes, self.shapes, shares):
             parts, count = rigid_parts(obj, shape, job.rigid_size)
-            groups.append(np.where(parts >= 0, parts + first_part, -1))
+            # Skin follows the body, however small its pieces.
+            groups.append(np.where((parts >= 0) & (followed <= 0.0), parts + first_part, -1))
             first_part += count
         self.rigid = np.concatenate(groups)
         self.edges = None
@@ -266,6 +285,7 @@ class _Sizes:
             if progress is not None:
                 progress(done)
         run.rigid = len(np.unique(self.rigid[self.rigid >= 0]))
+        run.skin = list(self.skin)
         body = job.body
         other = job.sized
         to_values = sizing.size_values(other, size.values) if size is not None else None
@@ -291,7 +311,8 @@ class _Sizes:
                 run.own = dict(self.own)
                 step(1.0)
                 return run, notes
-            moved = change.apply(self.points, rigid=self.rigid, edges=self.edges, progress=step)
+            moved = change.apply(self.points, rigid=self.rigid, edges=self.edges, bound=self.bound, faces=self.faces,
+                                 progress=step)
         first = 0
         for obj, shape, shape_print, mix, (block, state), need in zip(meshes, self.shapes, self.shape_prints,
                                                                       self.mixes, states, needed):

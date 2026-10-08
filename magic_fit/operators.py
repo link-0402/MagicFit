@@ -2984,6 +2984,8 @@ class MAGIC_FIT_OT_resize(bpy.types.Operator):
         kept = sum(run.kept for run in runs)
         kept_note = ", {:d} kept: made from these shapes already".format(kept) if kept else ""
         rigid = ", {:d} rigid part(s)".format(runs[0].rigid) if runs[0].rigid else ""
+        if runs[0].skin:
+            rigid += ", {:d} skin mesh(es) following the body".format(len(runs[0].skin))
         if len(runs) > 1:
             if not made:
                 self.report({'INFO'}, "All {:d} sizes were made from these shapes already: kept ({:s})".format(
