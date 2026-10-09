@@ -824,7 +824,15 @@ class _Clothing:
                 tree.insert(point, index)
             tree.balance()
             rows, cols, weights = [], [], []
-            for k, point in enumerate(self.points.tolist()):
+            # Only points within SKIN_FOLLOW_FAR of the skin's box can be that near the skin.
+            skin = self.points[spots]
+            low, high = skin.min(axis=0) - SKIN_FOLLOW_FAR, skin.max(axis=0) + SKIN_FOLLOW_FAR
+            candidates = np.flatnonzero(np.all((self.points >= low) & (self.points <= high), axis=1)) \
+                if len(spots) else np.zeros(0, dtype=np.int64)
+            for k, point in zip(candidates.tolist(), self.points[candidates].tolist()):
+                # The nearest alone first: most points are too far to take anything.
+                if tree.find(point)[2] >= SKIN_FOLLOW_FAR:
+                    continue
                 found = tree.find_n(point, SKIN_FOLLOW_COUNT)
                 if not found or found[0][2] >= SKIN_FOLLOW_FAR:
                     continue
@@ -2196,16 +2204,31 @@ def resized_key(obj, label):
     return None
 
 
+def note_edited_keys(obj):
+    """Note on the keys Resize made on ``obj`` that were changed by hand since, before the mesh gets other vertices
+    (Subdivide for Sizes): then it can't be told anymore, and they stay as they are (see key_state)."""
+    records = resized_keys(obj)
+    noted = False
+    for name, record in records.items():
+        if (record.get("count") == len(obj.data.vertices) and not record.get("edited") and
+                fingerprint(_key_positions(obj.data.shape_keys.key_blocks[name])) != record.get("result")):
+            record["edited"] = True
+            noted = True
+    if noted:
+        obj.data.shape_keys[RECORD] = records
+
+
 def key_state(obj, label, inputs):
     """Whether the key Resize made for ``label`` on ``obj`` can stay, for a resize whose inputs have the fingerprint
     ``inputs``: (the key or None, 'NEW' without one, 'FRESH' when made from the same inputs, 'STALE' when made from
-    others and not changed since, 'EDITED' when made from others and changed by hand since)."""
+    others and not changed since, 'EDITED' when made from others and changed by hand since). Once the mesh has other
+    vertices, a hand change only shows where `note_edited_keys` noted it before."""
     block = resized_key(obj, label)
     if block is None:
         return None, 'NEW'
     record = resized_keys(obj)[block.name]
     if record.get("count") != len(obj.data.vertices):
-        return block, 'STALE'
+        return block, 'EDITED' if record.get("edited") else 'STALE'
     if record.get("inputs") == inputs:
         return block, 'FRESH'
     return block, 'STALE' if fingerprint(_key_positions(block)) == record.get("result") else 'EDITED'

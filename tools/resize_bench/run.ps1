@@ -72,7 +72,8 @@ $python = Get-ChildItem (Split-Path -Parent $BlenderPath) -Recurse -Filter pytho
     Where-Object { $_.FullName -match '\\python\\bin\\' } | Select-Object -First 1
 
 $commit = (& git -C $Checkout rev-parse --short HEAD) 2>$null
-$dirty = (& git -C $Checkout status --porcelain --untracked-files=no) 2>$null
+# New files not added yet count too: a module of the change can be among them.
+$dirty = (& git -C $Checkout status --porcelain) 2>$null
 @{ checkout = $Checkout; commit = $commit; uncommitted = [bool]$dirty; targets = $Targets; round_trip = $RoundTrip
    started = (Get-Date -Format o) } | ConvertTo-Json | ForEach-Object {
     [IO.File]::WriteAllText((Join-Path $Out 'run.json'), $_) }
