@@ -14,8 +14,8 @@ from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 from mathutils.geometry import intersect_line_line, intersect_line_plane
 
-from . import (api, connecting, facedata, facing, fitting, goals, hairing, hairlineup, heeling, lineup, moving, painting,
-               refining, relaxing, resizing, sizing, skirting, smoothing, straighten)
+from . import (api, connecting, facedata, facing, fitting, goals, hairing, hairlineup, heeling, lineup, mending, moving,
+               painting, refining, relaxing, resizing, sizing, skirting, smoothing, straighten, tabs)
 from .cplus import rig as cplus_rig
 from .properties import COMING_MODES, sync_sizes
 
@@ -496,7 +496,7 @@ def resize_keys(settings):
 
 
 def resize_sizes(settings):
-    """The sizes picked in the Resize panel (api.Picks), or None with Sizes off or none listed for the body."""
+    """The sizes picked in the Auto Resize panel (api.Picks), or None with Sizes off or none listed for the body."""
     return api.picked(settings)
 
 
@@ -1842,6 +1842,141 @@ class MAGIC_FIT_OT_fit_move(bpy.types.Operator):
         gpu.state.blend_set('NONE')
 
 
+def _rip_places(rips):
+    """How many separate places the rips found are at: their sides, joined by what they're matched to."""
+    nodes = rips.nodes()
+    if not len(nodes):
+        return 0
+    links = [rips.pairs,
+             np.stack((rips.point_node, rips.tail[rips.point_edge]), axis=1),
+             np.stack((rips.tail, rips.head), axis=1)]
+    on_rip = np.zeros(len(rips.node_co), dtype=bool)
+    on_rip[nodes] = True
+    links = np.concatenate(links)
+    links = links[on_rip[links].all(axis=1)]
+    labels, _count = fitting._connected(len(rips.node_co), links)
+    return len(np.unique(labels[nodes]))
+
+
+def _selected_vertices(parts):
+    selected = []
+    for part in parts:
+        mask = np.empty(part.count, dtype=bool)
+        part.mesh.vertices.foreach_get("select", mask)
+        selected.append(mask)
+    return np.concatenate(selected)
+
+
+class MAGIC_FIT_OT_find_rips(bpy.types.Operator):
+    """Select the rips in the meshes being edited: open edges facing each other across a small gap, where the
+    mesh was pulled apart. Cracks the model came with can show up too: deselect what should stay open, then
+    Close Rips"""
+    bl_idname = "magic_fit.find_rips"
+    bl_label = "Find Rips"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.object
+        if context.mode != 'EDIT_MESH' or obj is None or obj.type != 'MESH':
+            cls.poll_message_set("Edit a mesh to find its rips")
+            return False
+        return True
+
+    def execute(self, context):
+        settings = context.scene.close_rips
+        edited = read_edited_meshes(context, None)
+        for part in edited.unmatched:
+            self.report({'WARNING'}, "'{:s}': modifiers shown in Edit Mode change its geometry, so its "
+                                     "shape without them is used".format(part.obj.name))
+        rips = mending.find(edited.co, edited.tris, edited.movable, settings.max_gap)
+        found = np.zeros(len(edited.co), dtype=bool)
+        found[rips.vertices()] = True
+        found &= edited.movable
+        if not found.any():
+            self.report({'INFO'}, "No rips found: no open edges face each other within Max Gap")
+            return {'CANCELLED'}
+        # Rips are open edges, which only vertex selection shows (edges and faces aren't selected from vertices).
+        tool_settings = context.tool_settings
+        to_vertices = not tool_settings.mesh_select_mode[0]
+        if to_vertices:
+            tool_settings.mesh_select_mode = (True, False, False)
+        for part in edited.parts:
+            bm = bmesh.from_edit_mesh(part.mesh)
+            if to_vertices:
+                bm.select_mode = {'VERT'}
+            bm.verts.ensure_lookup_table()
+            for face in bm.faces:
+                face.select_set(False)
+            for vert, select in zip(bm.verts, found[part.first:part.first + part.count].tolist()):
+                vert.select_set(select)
+            bm.select_flush_mode()
+            bmesh.update_edit_mesh(part.mesh, loop_triangles=False, destructive=False)
+        self.report({'INFO'}, "Selected {:d} rip(s). Deselect what should stay open, then Close Rips".format(
+            _rip_places(rips)))
+        return {'FINISHED'}
+
+
+class MAGIC_FIT_OT_close_rips(bpy.types.Operator):
+    """Pull the rips in the selection back together: open edges facing each other across a small gap meet
+    halfway, and the mesh around them follows smoothly. With Weld, they're joined into one piece"""
+    bl_idname = "magic_fit.close_rips"
+    bl_label = "Close Rips"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.object
+        if context.mode != 'EDIT_MESH' or obj is None or obj.type != 'MESH':
+            cls.poll_message_set("Edit a mesh to close its rips")
+            return False
+        return True
+
+    def execute(self, context):
+        settings = context.scene.close_rips
+        edited = read_edited_meshes(context, None)
+        allowed = _selected_vertices(edited.parts) & edited.movable
+        if not allowed.any():
+            self.report({'WARNING'}, "Select the rips to close (Find Rips selects them)")
+            return {'CANCELLED'}
+        for part in edited.unmatched:
+            self.report({'WARNING'}, "'{:s}': modifiers shown in Edit Mode change its geometry, so its "
+                                     "shape without them is used".format(part.obj.name))
+        rips = mending.find(edited.co, edited.tris, allowed, settings.max_gap)
+        if not rips.count:
+            self.report({'INFO'}, "No rips in the selection: select both sides of a rip, within Max Gap")
+            return {'CANCELLED'}
+        co = mending.close(rips, edited.movable, settings.spread)
+        moved = np.flatnonzero(np.any(co != edited.co, axis=1))
+        write_edited(edited.parts, moved, co[moved])
+        merged = apart = 0
+        if settings.use_weld:
+            plan = np.array(mending.weld_plan(rips, co), dtype=np.float64).reshape(-1, 4)
+            ids = plan[:, :3].astype(np.int64)
+            # Only vertices of one mesh can be merged: rips between meshes close, but stay apart.
+            apart = len(plan)
+            for part in edited.parts:
+                inside = ((ids >= part.first) & (ids < part.first + part.count)).all(axis=1)
+                if not inside.any():
+                    continue
+                apart -= int(inside.sum())
+                local = [(int(v), int(a), int(b), float(t)) for (v, a, b), t in
+                         zip((ids[inside] - part.first).tolist(), plan[inside, 3].tolist())]
+                bm = bmesh.from_edit_mesh(part.mesh)
+                merged += mending.weld(bm, local)
+                bmesh.update_edit_mesh(part.mesh, loop_triangles=True, destructive=True)
+        places = _rip_places(rips)
+        if apart:
+            self.report({'WARNING'}, "Closed {:d} rip(s) and merged {:d} vertices. {:d} vertices meet another "
+                                     "mesh, so they aren't merged: join the meshes to weld them".format(
+                                         places, merged, apart))
+        elif settings.use_weld:
+            self.report({'INFO'}, "Closed {:d} rip(s) and merged {:d} vertices".format(places, merged))
+        else:
+            self.report({'INFO'}, "Closed {:d} rip(s)".format(places))
+        return {'FINISHED'}
+
+
 def _unweighted_message(stroke, mesh):
     return (
         "{:d} vertices of '{:s}' had no body weights and there was no body to take them from, so they "
@@ -2914,7 +3049,7 @@ class MAGIC_FIT_OT_resize(bpy.types.Operator):
     """Add a shape key to the selected meshes (or those in Edit Mode) that reshapes them from the From body
     to the To body"""
     bl_idname = "magic_fit.resize"
-    bl_label = "Resize"
+    bl_label = "Auto Resize"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -3372,12 +3507,12 @@ class MAGIC_FIT_OT_use_tool(bpy.types.Operator):
         ),
     )
 
-    # (object mode, tool id, sidebar tab) per brush.
+    # (object mode, tool id, sidebar tab, its sub-tab) per brush. The Weights sub-tab follows the brush's mode.
     targets = {
-        'WEIGHT': ('WEIGHT_PAINT', "magic_fit.tool", 'WEIGHTS'),
-        'FIT': ('EDIT', "magic_fit.body_fit_tool", 'FIT'),
-        'RELAX': ('EDIT', "magic_fit.texture_relax_tool", 'RELAX'),
-        'MOVE': ('EDIT', "magic_fit.fit_move_tool", 'FIT'),
+        'WEIGHT': ('WEIGHT_PAINT', "magic_fit.tool", 'WEIGHTS', None),
+        'FIT': ('EDIT', "magic_fit.body_fit_tool", 'FIT', 'FIT'),
+        'RELAX': ('EDIT', "magic_fit.texture_relax_tool", 'REPAIR', 'RELAX'),
+        'MOVE': ('EDIT', "magic_fit.fit_move_tool", 'FIT', 'MOVE'),
     }
 
     @classmethod
@@ -3399,7 +3534,7 @@ class MAGIC_FIT_OT_use_tool(bpy.types.Operator):
         return context.space_data is not None and context.space_data.type == 'VIEW_3D'
 
     def execute(self, context):
-        mode, idname, tab = self.targets[self.tool]
+        mode, idname, tab, subtab = self.targets[self.tool]
         try:
             if context.object.mode != mode:
                 bpy.ops.object.mode_set(mode=mode)
@@ -3408,8 +3543,7 @@ class MAGIC_FIT_OT_use_tool(bpy.types.Operator):
             self.report({'ERROR'}, str(ex))
             return {'CANCELLED'}
         # The sidebar shows the brush's settings on its tab.
-        if context.workspace is not None:
-            context.workspace.magic_fit_tab = tab
+        tabs.show(context, tab, subtab)
         return {'FINISHED'}
 
 
@@ -3418,6 +3552,8 @@ classes = (
     MAGIC_FIT_OT_body_fit,
     MAGIC_FIT_OT_texture_relax,
     MAGIC_FIT_OT_fit_move,
+    MAGIC_FIT_OT_find_rips,
+    MAGIC_FIT_OT_close_rips,
     MAGIC_FIT_OT_skirt_weights,
     MAGIC_FIT_OT_heel_weights,
     MAGIC_FIT_OT_connect_parts,

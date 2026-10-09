@@ -1,0 +1,572 @@
+import traceback
+
+import bpy
+from bpy.props import BoolProperty, StringProperty
+from bpy.types import Operator
+
+from . import blender_io
+from .core.normalmaps import MIN_SAMPLES
+from .pipeline import RebuildJob
+
+
+def selected_meshes(context):
+    return [o for o in context.selected_objects if o.type == "MESH" and len(o.data.polygons)]
+
+
+def show_report(op, context, prop, text):
+    """Keep the result for the panel (one box per tool) and flash it in the status bar."""
+    setattr(context.scene.magic_fit_repair, prop, text)
+    op.report({"INFO"}, text.replace("\n", " | "))
+    # the sidebar does not notice properties set from Python, e.g. at the end of a modal run
+    for window in context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type == "VIEW_3D":
+                area.tag_redraw()
+
+
+def format_uv_stats(stats, seconds=None):
+    took = f" in {seconds:.1f} s" if seconds is not None else ""
+    n = stats["islands"]
+    return (f"New UV layout: {n} island{'' if n == 1 else 's'}{took}\n"
+            f"Even texel density on {stats['within_25pct'] * 100:.1f}% of the surface\n"
+            f"Previous UVs kept in '{blender_io.OLD_UV_NAME}'")
+
+
+def format_report(rep):
+    lines = []
+    src = rep.get("source", {})
+    rm = rep.get("remesh", {})
+    if "written" in rep:
+        tris = sum(t for _, _, t in rep["written"])
+        verts = sum(v for _, v, _ in rep["written"])
+        lines.append(f"Rebuilt {len(rep['written'])} object(s) in {rep.get('seconds', 0):.1f} s")
+        lines.append(f"{src.get('raw_triangles', 0):,} -> {tris:,} triangles, {verts:,} vertices")
+    if rep.get("hidden_area"):
+        lines.append(f"Removed hidden layers: {rep['hidden_area'] * 100:.1f}% of the surface")
+    if rep.get("hidden_hint"):
+        lines.append(f"Tip: {rep['hidden_hint'] * 100:.0f}% of the surface is a hidden under-layer "
+                     "(enable Remove Hidden Layers)")
+    for name in rep.get("unchanged", []):
+        lines.append(f"'{name}' is entirely hidden or debris, left unchanged")
+    if "edge_length" in rep:
+        lines.append(f"Base edge length {rep['edge_length'] * 1000:.2f} mm")
+    if rm:
+        lines.append(f"Triangle quality: median {rm['q_med']:.2f}, worst 1% {rm['q_p1']:.2f}")
+    if "normals" in rep:
+        flipped = rep["normals"]["flipped"]
+        lines.append("Smooth normals" + (f", flipped {flipped:,} faces that pointed the wrong way" if flipped else ""))
+    if "uvs" in rep:
+        lines.extend(format_uv_stats(rep["uvs"]).split("\n"))
+    return "\n".join(lines)
+
+
+def format_analysis(stats, hidden_area=0.0):
+    s = stats
+    lines = [
+        f"{s['raw_triangles']:,} triangles, {s['raw_vertices']:,} vertices ({s['welded_vertices']:,} after merging)",
+        f"Non-manifold edges: {s['nonmanifold_edges']:,}   Border edges: {s['boundary_edges']:,}",
+        f"UV/color seam edges: {s['seam_edges']:,}   Winding changes: {s.get('inconsistent_edges', 0):,}",
+        f"Degenerate faces: {s['degenerate_removed']:,}   Duplicate/backface copies: {s.get('twin_faces', 0):,} (kept)",
+        f"Loose fragments: {s['fragments_removed']:,} ({s['fragment_faces_removed']:,} faces)",
+        f"Surface patches: {s['patches']:,}   Feature curves: {s['chains']:,}   Fixed corners: {s['corners']:,}",
+    ]
+    if hidden_area > 0.005:
+        lines.append(f"Hidden under-layers: {hidden_area * 100:.1f}% of the surface (see Remove Hidden Layers)")
+    return "\n".join(lines)
+
+
+class MAGIC_FIT_OT_rebuild_mesh(Operator):
+    bl_idname = "magic_fit.rebuild_mesh"
+    bl_label = "Rebuild Mesh"
+    bl_description = (
+        "Rebuild the selected meshes with clean, even triangles. Borders, non-manifold junctions, "
+        "UV seams and thin strips are kept; UVs, colors, normals, weights and shape keys are transferred. "
+        "Optionally smooths the normals and rebuilds the UVs afterwards"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if context.mode != "OBJECT":
+            cls.poll_message_set("Switch to Object Mode")
+            return False
+        if not selected_meshes(context):
+            cls.poll_message_set("Select one or more mesh objects")
+            return False
+        return True
+
+    def _make_job(self, context):
+        return RebuildJob(selected_meshes(context), context.scene.magic_fit_repair.to_settings())
+
+    def _finish(self, context, rep):
+        show_report(self, context, "report_mesh", format_report(rep))
+
+    def _fail(self, e):
+        traceback.print_exc()
+        if self._job.modified:
+            # the meshes were already replaced: finish, so the change gets an undo step
+            self.report({"ERROR"}, f"Rebuild finished with an error: {e}")
+            return {"FINISHED"}
+        self.report({"ERROR"}, f"Rebuild failed: {e}")
+        return {"CANCELLED"}
+
+    def execute(self, context):
+        self._job = self._make_job(context)
+        try:
+            rep = self._job.run()
+        except Exception as e:  # noqa: BLE001 - report any failure to the user
+            return self._fail(e)
+        self._finish(context, rep)
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        self._job = self._make_job(context)
+        self._gen = self._job.steps()
+        self._writing = False
+        wm = context.window_manager
+        self._timer = wm.event_timer_add(0.02, window=context.window)
+        wm.modal_handler_add(self)
+        wm.progress_begin(0, 100)
+        context.workspace.status_text_set("Rebuild Mesh: starting...   Esc to cancel")
+        return {"RUNNING_MODAL"}
+
+    def _cleanup(self, context):
+        wm = context.window_manager
+        if getattr(self, "_timer", None) is not None:
+            wm.event_timer_remove(self._timer)
+            self._timer = None
+        wm.progress_end()
+        context.workspace.status_text_set(None)
+
+    def modal(self, context, event):
+        if event.type == "ESC" and not self._writing:
+            self._cleanup(context)
+            self.report({"WARNING"}, "Rebuild cancelled, nothing was changed")
+            return {"CANCELLED"}
+        if event.type != "TIMER":
+            # keep the scene untouched while the job runs
+            return {"RUNNING_MODAL"}
+        try:
+            frac, msg = next(self._gen)
+        except StopIteration:
+            self._cleanup(context)
+            self._finish(context, self._job.report)
+            return {"FINISHED"}
+        except Exception as e:  # noqa: BLE001
+            self._cleanup(context)
+            return self._fail(e)
+        if msg.startswith("Writing"):
+            self._writing = True
+        context.window_manager.progress_update(frac * 100)
+        busy = "" if self._writing else "   Esc to cancel"
+        context.workspace.status_text_set(f"Rebuild Mesh: {msg} ({frac * 100:.0f}%){busy}")
+        return {"RUNNING_MODAL"}
+
+
+class MAGIC_FIT_OT_analyze_mesh(Operator):
+    bl_idname = "magic_fit.analyze_mesh"
+    bl_label = "Analyze"
+    bl_description = "Report what is wrong with the selected meshes, without changing anything"
+    bl_options = {"REGISTER"}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == "OBJECT" and bool(selected_meshes(context))
+
+    def execute(self, context):
+        from .core.source import SourceMesh, SourceOptions
+        import math
+        st = context.scene.magic_fit_repair
+        objs = selected_meshes(context)
+        try:
+            g = blender_io.gather(objs)
+            seams = blender_io.seam_attributes(g, use_uv=st.preserve_uv_seams, use_color=st.preserve_color_seams)
+            src = SourceMesh(
+                g["V_raw"], g["T_raw"], g["T_obj"], g["T_mat"], seams,
+                SourceOptions(
+                    merge_distance=st.merge_distance,
+                    fragment_faces=st.fragment_faces,
+                    sharp_angle=math.degrees(st.sharp_angle) if st.preserve_sharp else None,
+                    corner_angle=math.degrees(st.corner_angle),
+                    seam_tolerance=st.seam_threshold,
+                ),
+            )
+            from .pipeline import auto_gap, find_hidden
+            gap = st.hidden_gap if st.hidden_gap > 0 else auto_gap(src)
+            _, hidden_area = find_hidden(src, gap)
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
+            self.report({"ERROR"}, f"Analysis failed: {e}")
+            return {"CANCELLED"}
+        show_report(self, context, "report_mesh", format_analysis(src.stats, hidden_area))
+        return {"FINISHED"}
+
+
+class MAGIC_FIT_OT_restore_original(Operator):
+    bl_idname = "magic_fit.restore_original"
+    bl_label = "Restore Original"
+    bl_description = "Put the original mesh back on the selected rebuilt objects"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == "OBJECT" and any(blender_io.original_name(o) for o in context.selected_objects)
+
+    def execute(self, context):
+        n = sum(1 for o in context.selected_objects if blender_io.restore_original(o))
+        self.report({"INFO"}, f"Restored {n} object(s)")
+        return {"FINISHED"}
+
+
+class MAGIC_FIT_OT_discard_original(Operator):
+    bl_idname = "magic_fit.discard_original"
+    bl_label = "Discard Original"
+    bl_description = "Delete the kept original meshes of the selected objects (keeps the rebuilt result)"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == "OBJECT" and any(blender_io.original_name(o) for o in context.selected_objects)
+
+    def execute(self, context):
+        n = 0
+        for o in context.selected_objects:
+            name = blender_io.original_name(o)
+            if not name:
+                continue
+            me = bpy.data.meshes.get(name)
+            if me is not None:
+                me.use_fake_user = False
+                if me.users == 0:
+                    bpy.data.meshes.remove(me)
+            blender_io.forget_original(o)
+            n += 1
+        self.report({"INFO"}, f"Discarded {n} original mesh(es)")
+        return {"FINISHED"}
+
+
+class MAGIC_FIT_OT_smooth_normals(Operator):
+    bl_idname = "magic_fit.smooth_normals"
+    bl_label = "Smooth Normals"
+    bl_description = (
+        "Give the selected meshes clean smooth normals: shading ignores UV seams and part borders, "
+        "faces wound the other way are aligned instead of averaged out, only real hard edges stay hard. "
+        "Works on any mesh, rebuilt or not"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if context.mode != "OBJECT":
+            cls.poll_message_set("Switch to Object Mode")
+            return False
+        if not selected_meshes(context):
+            cls.poll_message_set("Select one or more mesh objects")
+            return False
+        return True
+
+    def execute(self, context):
+        import time
+        st = context.scene.magic_fit_repair
+        objs = selected_meshes(context)
+        t0 = time.time()
+        try:
+            flipped, loops = blender_io.smooth_object_normals(
+                objs, st.normals_angle, st.normals_blur, st.fix_winding, st.merge_distance)
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
+            self.report({"ERROR"}, f"Smooth normals failed: {e}")
+            return {"CANCELLED"}
+        text = f"Smoothed normals on {len(objs)} object(s) in {time.time() - t0:.1f} s"
+        if flipped:
+            text += f"\nFlipped {flipped:,} faces that pointed the wrong way"
+        show_report(self, context, "report_normals", text)
+        return {"FINISHED"}
+
+
+def short_image_name(image):
+    """Image name for reports; FFXIV material textures drop their '.mtrl [hash]' part."""
+    import re
+    return re.sub(r"\.mtrl \[[0-9a-fA-F]+\]", "", image.name)
+
+
+def format_normal_map(name, r):
+    """Report lines for one checked map: its name, then the verdict indented below."""
+    v = r["verdict"]
+    if v == "DOWN":
+        verdict = ["green points down (DirectX style)", f"seams fit {r['ratio']:.1f}x better flipped"]
+    elif v == "UP":
+        verdict = ["green points up, fine"]
+    elif v == "MISSING":
+        verdict = ["no pixels (is the file missing?)"]
+    elif v == "NO_SEAMS":
+        verdict = ["no UV seams to compare"]
+    elif r["samples"] < MIN_SAMPLES:
+        verdict = ["too few UV seams to tell"]
+    else:
+        verdict = ["can't tell, both ways fit alike"]
+    return [name] + ["    " + line for line in verdict]
+
+
+def normal_map_file_material(context):
+    """The material a Normal Map Seams file is read on: the active object's (or the first selected
+    mesh's) active material; None reads it on all faces of the selected meshes."""
+    objs = selected_meshes(context)
+    obj = context.active_object if context.active_object in objs else (objs[0] if objs else None)
+    return obj.active_material if obj is not None else None
+
+
+class _NormalMapOperator:
+    @classmethod
+    def poll(cls, context):
+        if context.mode != "OBJECT":
+            cls.poll_message_set("Switch to Object Mode")
+            return False
+        if not selected_meshes(context):
+            cls.poll_message_set("Select one or more mesh objects")
+            return False
+        return True
+
+    def check(self, context):
+        """The check results as [(name, result, fix)], fix() flipping that map and returning
+        what it did, or None after reporting an error."""
+        s = context.scene.magic_fit_repair
+        objs = selected_meshes(context)
+        try:
+            if s.normalmap_file:
+                return [self.check_file(context, objs)]
+            results = blender_io.check_normal_maps(objs, s.merge_distance)
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
+            self.report({"ERROR"}, f"Normal map check failed: {e}")
+            return None
+        if not results:
+            show_report(self, context, "report_normalmap",
+                        "No normal maps found\nThe materials need an Image Texture node\n"
+                        "feeding a Normal Map node (Tangent Space)\nor pick the texture under From File")
+            return None
+
+        def fix(image, uses):
+            _, path = blender_io.flip_normal_map(image, uses)
+            return f"green flipped, copy {'saved as PNG' if path else 'packed'}"
+        return [(short_image_name(image), r, lambda image=image, uses=uses: fix(image, uses))
+                for image, r, uses in results]
+
+    @staticmethod
+    def check_file(context, objs):
+        import os
+        path = bpy.path.abspath(context.scene.magic_fit_repair.normalmap_file)
+        material = normal_map_file_material(context)
+        pixels, r = blender_io.check_normal_map_file(path, objs, material, context.scene.magic_fit_repair.merge_distance)
+
+        def fix():
+            return f"green flipped, saved {os.path.basename(blender_io.save_flipped_file(path, pixels))}"
+        on = f" (on {material.name})" if material is not None else ""
+        return os.path.basename(path) + on, r, fix
+
+
+class MAGIC_FIT_OT_check_normal_maps(_NormalMapOperator, Operator):
+    bl_idname = "magic_fit.check_normal_maps"
+    bl_label = "Check Normal Maps"
+    bl_description = (
+        "Find out whether the normal maps in the selected meshes' materials have green pointing up "
+        "(Blender, FFXIV) or down (DirectX style, e.g. from Unreal games), by reading them both ways "
+        "along the UV seams. Green pointing the wrong way shows as lines along UV seams. "
+        "With a file under From File, checks that file instead"
+    )
+    bl_options = {"REGISTER"}
+
+    def execute(self, context):
+        import time
+        t0 = time.time()
+        results = self.check(context)
+        if results is None:
+            return {"CANCELLED"}
+        n = len(results)
+        lines = [f"Checked {n} normal map{'s' if n != 1 else ''} in {time.time() - t0:.1f} s"]
+        for name, r, _ in results:
+            lines += format_normal_map(name, r)
+        down = sum(r["verdict"] == "DOWN" for _, r, _ in results)
+        if down:
+            lines.append(f"Fix flips green on {down} of them")
+        show_report(self, context, "report_normalmap", "\n".join(lines))
+        return {"FINISHED"}
+
+
+class MAGIC_FIT_OT_fix_normal_maps(_NormalMapOperator, Operator):
+    bl_idname = "magic_fit.fix_normal_maps"
+    bl_label = "Fix Normal Maps"
+    bl_description = (
+        "Check the normal maps like Check does, and replace each one whose green points down with a copy "
+        "with green flipped ('<name>_green_up', saved next to the original file or packed into the .blend). "
+        "The original image is kept. With a file under From File, saves '<name>_green_up' next to it "
+        "(.tex for a .tex file, uncompressed; .png otherwise) and leaves the materials alone"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    include_unclear: BoolProperty(
+        name="Also Unclear Ones",
+        description="Also flip the maps the check can't judge (no or too few UV seams), "
+                    "e.g. when the other maps from the same source point down",
+        default=False,
+    )  # type: ignore
+
+    def execute(self, context):
+        results = self.check(context)
+        if results is None:
+            return {"CANCELLED"}
+        flip = {"DOWN", "UNCLEAR", "NO_SEAMS"} if self.include_unclear else {"DOWN"}
+        lines = []
+        fixed = unclear = 0
+        for name, r, fix in results:
+            if r["verdict"] not in flip:
+                lines += format_normal_map(name, r)
+                unclear += r["verdict"] in {"UNCLEAR", "NO_SEAMS"}
+                continue
+            try:
+                done = fix()
+            except Exception as e:  # noqa: BLE001
+                traceback.print_exc()
+                lines += [name, f"    failed: {e}"]
+                continue
+            fixed += 1
+            lines += [name, "    " + done]
+        if fixed:
+            lines.insert(0, f"Fixed {fixed} normal map{'s' if fixed != 1 else ''}")
+            if unclear:
+                lines.append("To flip the unclear ones too: F9 > Also Unclear Ones")
+            file = context.scene.magic_fit_repair.normalmap_file
+            if file.lower().endswith(".tex"):
+                lines.append("Use it in the mod in place of the original")
+                lines.append("It's uncompressed: Penumbra can compress it")
+                lines.append("The materials in Blender are unchanged")
+            elif file:
+                lines.append("Import it into the mod as .tex")
+                lines.append("The materials in Blender are unchanged")
+            else:
+                lines.append("In game, the mod's normal textures need the same flip")
+        else:
+            lines.insert(0, "Nothing to fix")
+        show_report(self, context, "report_normalmap", "\n".join(lines))
+        return {"FINISHED"}
+
+
+class MAGIC_FIT_OT_rebuild_uvs(Operator):
+    bl_idname = "magic_fit.rebuild_uvs"
+    bl_label = "Rebuild UVs"
+    bl_description = (
+        "Replace the UVs of the selected meshes with a clean layout: islands follow the model's pieces, "
+        "every island is unwrapped with minimal stretch and packed without overlaps. "
+        "The previous UVs are kept in the 'Old UVs' layer for texture transfer"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if context.mode != "OBJECT":
+            cls.poll_message_set("Switch to Object Mode")
+            return False
+        if not selected_meshes(context):
+            cls.poll_message_set("Select one or more mesh objects")
+            return False
+        return True
+
+    def execute(self, context):
+        import math
+        import time
+        st = context.scene.magic_fit_repair
+        objs = selected_meshes(context)
+        t0 = time.time()
+        try:
+            stats = blender_io.rebuild_uvs(
+                context, objs,
+                keep_old_seams=st.uv_keep_old_seams,
+                cut_sharp=st.uv_cut_sharp,
+                sharp_angle=math.degrees(st.uv_sharp_angle),
+                margin=st.uv_margin,
+                keep_orientation=st.uv_keep_orientation,
+                merge_distance=st.merge_distance,
+            )
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
+            self.report({"ERROR"}, f"Rebuild UVs failed: {e}")
+            return {"CANCELLED"}
+        show_report(self, context, "report_uvs", format_uv_stats(stats, time.time() - t0))
+        return {"FINISHED"}
+
+
+class MAGIC_FIT_OT_transfer_texture(Operator):
+    bl_idname = "magic_fit.transfer_texture"
+    bl_label = "Transfer Texture"
+    bl_description = (
+        "Resample the chosen texture from the old UVs ('Old UVs' layer) onto the current UV layout "
+        "of the selected meshes. Saves '<name>_newuv.png' next to the original file"
+    )
+    bl_options = {"REGISTER"}
+
+    @classmethod
+    def poll(cls, context):
+        st = context.scene.magic_fit_repair
+        if st.tex_image is None:
+            cls.poll_message_set("Choose a texture")
+            return False
+        objs = selected_meshes(context)
+        if not objs or not all(o.data.uv_layers.get(blender_io.OLD_UV_NAME) for o in objs):
+            cls.poll_message_set("Select meshes that went through Rebuild UVs")
+            return False
+        return context.mode == "OBJECT"
+
+    def execute(self, context):
+        import time
+        st = context.scene.magic_fit_repair
+        t0 = time.time()
+        try:
+            new, path = blender_io.transfer_texture(
+                selected_meshes(context), st.tex_image, mode=st.tex_mode,
+                flip_green=st.tex_flip_green, padding=st.tex_padding)
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
+            self.report({"ERROR"}, f"Texture transfer failed: {e}")
+            return {"CANCELLED"}
+        where = path if path else "packed into the .blend"
+        show_report(self, context, "report_texture", f"'{new.name}' created in {time.time() - t0:.1f} s ({where})")
+        return {"FINISHED"}
+
+
+class MAGIC_FIT_OT_clear_repair_report(Operator):
+    bl_idname = "magic_fit.clear_repair_report"
+    bl_label = "Clear"
+    bl_description = "Hide this result"
+    bl_options = {"INTERNAL"}
+
+    prop: StringProperty()  # type: ignore
+
+    def execute(self, context):
+        st = context.scene.magic_fit_repair
+        if self.prop.startswith("report_") and hasattr(st, self.prop):
+            setattr(st, self.prop, "")
+        return {"FINISHED"}
+
+
+classes = (
+    MAGIC_FIT_OT_rebuild_mesh,
+    MAGIC_FIT_OT_analyze_mesh,
+    MAGIC_FIT_OT_restore_original,
+    MAGIC_FIT_OT_discard_original,
+    MAGIC_FIT_OT_smooth_normals,
+    MAGIC_FIT_OT_check_normal_maps,
+    MAGIC_FIT_OT_fix_normal_maps,
+    MAGIC_FIT_OT_rebuild_uvs,
+    MAGIC_FIT_OT_transfer_texture,
+    MAGIC_FIT_OT_clear_repair_report,
+)
+
+
+def register():
+    for c in classes:
+        bpy.utils.register_class(c)
+
+
+def unregister():
+    for c in reversed(classes):
+        bpy.utils.unregister_class(c)

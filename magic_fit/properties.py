@@ -129,7 +129,7 @@ def picked_of(item):
 
 class SizeSetting(bpy.types.PropertyGroup):
     """A setting the body's shape keys follow (named as sizing.Setting is), and the values picked for it: the bits
-    of ``picked``, one per option (the Resize panel's buttons set them)."""
+    of ``picked``, one per option (the Auto Resize panel's buttons set them)."""
     label: StringProperty()
     kind: StringProperty()
     # Where the drivers read it (empty for a key nothing drives).
@@ -1239,6 +1239,39 @@ class FitMoveSettings(bpy.types.PropertyGroup):
     )
 
 
+class CloseRipsSettings(bpy.types.PropertyGroup):
+    max_gap: FloatProperty(
+        name="Max Gap",
+        description=(
+            "How far apart the two sides of a rip may be. Open edges further apart than this aren't taken for a "
+            "rip"
+        ),
+        subtype='DISTANCE',
+        default=0.01,
+        min=0.0001,
+        soft_max=0.05,
+    )
+    spread: FloatProperty(
+        name="Spread",
+        description=(
+            "How far along the mesh around a rip the vertices move along with its sides, less and less, so the "
+            "surface stays smooth"
+        ),
+        subtype='DISTANCE',
+        default=0.03,
+        min=0.001,
+        soft_max=0.2,
+    )
+    use_weld: BoolProperty(
+        name="Weld",
+        description=(
+            "Also join the two sides into one piece, so they can't tear apart again: matched vertices are merged, "
+            "and the coarser side's edges are split where the other side's vertices meet them"
+        ),
+        default=False,
+    )
+
+
 class ClippingSettings(bpy.types.PropertyGroup):
     # Checked against the shared body (`Scene.magic_fit.target`).
     show: BoolProperty(
@@ -1290,6 +1323,7 @@ classes = (
     BodyFitBrushSettings,
     TextureRelaxBrushSettings,
     FitMoveSettings,
+    CloseRipsSettings,
     ClippingSettings,
 )
 
@@ -1301,6 +1335,7 @@ def register():
     bpy.types.Scene.body_fit_brush = PointerProperty(type=BodyFitBrushSettings)
     bpy.types.Scene.texture_relax_brush = PointerProperty(type=TextureRelaxBrushSettings)
     bpy.types.Scene.fit_move = PointerProperty(type=FitMoveSettings)
+    bpy.types.Scene.close_rips = PointerProperty(type=CloseRipsSettings)
     bpy.types.Scene.magic_fit_clipping = PointerProperty(type=ClippingSettings)
     bpy.types.Object.magic_fit_hair = PointerProperty(type=HairWeightsState)
 
@@ -1308,6 +1343,7 @@ def register():
 def unregister():
     del bpy.types.Object.magic_fit_hair
     del bpy.types.Scene.magic_fit_clipping
+    del bpy.types.Scene.close_rips
     del bpy.types.Scene.fit_move
     del bpy.types.Scene.texture_relax_brush
     del bpy.types.Scene.body_fit_brush

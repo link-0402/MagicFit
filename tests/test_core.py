@@ -16,7 +16,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 import magic_fit  # noqa: E402
-from magic_fit import painting  # noqa: E402
+from magic_fit import painting, tabs  # noqa: E402
 
 TOL = 1e-4
 FAILURES = []
@@ -570,6 +570,9 @@ class _Layout:
         def draw(*args, **_kwargs):
             if name == 'prop':
                 self.props.append(args[1])
+            if name == 'panel':
+                # A section: its header and its body, open.
+                return _Layout(self.props), _Layout(self.props)
             return _Layout(self.props)
         return draw
 
@@ -615,9 +618,21 @@ def test_sidebar_offers_what_buttons_need():
                 shown = "group_mode" in drawn_props(panel, **context)
                 check(shown == (group_mode == 'ACTIVE'), "sidebar: {} Weights {} Groups with {}".format(
                     mode.title(), "shows" if group_mode == 'ACTIVE' else "hides", group_mode.title()))
+        # On the other tabs, the Body shows where the tools use it: Body Fit's brush and Clipping, and Line Up.
+        # Auto Resize has bodies of its own.
+        for tab, subtab, shown in (('FIT', 'FIT', True), ('FIT', 'MOVE', False), ('FIT', 'CLIPPING', True),
+                                   ('RESIZE', None, False), ('LINE_UP', None, True), ('REPAIR', 'RELAX', False),
+                                   ('REPAIR', 'UV', False), ('CPLUS', None, False)):
+            workspace.magic_fit_tab = tab
+            if subtab is not None:
+                setattr(workspace, tabs.SUBTABS[tab][0], subtab)
+            props = drawn_props(tool.VIEW3D_PT_magic_fit_tabs, **context)
+            check(("target" in props) == shown, "sidebar: {} {} the Body".format(
+                tab.title() + (" " + subtab.title() if subtab else ""), "shows" if shown else "hides"))
     finally:
         settings.mode = 'COPY'
         settings.group_mode = 'ALL'
+        workspace.magic_fit_tab = 'WEIGHTS'
 
 
 def test_register_cycle():
