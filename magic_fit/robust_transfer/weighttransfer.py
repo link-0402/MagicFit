@@ -32,7 +32,8 @@
 # matches within SKIN_REACH like skin contact elsewhere, and on fingers and toes (DIGIT_BONE), where
 # Combined doesn't link parts whose outsides face each other (LINK_FACING), and within SKIN_TOUCH next to
 # bridges too. The standalone add-on's normal angle limits, smoothing and group-limit passes are gone. A vertex
-# no face or link reaches keeps its own match in the solve (_solve_constrained).
+# no face or link reaches keeps its own match in the solve (_solve_constrained). Combined also links layers of
+# one loose part stacked over the same skin, like a hem turned in (_layer_pairs).
 #
 # ---- Original MIT License Notice Follows ----
 #
@@ -865,6 +866,15 @@ LINK_CUTOFF = 1e-3
 # plates on two fingers of a glove, wrap different fingers, which move apart. (Elsewhere, parts facing each
 # other are often layers of one garment, and linking them measured better.)
 LINK_FACING = (60.0, 90.0)
+# Layers of one loose part are linked the same way: a hem turned in, or a lining sewn to its shell, meets it
+# only along the rim, so each layer took the body's weights under itself, or (facing the body, see
+# facing_cosines) none at all, and the inner one moved out through the outer one. Two points sharing no edge
+# are layers where the way between them runs along either one's normal by at least this cosine (on a sheet, it
+# runs along it), and one lies that much higher above the body than the other: stacked over the same skin.
+# Side by side over different skin, like the two sides of a fin between the legs, at about the same height,
+# they move apart, and so do points that each lie in front of the other: those face each other, like the legs of
+# loose pants or a sleeve against the side.
+LINK_LAYER_COSINE = 0.7
 # Beyond this multiple of a vertex's own smoothness stiffness, a weak match
 # only worsens the conditioning of the system without changing the result.
 MAX_SOFT_STIFFNESS = 1e4
@@ -922,7 +932,51 @@ def _link_laplacian(rows, cols, weights, count):
     return links - sp.sparse.diags(np.asarray(links.sum(axis=1)).ravel())
 
 
-def _link_loose_parts(V, F, L, mass, anchors, normals=None):
+def _layer_pairs(V, F, rows, cols, heights):
+    """Which pairs rows[i]-cols[i] of points of one loose part lie in two layers (see LINK_LAYER_COSINE), by
+    their normals from the faces ``F`` and their ``heights`` above the body. A point whose faces cancel out (a
+    double-sided mesh's front and back, welded) has no normal; the other's decides, and with neither they aren't
+    layers."""
+    normals = np.zeros_like(V)
+    areas = np.zeros(len(V))
+    if len(F):
+        face = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]])
+        for k in range(3):
+            np.add.at(normals, F[:, k], face)
+            np.add.at(areas, F[:, k], np.linalg.norm(face, axis=1))
+    length = np.linalg.norm(normals, axis=1)
+    # Where a vertex's faces add up to less than half their areas, they face both ways.
+    known = (length > 0.5 * areas) & (length > 0)
+    unit = np.divide(normals, length[:, np.newaxis], out=np.zeros_like(normals), where=known[:, np.newaxis])
+    offset = V[cols] - V[rows]
+    distance = np.maximum(np.linalg.norm(offset, axis=1), np.finfo(np.float64).tiny)
+    # How far each lies in front of the other along its normal, as a share of the way between them.
+    ahead = np.einsum('ij,ij->i', unit[rows], offset) / distance
+    behind = -np.einsum('ij,ij->i', unit[cols], offset) / distance
+    stacked = (np.abs(ahead) >= LINK_LAYER_COSINE) | (np.abs(behind) >= LINK_LAYER_COSINE)
+    stacked &= np.abs(heights[cols] - heights[rows]) >= LINK_LAYER_COSINE * distance
+    facing = (ahead > 0) & (behind > 0)
+    adjacent = np.zeros(len(rows), dtype=bool)
+    if len(F):
+        edges = np.vstack((F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]))
+        edges = np.unique(np.sort(edges, axis=1) @ np.array([len(V), 1]))
+        adjacent = np.isin(np.minimum(rows, cols) * len(V) + np.maximum(rows, cols), edges)
+    return stacked & ~facing & ~adjacent & (known[rows] | known[cols])
+
+
+def _has_layers(V, F, heights):
+    """Whether any points within twice LINK_CONTACT of their edge lengths lie in two layers (see _layer_pairs),
+    so a mesh of one loose part only gets the point cloud (which fails on a few points) when it has layers."""
+    reach = 2 * LINK_CONTACT * _edge_spacing(V, F)
+    near = cKDTree(V).query_ball_point(V, reach)
+    rows = np.repeat(np.arange(len(V)), [len(found) for found in near])
+    cols = np.fromiter((col for found in near for col in found), dtype=np.int64, count=len(rows))
+    # Both ways round: a link reaches as far as the farther-spaced of its two points allows.
+    apart = rows != cols
+    return bool(np.any(_layer_pairs(V, F, rows[apart], cols[apart], heights)))
+
+
+def _link_loose_parts(V, F, L, mass, anchors, normals=None, heights=None):
     """Combined mode: link the loose parts of the mesh Laplacian L through the point cloud.
 
     Weights still only flow along the mesh within each loose part, so they
@@ -930,7 +984,8 @@ def _link_loose_parts(V, F, L, mass, anchors, normals=None):
     Parts are linked where they touch, like a lining, a belt or overlapping
     trims, so they move together, but not where their outsides (``normals``,
     given over fingers and toes, zero elsewhere) face each other (see
-    LINK_FACING). A part that no anchor
+    LINK_FACING). With the points' ``heights`` above the body, so are layers
+    of one part, like a hem turned in (see LINK_LAYER_COSINE). A part that no anchor
     reaches, not even through the links it keeps, keeps every link to the points
     around it, as in Point mode, so it takes their weights instead of being
     rejected. Vertices without faces get their mass from the point cloud.
@@ -940,11 +995,19 @@ def _link_loose_parts(V, F, L, mass, anchors, normals=None):
     graph.setdiag(0)
     graph.eliminate_zeros()
     part_count, parts = _connected_components(graph)
-    if part_count < 2 or count < 3:
+    if count < 3:
+        return L, mass
+    if part_count < 2 and not (heights is not None and _has_layers(V, F, heights)):
         return L, mass
     P, M = robust_laplacian.point_cloud_laplacian(V, n_neighbors=min(30, count - 1))
     P = P.tocoo()
-    between = (P.row != P.col) & (P.data < 0) & (parts[P.row] != parts[P.col])
+    near = (P.row != P.col) & (P.data < 0)
+    between = near & (parts[P.row] != parts[P.col])
+    if heights is not None:
+        within = np.flatnonzero(near & ~between)
+        between[within[_layer_pairs(V, F, P.row[within], P.col[within], heights)]] = True
+    if not np.any(between):
+        return L, mass
     rows, cols, weights = P.row[between], P.col[between], -P.data[between]
     spacing = _edge_spacing(V, F)
     reach = LINK_CONTACT * np.maximum(spacing[rows], spacing[cols])
@@ -970,7 +1033,7 @@ def _link_loose_parts(V, F, L, mass, anchors, normals=None):
 
 
 def prepare_inpainting(V2, F2, W2, Matched, mode, virtual_merge_distance=0.0,
-                       confidence=None, soft_length=0.0, normals=None):
+                       confidence=None, soft_length=0.0, normals=None, heights=None):
     """Build the actual solver graph, shared by solving and loose-part selection.
 
     Matched vertices are exact constraints. Other vertices with a positive
@@ -982,8 +1045,10 @@ def prepare_inpainting(V2, F2, W2, Matched, mode, virtual_merge_distance=0.0,
     vertices, so weights also flow between loose parts; 'SURFACE' on the mesh,
     so they stay within each loose part; 'COMBINED' on the mesh too, with loose
     parts linked as _link_loose_parts describes, by the outward ``normals`` (see
-    outward_normals, zero where they don't count) when given. True and False
-    stand for 'POINT' and 'SURFACE', like the standalone add-on's point_cloud flag.
+    outward_normals, zero where they don't count) when given, and layers of one
+    part linked too with the vertices' ``heights`` above the body (their match
+    distances). True and False stand for 'POINT' and 'SURFACE', like the
+    standalone add-on's point_cloud flag.
     """
     if isinstance(mode, bool):
         mode = 'POINT' if mode else 'SURFACE'
@@ -1016,6 +1081,10 @@ def prepare_inpainting(V2, F2, W2, Matched, mode, virtual_merge_distance=0.0,
         normals = np.asarray(normals, dtype=np.float64)
         if normals.shape != V.shape or not np.all(np.isfinite(normals)):
             raise InpaintingError("Target normals must be one finite vector per vertex")
+    if heights is not None:
+        heights = np.asarray(heights, dtype=np.float64)
+        if heights.shape != (len(V),) or np.any(np.isnan(heights)):
+            raise InpaintingError("Target heights must be one value per vertex")
     confidence = np.where(matched, 1.0, confidence)
     # Inpainting does not change fully matched input. Seam synchronization is
     # deliberately separate and also operates on fully matched meshes.
@@ -1064,8 +1133,11 @@ def prepare_inpainting(V2, F2, W2, Matched, mode, virtual_merge_distance=0.0,
                     length = np.linalg.norm(summed, axis=1, keepdims=True)
                     normals = np.divide(summed, length, out=np.zeros_like(summed),
                                         where=(length > 0.5 * known[:, np.newaxis]) & (length > 0))
+                if heights is not None:
+                    # Welded vertices lie as high as they do on average.
+                    heights = np.bincount(merge_map, heights, n) / np.bincount(merge_map, minlength=n)
                 L, mass = _link_loose_parts(V, F, L, mass,
-                                            matched | ((confidence > 0) & (soft_length > 0)), normals)
+                                            matched | ((confidence > 0) & (soft_length > 0)), normals, heights)
         L = L.astype(np.float64).tocsr()
         if np.any(~np.isfinite(L.data)) or np.any(~np.isfinite(mass)) or np.any(mass < 0):
             raise InpaintingError("Inpainting produced an invalid Laplacian or mass matrix")

@@ -719,6 +719,50 @@ class NumericalTests(unittest.TestCase):
         with self.assertRaises(wt.InpaintingError):
             wt.prepare_inpainting(v, f, w, matched, 'COMBINED', normals=up[:5])
 
+    def test_combined_mode_links_layers_of_one_part(self):
+        def folded(facing):
+            # One loose part: a panel 2 mm above a band, joined along its rim at x == 1 like a hem turned in.
+            # The panel's normals face up, the band's down (back to back), or with ``facing`` both toward each
+            # other, like the legs of loose pants.
+            panel, pf = flat_grid(np.linspace(0, 1, 21), np.linspace(0, 0.5, 11), z=0.002)
+            band, bf = flat_grid(np.linspace(0.7, 1, 7), np.linspace(0, 0.5, 11))
+            if facing:
+                pf = pf[:, ::-1]
+            else:
+                bf = bf[:, ::-1]
+            rim_panel = 20 * 11 + np.arange(11)
+            rim_band = len(panel) + 6 * 11 + np.arange(11)
+            rim = np.vstack([np.column_stack([rim_panel[:-1], rim_band[:-1], rim_panel[1:]]),
+                             np.column_stack([rim_panel[1:], rim_band[:-1], rim_band[1:]])])
+            return np.vstack([panel, band]), np.vstack([pf, bf + len(panel), rim]), len(panel)
+
+        def gap(facing, body=-0.001, cosine=wt.LINK_LAYER_COSINE, heights=True):
+            v, f, count = folded(facing)
+            # The panel copies the body; the band only trusts its own, other weights a little.
+            w = np.column_stack([v[:, 0], 1 - v[:, 0]])
+            w[count:] = w[count:, ::-1]
+            matched = np.arange(len(v)) < count
+            confidence = np.where(matched, 1.0, wt.BRIDGE_FLOOR)
+            # How high each vertex lies above the body: a plane under both (z == body), or, without one, the
+            # skin on either side of a fin, as far from each layer.
+            height = v[:, 2] - body if body is not None else np.full(len(v), 0.002)
+            with patch.object(wt, 'LINK_LAYER_COSINE', cosine):
+                solved = wt.solve_inpainting(wt.prepare_inpainting(
+                    v, f, w, matched, 'COMBINED', wt.BRIDGE_WELD, confidence, wt.BRIDGE_SOFT_LENGTH,
+                    heights=height if heights else None))
+            inner = np.flatnonzero((np.arange(len(v)) >= count) & (v[:, 0] < 0.95))
+            over = np.argmin(np.linalg.norm(v[None, :count, :2] - v[inner, None, :2], axis=2), axis=1)
+            return np.abs(solved[inner] - solved[over]).max()
+        # The band moves with the panel over it, as a lining on a part of its own does.
+        self.assertLess(gap(False), 0.05)
+        # Unlinked, it doesn't: that let a turned-in hem move out through the panel.
+        self.assertGreater(gap(False, cosine=2.0), 0.2)
+        self.assertGreater(gap(False, heights=False), 0.2)
+        # Layers facing each other move apart, and so do the two sides of a fin between the legs, each as high
+        # above the skin on its side.
+        self.assertGreater(gap(True), 0.2)
+        self.assertGreater(gap(False, body=None), 0.2)
+
     def test_final_sync_repairs_seams_pulled_apart(self):
         v, f, w, matched = split_surface()
         w[:4] = [[1, 0], [0, 1], [0.8, 0.2], [0.2, 0.8]]

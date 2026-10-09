@@ -276,6 +276,8 @@ def prepare_batch(batch, settings):
         np.concatenate([target_confidence(t) for t in batch]),
         weighttransfer.BRIDGE_SOFT_LENGTH,
         np.concatenate([t['outward'] for t in batch]) if all('outward' in t for t in batch) else None,
+        # How high each vertex lies above the body, so layers of one part are linked too.
+        np.concatenate([t['distances'] for t in batch]) if all('distances' in t for t in batch) else None,
     )
     return domain, offsets
 
