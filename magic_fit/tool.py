@@ -1170,9 +1170,9 @@ def _draw_wrapped(context, layout, text, icon='NONE'):
         col.label(text=line, icon=icon if index == 0 else 'BLANK1')
 
 
-def _draw_resize_sizes(context, layout, settings):
+def _draw_resize_sizes(context, layout, settings, picks):
     """The Sizes section: the settings the To body's (else the From body's) shape keys follow, with the values to
-    resize to, and the sizes that makes."""
+    resize to, and the sizes that makes (``picks``, see resize_sizes)."""
     body = settings.resize_to_object or settings.resize_from_object
     if body is None or body.type != 'MESH' or not (len(settings.resize_sizes) or sizing.offers_sizes(body)):
         return
@@ -1212,7 +1212,6 @@ def _draw_resize_sizes(context, layout, settings):
             col = sub.column(align=True)
             for item in more:
                 draw(col, item)
-    picks = resize_sizes(settings)
     if picks is None:
         return
     col = panel.column()
@@ -1248,7 +1247,9 @@ class VIEW3D_PT_resize_sidebar(tabs.TabPanel, bpy.types.Panel):
         row = col.row()
         row.active = settings.resize_to_object not in (None, body)
         row.prop(settings, "resize_match")
-        _draw_resize_sizes(context, layout, settings)
+        # Read once for the whole panel: reading them walks every driver of the body.
+        picks = resize_sizes(settings)
+        _draw_resize_sizes(context, layout, settings, picks)
 
         header, panel = layout.panel("magic_fit_resize_keys", default_closed=not settings.resize_use_keys)
         header.use_property_split = False
@@ -1269,12 +1270,12 @@ class VIEW3D_PT_resize_sidebar(tabs.TabPanel, bpy.types.Panel):
             col.prop(settings, "resize_keep_close")
 
         col = layout.column()
-        name = resize_key_name(context)
+        name = resize_key_name(context, picks)
         if _HAS_PLACEHOLDER:
             col.prop(settings, "resize_key_name", placeholder=name or "Each size's name")
         else:
             col.prop(settings, "resize_key_name")
-        problem = check_resize_ready(context)
+        problem = check_resize_ready(context, picks)
         if problem is not None:
             col.box().label(text=problem, icon='ERROR')
         col.separator()
@@ -1282,8 +1283,7 @@ class VIEW3D_PT_resize_sidebar(tabs.TabPanel, bpy.types.Panel):
         col.operator(MAGIC_FIT_OT_resize_subdivide.bl_idname, icon='MOD_SUBSURF')
         row = col.row()
         row.scale_y = 1.4
-        picks = resize_sizes(settings) if problem is None else None
-        count = len(picks.changed) if picks is not None else 0
+        count = len(picks.changed) if picks is not None and problem is None else 0
         row.operator(MAGIC_FIT_OT_resize.bl_idname, icon='SHAPEKEY_DATA',
                      text="Resize to {:d} Sizes".format(count) if count > 1 else "Resize")
 

@@ -500,13 +500,20 @@ def resize_sizes(settings):
     return api.picked(settings)
 
 
-def check_resize_ready(context):
-    """Return why Resize can't be used right now, or None when it can."""
+# A `picks` argument not given: the sizes are read again (reading them walks every driver of the body).
+UNREAD = object()
+
+
+def check_resize_ready(context, picks=UNREAD):
+    """Return why Resize can't be used right now, or None when it can. ``picks``: resize_sizes, read already."""
     if context.mode not in {'OBJECT', 'EDIT_MESH'}:
         return "Resize in Object or Edit Mode"
     settings = context.scene.body_fit_brush
     body = settings.resize_from_object
-    picks = resize_sizes(settings)
+    if picks is UNREAD:
+        picks = resize_sizes(settings)
+    if picks is not None and picks.too_many:
+        return api.too_many_sizes()
     alone = body is not None and settings.resize_to_object in (None, body) and not settings.resize_use_keys
     if alone and not settings.resize_use_sizes:
         sized = body.type == 'MESH' and sizing.offers_sizes(body)
@@ -555,11 +562,11 @@ def resize_key_names(settings, picks=None):
     return names
 
 
-def resize_key_name(context):
+def resize_key_name(context, picks=UNREAD):
     """Name of the shape key Resize adds: the Key Name setting, else the To shape's name or the size's; empty when
-    it adds one per size."""
+    it adds one per size. ``picks``: resize_sizes, read already."""
     settings = context.scene.body_fit_brush
-    names = resize_key_names(settings, resize_sizes(settings))
+    names = resize_key_names(settings, resize_sizes(settings) if picks is UNREAD else picks)
     return names[0] if len(names) == 1 else ""
 
 

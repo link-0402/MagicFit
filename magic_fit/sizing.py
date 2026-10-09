@@ -281,19 +281,34 @@ def _enum_identifiers(holder, name):
         return [item.identifier for item in prop.enum_items]
     key = (holder.bl_rna.identifier, name)
     if key not in _ENUM_IDENTIFIERS:
-        # Assigning an item that doesn't exist is refused with the list of those that do; nothing changes. (Not
-        # while drawing: then IDs can't be written at all.)
-        identifiers = []
-        try:
-            setattr(holder, name, "\x01")
-        except (TypeError, AttributeError) as error:
-            found = re.search(r"not found in \((.*)\)", str(error))
-            if found is not None:
-                identifiers = [_unescape(item) for item in re.findall(r"'((?:[^'\\]|\\.)*)'", found.group(1))]
+        identifiers = _declared_identifiers(holder, name)
+        if not identifiers:
+            # Assigning an item that doesn't exist is refused with the list of those that do; nothing changes. (Not
+            # while drawing: then IDs can't be written at all.)
+            try:
+                setattr(holder, name, "\x01")
+            except (TypeError, AttributeError) as error:
+                found = re.search(r"not found in \((.*)\)", str(error))
+                if found is not None:
+                    identifiers = [_unescape(item) for item in re.findall(r"'((?:[^'\\]|\\.)*)'", found.group(1))]
         if not identifiers:
             return []
         _ENUM_IDENTIFIERS[key] = identifiers
     return _ENUM_IDENTIFIERS[key]
+
+
+def _declared_identifiers(holder, name):
+    """The identifiers the items function of enum ``name`` gives, for a property group an add-on declared in Python,
+    read without writing anything (so also while drawing); empty for any other."""
+    declared = getattr(type(holder), "__annotations__", {}).get(name)
+    items = getattr(declared, "keywords", {}).get("items")
+    if not callable(items):
+        return []
+    try:
+        listed = items(holder, bpy.context)
+    except Exception:  # noqa: BLE001 - another add-on's function
+        return []
+    return [item[0] for item in listed or () if item and item[0]]
 
 
 def _enum_number(identifiers, identifier):

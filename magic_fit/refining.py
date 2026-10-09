@@ -66,6 +66,8 @@ def refine(obj, shape_of, source, targets, body_tris, levels=1, tolerance=CUT_TO
     over, looking again after each cut. ``shape_of(obj)`` gives the mesh's vertices in world space, fitted to the
     body's ``source`` shape. Returns (faces cut, vertices added)."""
     cut = added = 0
+    # Resize's keys changed by hand stay so: once cut, that can't be told.
+    resizing.note_edited_keys(obj)
     for _level in range(max(1, min(int(levels), MAX_LEVELS))):
         mesh = obj.data
         tris = resizing._tris(mesh)

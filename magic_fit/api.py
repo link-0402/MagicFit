@@ -77,14 +77,17 @@ BASE_NAME = "Base"
 
 class Picks:
     """The sizes picked in the Auto Resize panel's Sizes: ``settings`` (sizing.Setting, as the panel lists them, with
-    the values the body has ``now``), ``varied`` (the settings picked with several values) and ``sizes`` (Size)."""
+    the values the body has ``now``), ``varied`` (the settings picked with several values) and ``sizes`` (Size).
+    ``too_many`` says the picks make more than sizing.MAX_SIZES sizes: only that many are listed."""
 
     def __init__(self, settings, picks, now):
         self.settings, self.now = settings, now
         self.varied = {name for name, values in picks.items() if len(values) > 1}
         self.sizes = []
         names = set()
-        for values in sizing.combinations(settings, picks, now):
+        combinations = sizing.combinations(settings, picks, now, limit=sizing.MAX_SIZES + 1)
+        self.too_many = len(combinations) > sizing.MAX_SIZES
+        for values in combinations[:sizing.MAX_SIZES]:
             name = sizing.size_label(settings, values, now, self.varied) or BASE_NAME
             # Each size's key needs a name of its own.
             unique, count = name, 1
@@ -123,9 +126,17 @@ def picked(brush):
 
 def picked_sizes(scene=None):
     """The sizes picked in the Auto Resize panel's Sizes of ``scene`` (the current one when None): a list of Size, every
-    combination of the values picked. Empty with Sizes off."""
+    combination of the values picked. Empty with Sizes off. Raises ResizeError when they make more than
+    sizing.MAX_SIZES."""
     picks = picked((scene or bpy.context.scene).body_fit_brush)
+    if picks is not None and picks.too_many:
+        raise ResizeError(too_many_sizes())
     return [] if picks is None else list(picks.sizes)
+
+
+def too_many_sizes():
+    """What to tell the user when the picks make more than sizing.MAX_SIZES sizes."""
+    return "The sizes picked make more than {:d} sizes: pick fewer".format(sizing.MAX_SIZES)
 
 
 def body_sizes(body):
@@ -276,6 +287,20 @@ class _Sizes:
                 first_vertex += len(shape)
             self.edges = np.concatenate(edges)
         self.points = np.concatenate(self.shapes)
+        # What a mesh's key depends on besides the bodies and options: its shape, its rigid parts and skin, and the
+        # other meshes' skin (clothing near it follows it) and, with Keep Close, their triangles (Keep Covered).
+        around = []
+        if self.cover is not None:
+            around += [self.points, self.cover]
+        if self.bound.any():
+            held = self.bound > 0.0
+            around += [self.points[held], self.bound[held], self.faces if self.faces is not None else np.zeros(0)]
+        around = resizing.fingerprint(*around) if around else ""
+        self.mesh_prints, first_vertex = [], 0
+        for shape, shape_print in zip(self.shapes, self.shape_prints):
+            part = slice(first_vertex, first_vertex + len(shape))
+            first_vertex += len(shape)
+            self.mesh_prints.append(resizing.fingerprint(shape_print, self.rigid[part] >= 0, self.bound[part], around))
         self.shared = resizing.Shared() if share else None
 
     def size(self, size, label, show=False, progress=None):
@@ -302,8 +327,8 @@ class _Sizes:
             step(1.0)
             return run, notes
         inputs = resizing.fingerprint(self.source, target, job.options())
-        states = [resizing.key_state(obj, label, resizing.fingerprint(inputs, shape_print))
-                  for obj, shape_print in zip(meshes, self.shape_prints)]
+        states = [resizing.key_state(obj, label, resizing.fingerprint(inputs, mesh_print))
+                  for obj, mesh_print in zip(meshes, self.mesh_prints)]
         needed = [state in ('NEW', 'STALE') for _block, state in states]
         moved = None
         if any(needed):
@@ -319,12 +344,12 @@ class _Sizes:
             moved = change.apply(self.points, rigid=self.rigid, edges=self.edges, bound=self.bound, faces=self.faces,
                                  cover=self.cover, progress=step)
         first = 0
-        for obj, shape, shape_print, mix, (block, state), need in zip(meshes, self.shapes, self.shape_prints,
-                                                                      self.mixes, states, needed):
+        for obj, shape, mesh_print, mix, (block, state), need in zip(meshes, self.shapes, self.mesh_prints,
+                                                                     self.mixes, states, needed):
             part = slice(first, first + len(shape))
             first += len(shape)
             if need:
-                record = {"from": self.from_print, "inputs": resizing.fingerprint(inputs, shape_print), "mix": mix}
+                record = {"from": self.from_print, "inputs": resizing.fingerprint(inputs, mesh_print), "mix": mix}
                 block, stuck = resizing.write_resized_key(obj, label, moved[part], record, show=show)
                 run.made += 1
             else:
@@ -473,7 +498,7 @@ class Resizer:
     ``target``, ``sizes``, ``scene`` and ``body`` are as for resize_collection, and making one raises the errors it
     raises. ``sizes`` lists the sizes to resize to (Size, or None for the To shape alone). It reads the meshes and
     bodies when made, and keeps what every size shares (the clothing's shape, its distances from the From body,
-    the From body's crease-free copy...) for all of them: make another after changing them.
+    the From body's crease-free copy...) until each of them is resized: make another after changing them.
     """
 
     def __init__(self, target, sizes=None, *, scene=None, body=None):
@@ -502,7 +527,9 @@ class Resizer:
         self.parts = [obj for obj in meshes if names and sizing.follows(obj, names, changed)]
         self.clothing = [obj for obj in meshes if obj not in self.parts]
         with _object_mode():
-            self._work = _Sizes(self.clothing, job)
+            self._work = _Sizes(self.clothing, job, share=len(self.sizes) > 1)
+        # What the sizes share is let go once each of them is resized (it can take hundreds of megabytes).
+        self._pending = list(self.sizes)
 
     def _sizes(self, sizes):
         """``sizes`` given as Size or as dicts of setting values, as Size."""
@@ -528,7 +555,10 @@ class Resizer:
         label = size.name if size is not None else _to_label(self.job)
         with _object_mode():
             run, notes = self._work.size(size, label, progress=progress)
-        values = sizing.size_values(self.job.sized, size.values) if size is not None else {}
+        self._pending = [pending for pending in self._pending if pending is not size]
+        if not self._pending:
+            self._work.shared = None
+        values =sizing.size_values(self.job.sized, size.values) if size is not None else {}
         part_values = {}
         for part in self.parts:
             changes = sizing.size_values(part, size.values, values) if size is not None else {}
