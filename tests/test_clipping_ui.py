@@ -321,7 +321,8 @@ def steps():
         region = next(r for r in env.area.regions if r.type == 'UI')
         with bpy.context.temp_override(window=env.window, area=env.area, region=region):
             bpy.context.region.active_panel_category = "Magic Fit"
-    bpy.context.workspace.magic_fit_tab = 'FIT'  # the Clipping panel's tab
+    bpy.context.workspace.magic_fit_tab = 'FIT'  # the Clipping panel's tab and sub-tab
+    bpy.context.workspace.magic_fit_fit_tab = 'CLIPPING'
     env.redraw()
     yield 0.5
     env.screenshot("clip_07_panel.png", whole_window=True)

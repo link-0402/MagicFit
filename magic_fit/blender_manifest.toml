@@ -3,7 +3,7 @@ schema_version = "1.0.0"
 id = "magic_fit"
 version = "1.0.6"
 name = "Magic Fit"
-tagline = "Transfer weights, line up, fit and resize to a body, relax UVs"
+tagline = "Transfer weights, fit, resize, line up and repair meshes"
 maintainer = "Luci_xiv"
 type = "add-on"
 website = "https://github.com/link-0402/MagicFit"
@@ -11,7 +11,7 @@ website = "https://github.com/link-0402/MagicFit"
 blender_version_min = "5.2.0"
 
 license = ["SPDX:GPL-3.0-or-later"]
-tags = ["Paint", "Sculpt", "Rigging"]
+tags = ["Paint", "Sculpt", "Rigging", "Mesh", "UV"]
 
 # SciPy and robust-laplacian for Weight Transfer, built for Blender 5.2's Python on Windows.
 # Blender installs them where they fit, shared with other extensions listing the same wheels (such as
@@ -23,5 +23,6 @@ wheels = [
 ]
 
 # Face reads the game's faces, face skeletons and face animations from the user's FFXIV install, read only.
+# Mesh Repair's Transfer Texture, Normal Map Seams and Index Map Generator save the images they make.
 [permissions]
-files = "Read the game's faces from the FFXIV install folder"
+files = "Read FFXIV's faces, save textures, normal maps and index maps"

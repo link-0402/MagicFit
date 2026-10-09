@@ -9,17 +9,20 @@ In the 3D Viewport, press **N** and open the **Magic Fit** tab. It's there in ev
 | Tab | What's on it |
 | --- | --- |
 | **Weights** | [Weight Transfer](#weight-transfer), [Connect Parts](#connect-parts) and the [Weight Brushes](#weight-brushes), sorted into sub-tabs: **General** (Copy, Straighten, Smooth), **Skirt**, **Heels**, **Hair** and **Face**. Each sub-tab has a button for whole meshes first, then its brush. |
-| **Body Fit** | The [Body Fit](#body-fit) brush, the [Fit Move](#fit-move) tool, [Resize](#resize) and the [Clipping](#clipping-marks) marks. |
+| **Body Fit** | Sorted into sub-tabs: **Fit** has the [Body Fit](#body-fit) brush, **Move** the [Fit Move](#fit-move) tool and **Clipping** the [Clipping](#clipping-marks) marks. |
+| **Auto Resize** | [Auto Resize](#auto-resize), for other body mods and other sizes of a body. |
 | **Line Up** | [Line Up](#line-up), for models from other games, and for [hair](#lining-up-hair) on a head. |
-| **Texture Relax** | The [Texture Relax](#texture-relax) brush. |
+| **Mesh Repair** | Sorted into sub-tabs: **Texture Relax** has the [Texture Relax](#texture-relax) brush, **Close Rips** [Close Rips](#close-rips), **Mesh Rebuild** [Rebuild Mesh](#rebuild-mesh), **Normals** [Smooth Normals](#smooth-normals) and [Normal Map Seams](#normal-map-seams), and **UV** [Rebuild UVs](#rebuild-uvs), [Transfer Texture](#transfer-texture), [Resize Canvas](#resize-canvas) and the [Index Map Generator](#index-map-generator). |
 | **Customize+** | Shows a [Customize+](#customize) template and the game's [Bust Size](#bust-size) on your armatures. |
 
 ![The Magic Fit tab of the sidebar: Weights, Body Fit and Customize+](images/sidebar.png)
 
-- **The Body** sits right below the tabs. It's one setting shared by every tool that works against a body. Resize has its own From and To bodies. On the Line Up tab, **Outfit** and **Hair** come first: with Hair, the **Head** takes the Body's place.
-- **Each brush panel has a button** that switches the mesh to the right mode and picks the brush: **Paint Weights**, **Paint Skirt Weights**, **Paint Heel Weights**, **Paint Hair Weights**, **Paint Face Weights**, **Fit to Body**, **Fit Move** or **Relax Texture**.
-- **The Weights sub-tabs are the brush's modes.** Picking a sub-tab sets the mode, and changing the mode in the tool header switches the sub-tab.
-- **The tabs take two rows** in a narrow sidebar. Drag the sidebar wider and they fit in one. Folding the first panel hides the tabs.
+- **The Body** sits right below the tabs. It's one setting shared by every tool that works against a body, and shows where those tools are: Weights (General and Skirt), Body Fit (Fit and Clipping) and Line Up. Auto Resize has its own From and To bodies, and Mesh Repair needs none. On the Line Up tab, **Outfit** and **Hair** come first: with Hair, the **Head** takes the Body's place.
+- **Each brush panel has a button** that switches the mesh to the right mode and picks the brush, and shows its tab and sub-tab: **Paint Weights**, **Paint Skirt Weights**, **Paint Heel Weights**, **Paint Hair Weights**, **Paint Face Weights**, **Fit to Body**, **Fit Move** or **Relax Texture**.
+- **The Weights sub-tabs are the brush's modes.** Picking a sub-tab sets the mode, and changing the mode in the tool header switches the sub-tab. The Body Fit and Mesh Repair sub-tabs are kept per workspace, like the tabs, and switching them adds no undo steps.
+- **Settings that rarely need changing** are in closed sections, such as Skirt Weights' and Hair Weights' **Options**. Click a section's header to open it.
+- **Mesh Repair's tools show their last result** in a box in their panel; the **×** hides it. The gear buttons next to Rebuild Mesh's *Afterwards* switches show the sub-tab with their settings.
+- **The tabs take three rows** in the default sidebar. Drag the sidebar wider and they fit in fewer, and in one at about twice the width. Folding the first panel hides the tabs.
 - **The globe icon** in the first panel's header has links to Luci_xiv's mods, GitHub, Bluesky and Ko-fi.
 
 The brushes are also regular toolbar tools. **Weight Brushes** is in the Weight Paint toolbar, right after Gradient. **Body Fit**, **Texture Relax** and **Fit Move** are the last three buttons in the Edit Mode toolbar (scroll the toolbar on short screens). While a brush is active, its settings also show in the tool header and under **Properties → Tool**.
@@ -221,7 +224,7 @@ Blender's Smooth brush does one group at a time and stops at the edge of each lo
 | Reach | How far the weights blend, measured over the surface (2 cm). Small values smooth gently, large ones average a wide area but are slower. |
 | Merge Range | Surfaces this close together (2 mm) are held together across the gap, as if merged: they end up with the same weights. A little farther, they're held more loosely. 0 only joins vertices at the same spot. |
 | Join Folds | On: the layers of one part that lie on each other are held together too, like a hem or cuff folded back or a lining. Off: only separate parts are, so lips and eyelids that touch can still open. |
-| Max Groups | At most this many bone weights per vertex (8). |
+| *Options:* Max Groups | At most this many bone weights per vertex (8). |
 | Groups | **All Groups** or only the **Current Group**. |
 | Accumulate | Off: each stroke moves weights at most Strength of the way. On: the longer you paint, the smoother it gets. |
 
@@ -275,10 +278,10 @@ Good to know:
 | Blend Start | How far above the hip bone the skirt bones start. |
 | Blend Length | How far below Blend Start they fully take over. |
 | Skin Weight, Skin Distance | Body weight kept where the cloth lies on the body, fading out at that distance. |
-| Body Weight | Body weight kept everywhere below the blend. |
-| Spread | How far each chain reaches sideways. |
-| Joint Blend | How far a chain's segments blend at each joint. |
-| Max Groups | At most this many bone weights per vertex. |
+| *Options:* Body Weight | Body weight kept everywhere below the blend. |
+| *Options:* Spread | How far each chain reaches sideways. |
+| *Options:* Joint Blend | How far a chain's segments blend at each joint. |
+| *Options:* Max Groups | At most this many bone weights per vertex. |
 
 ### Heels
 
@@ -355,11 +358,11 @@ Good to know:
 | Hang Start | Hair closer to the scalp than this only follows the head. |
 | Hang Length | Two thirds of the hair hangs from the hair bones this far past Hang Start. |
 | Neck Weight | Share of the neck and upper back below the head. |
-| Chain Stretch | How far long hair spreads a short chain's joints. |
-| Joint Blend | The least distance over which a chain's bones blend. |
-| Layer Range | Layers of hair this close on each other get the same weights. 0: each weighted on its own. |
-| Ears | Miqo'te: cat ears follow the ear bones. |
-| Max Groups | At most this many bone weights per vertex. |
+| *Options:* Chain Stretch | How far long hair spreads a short chain's joints. |
+| *Options:* Joint Blend | The least distance over which a chain's bones blend. |
+| *Options:* Layer Range | Layers of hair this close on each other get the same weights. 0: each weighted on its own. |
+| *Options:* Ears | Miqo'te: cat ears follow the ear bones. |
+| *Options:* Max Groups | At most this many bone weights per vertex. |
 
 ### Face
 
@@ -431,7 +434,7 @@ Good to know:
 | Meshes | The face and its parts (see above). **Fill from Selection** sets them from the selected meshes, the trash can empties them. |
 | Close Eyes | Makes the lids just meet in the game's Shut Eyes expression, without stopping short or sliding past each other. |
 | Match Neck | Gives the neck opening the game's positions, normals and weights. |
-| Max Groups | At most this many bone weights per vertex. |
+| *Options:* Max Groups | At most this many bone weights per vertex. |
 | Lash Lift | Snap Lashes: how much farther out from the lid the roots go. Raise it if the lid pokes through the lashes. |
 | Game Folder | In the preferences: where FFXIV is installed, if it isn't found by itself. **Read the Game's Faces Again** re-reads them. |
 
@@ -442,7 +445,7 @@ Good to know:
 ![Body Fit pushing a dress out of the thighs; the pink clipping marks shrink with each stroke](images/body-fit.gif)
 
 1. Select the clothing (one or more meshes) and enter **Edit Mode**.
-2. Pick **Body Fit** at the bottom of the toolbar, or click **Fit to Body** on the **Body Fit** tab.
+2. Pick **Body Fit** at the bottom of the toolbar, or click **Fit to Body** on the **Body Fit** tab's **Fit** sub-tab.
 3. Set the **Body**, a **Mode** and an **Offset** (1 mm), the gap to keep between the body and the innermost layer.
 4. Sculpt over the areas to fix. Going over a spot again settles it instead of pushing further.
 
@@ -525,7 +528,7 @@ Loose clothing, farther from the body than Keep Together and at least 2 cm, also
 
 **Fit Move** moves the selection in Edit Mode like Blender's Move, but its proportional editing keeps to the mesh. Moving a trouser leg on one inner thigh doesn't drag the other leg along, split seams don't open, and the edge of a hidden part stays joined to it.
 
-1. In Edit Mode, pick **Fit Move** at the bottom of the toolbar, or click **Fit Move** on the **Body Fit** tab.
+1. In Edit Mode, pick **Fit Move** at the bottom of the toolbar, or click **Fit Move** on the **Body Fit** tab's **Move** sub-tab.
 2. Select the vertices to move. Turn on **Proportional Editing** (**O**) for the area around them to follow.
 3. Drag, or press **G**.
 
@@ -553,11 +556,32 @@ How it differs from Blender's Move:
 | Fade at Hidden | Keeps the vertices next to hidden ones in place and eases the move in over **Fade Distance** along the mesh. |
 | Seam Distance | Vertices closer than this move alike, across parts and objects, and proportional editing reaches across them. |
 
-## Resize
+## Clipping marks
 
-**Resize** moves clothing from one body to another and adds the result to each mesh as a shape key. The bodies can be two shape keys of one devkit body, like the Yet Another Devkit Mannequin's Rue, Lava or Buff keys, or that body at other sizes picked like in the devkit, several at once ([Sizes](#sizes)). They can also be two different bodies: another body mod with the same UV layout, like the RueXB devkit's body and the Mannequin, or any body the clothing was made on, like an outfit's own body from another game.
+Wherever a mesh you're working on is inside the body, a pink patch shows on the body. The marks update live as you fit, paint, pose or scale bones, and as an animation plays. Turn them on with the checkbox of the **Clipping** panel, on the **Body Fit** tab's **Clipping** sub-tab.
 
-1. In the **Resize** panel on the **Body Fit** tab, pick the **From Body**, the body the clothing fits now.
+Which meshes are checked:
+
+- In **Edit Mode**: every mesh in Edit Mode.
+- In **Weight Paint** and other paint modes: the mesh you're painting.
+- In **Object Mode** and **Pose Mode**: the selected meshes. To see clipping while posing, select the clothing, then the armature, and enter Pose Mode.
+
+With only part of a body, like a torso, nothing is marked past its open edges.
+
+| Option | What it does |
+| --- | --- |
+| Clipping (checkbox) | Shows the marks. Saved with the file. |
+| Color | Color and opacity of the marks. |
+| Margin | Also marks, more faintly, where the mesh is outside but closer than this. |
+| In Front | Shows marks through everything, like clipping hidden under outer layers. |
+
+The panel lists each checked mesh with how many vertices clip. Big changes can take a moment to measure; the panel shows "measuring…" meanwhile.
+
+## Auto Resize
+
+**Auto Resize** moves clothing from one body to another and adds the result to each mesh as a shape key. The bodies can be two shape keys of one devkit body, like the Yet Another Devkit Mannequin's Rue, Lava or Buff keys, or that body at other sizes picked like in the devkit, several at once ([Sizes](#sizes)). They can also be two different bodies: another body mod with the same UV layout, like the RueXB devkit's body and the Mannequin, or any body the clothing was made on, like an outfit's own body from another game.
+
+1. On the **Auto Resize** tab, pick the **From Body**, the body the clothing fits now.
 2. Pick the **To Body**. Leave it empty to go to another shape key of the From Body.
 3. To start from or go to a shape key, turn on **Use Shapekeys** and pick **From Shapekey** and **To Shapekey**. For other sizes of a devkit body, like the Yet Another Devkit's Mannequin, use [Sizes](#sizes) instead.
 4. Select all of the clothing's meshes, so its parts stay together, and click **Resize**.
@@ -574,11 +598,11 @@ Examples:
 
 Bring in bodies from other files with **File → Append**. The other shape keys of the bodies count as they're set: for Rue with a medium chest, set the Mannequin to Medium first, or pick both with Sizes.
 
-**The result** is a new shape key on each mesh, named after the To Shapekey (or **Key Name**). It's turned on, and the mesh's other keys are turned off. Turn it off to compare, set it halfway for an in-between size, or keep fitting it with Body Fit. Resize doesn't change Body Fit's body for you: its report says what to set to check the fit, then fix what still clips with [Body Fit](#body-fit).
+**The result** is a new shape key on each mesh, named after the To Shapekey (or **Key Name**). It's turned on, and the mesh's other keys are turned off. Turn it off to compare, set it halfway for an in-between size, or keep fitting it with Body Fit. Auto Resize doesn't change Body Fit's body for you: its report says what to set to check the fit, then fix what still clips with [Body Fit](#body-fit).
 
-**Resizing again** starts from the shape the clothing fits the From Body in, even while it shows a key Resize made: resizing to Medium and then to Small gives two keys, both from the large shape. A key made for the same size from the same shapes and settings is kept as it is, and so is one you fixed by hand since. Resize makes it again when the clothing, the bodies or the settings changed and nobody touched it; delete a key to have it made again anyway.
+**Resizing again** starts from the shape the clothing fits the From Body in, even while it shows a key Auto Resize made: resizing to Medium and then to Small gives two keys, both from the large shape. A key made for the same size from the same shapes and settings is kept as it is, and so is one you fixed by hand since. Auto Resize makes it again when the clothing, the bodies or the settings changed and nobody touched it; delete a key to have it made again anyway.
 
-**Match By** says how Resize tells which spot of the To Body each spot of the From Body is, when they're different meshes:
+**Match By** says how Auto Resize tells which spot of the To Body each spot of the From Body is, when they're different meshes:
 
 - **Auto** (default): by vertices for a copy of the From Body, else by UV map when the bodies share a layout, else by shape. The report says which it used.
 - **Vertices:** vertex by vertex, for a copy of the From Body in another shape.
@@ -649,40 +673,19 @@ Clothing ripped from another game usually comes with the body it was made on. Re
 
 1. Join the outfit's body into one mesh, if it comes in pieces.
 2. [Line Up](#line-up) the outfit and its body together, so both sit on the Mannequin. Selecting one mesh is enough when they share an armature. When each mesh came with its own copy of the armature (Cyberpunk 2077), select them all.
-3. In **Resize**, pick the outfit's body as the **From Body** and the Mannequin as the **To Body**, select the outfit's meshes and click **Resize**. **Auto** matches the bodies by shape.
+3. On the **Auto Resize** tab, pick the outfit's body as the **From Body** and the Mannequin as the **To Body**, select the outfit's meshes and click **Resize**. **Auto** matches the bodies by shape.
 
 The clothing keeps how it sat on its own body: loose parts stay as loose, and tight ones end up as close to the Mannequin as they were to their own body. Clipping drops to about what the outfit already had on its own body. Delete the outfit's body afterwards, or keep it for another resize.
 
 What to check afterwards:
 
-- **The chest,** where the bodies differ most. Shape matching knows no anatomy: with a much larger or higher bust than the Mannequin's, clothing can crease along the old underbust, and details tied to the skin (a piercing, a seam under the breasts) slide by 1 to 2 cm. Resize warns when the bodies differ by more than 3 cm.
+- **The chest,** where the bodies differ most. Shape matching knows no anatomy: with a much larger or higher bust than the Mannequin's, clothing can crease along the old underbust, and details tied to the skin (a piercing, a seam under the breasts) slide by 1 to 2 cm. Auto Resize warns when the bodies differ by more than 3 cm.
 - **Shoes and gloves** follow the legs and arms, so the Mannequin's toes can poke through heeled boots.
 - **The rest of the clipping:** the few percent the outfit had on its own body. Fix it with [Body Fit](#body-fit).
 
-## Clipping marks
-
-Wherever a mesh you're working on is inside the body, a pink patch shows on the body. The marks update live as you fit, paint, pose or scale bones, and as an animation plays. Turn them on with the checkbox of the **Clipping** panel on the **Body Fit** tab.
-
-Which meshes are checked:
-
-- In **Edit Mode**: every mesh in Edit Mode.
-- In **Weight Paint** and other paint modes: the mesh you're painting.
-- In **Object Mode** and **Pose Mode**: the selected meshes. To see clipping while posing, select the clothing, then the armature, and enter Pose Mode.
-
-With only part of a body, like a torso, nothing is marked past its open edges.
-
-| Option | What it does |
-| --- | --- |
-| Clipping (checkbox) | Shows the marks. Saved with the file. |
-| Color | Color and opacity of the marks. |
-| Margin | Also marks, more faintly, where the mesh is outside but closer than this. |
-| In Front | Shows marks through everything, like clipping hidden under outer layers. |
-
-The panel lists each checked mesh with how many vertices clip. Big changes can take a moment to measure; the panel shows "measuring…" meanwhile.
-
 ## Line Up
 
-A model from another game, VRChat or The Sims stands in its own pose and size. **Line Up** scales, turns and poses it so its hips, shoulders and every limb joint land on the body's. With **Fit Shape**, it then reshapes the model bone by bone, so it sits around the body without losing its details. Refitting it with [Resize](#resize), [Body Fit](#body-fit) and [Weight Transfer](#weight-transfer) starts from the right place. When the model comes with the body it was made on, line that up too, and [Resize from it](#clothing-from-another-game) to fit the clothing around the body.
+A model from another game, VRChat or The Sims stands in its own pose and size. **Line Up** scales, turns and poses it so its hips, shoulders and every limb joint land on the body's. With **Fit Shape**, it then reshapes the model bone by bone, so it sits around the body without losing its details. Refitting it with [Resize](#auto-resize), [Body Fit](#body-fit) and [Weight Transfer](#weight-transfer) starts from the right place. When the model comes with the body it was made on, line that up too, and [Resize from it](#clothing-from-another-game) to fit the clothing around the body.
 
 1. On the **Line Up** tab, keep **Outfit** picked, and pick the **Body**, such as the devkit Mannequin.
 2. Select the model in Object Mode. One of its meshes or its armature is enough: everything on that armature comes along.
@@ -708,7 +711,7 @@ How Fit Shape reshapes it:
 - **Around the body.** Wherever the body pokes out of the model, by up to about 3 cm, the model moves out over it. Where the model sits outside the body, it's only drawn in when it's within about a centimetre, so skirts, puffy sleeves and other loose parts keep their shape and distance.
 - **The innermost layer.** A jacket isn't drawn in onto the shirt under it: only what lies nearest the body counts.
 - **As far as the body reaches.** A bone thickens only as far out as the body reaches around it. A skirt hanging from the hips moves out with them instead of growing with them.
-- **Small loose parts** (gems, studs, buttons, rings under 4 cm) keep their shape and move as one piece, as with Resize.
+- **Small loose parts** (gems, studs, buttons, rings under 4 cm) keep their shape and move as one piece, as with Auto Resize.
 - **Not the face or feet.** The head and feet follow the neck and legs but aren't fitted themselves: the model's face isn't the body's neck, and heeled feet aren't flat ones.
 - The report says how far the model's surface typically sat from the body's before and after.
 
@@ -782,7 +785,7 @@ Editing a mesh stretches some triangles and squashes others, and the texture str
 ![Texture Relax evening out a stretched grid texture](images/texture-relax.gif)
 
 1. Select the mesh (one or more) and enter **Edit Mode**.
-2. Pick **Texture Relax** in the toolbar, or click **Relax Texture** on the **Texture Relax** tab.
+2. Pick **Texture Relax** in the toolbar, or click **Relax Texture** on the **Mesh Repair** tab's **Texture Relax** sub-tab.
 3. Paint over the stretched spots. Going over a spot again settles it further.
 
 The brush uses the active UV map. Meshes without one are skipped.
@@ -801,6 +804,194 @@ The brush uses the active UV map. Meshes without one are skipped.
 | Spacing | Distance between dabs, as a percentage of the radius. |
 | Seam Distance | Vertices closer than this always move together. |
 | Selected Only | Only moves selected vertices. Hidden vertices never move. |
+
+## Close Rips
+
+**Close Rips** pulls a mesh back together where it was torn open: typically by Blender's Move with proportional editing and Connected Only, which stops at split seams and at the cracks between parts that only touch, so one side moves and the other stays behind. Both sides meet halfway, and the mesh around them follows smoothly, so nothing else needs fixing.
+
+1. In Edit Mode, open the **Mesh Repair** tab's **Close Rips** sub-tab and click **Find Rips**. It selects every rip in the visible mesh and says how many it found.
+2. Check the selection. Deselect what should stay open, or select a rip yourself: both of its sides and a little around them.
+3. Click **Close Rips**. It closes the rips in the selection.
+
+What counts as a rip: two open edges that face each other across a gap up to **Max Gap**, run opposite ways (as the two sides of one seam do, whatever angle the surface turns there), are much further apart along the mesh than across the gap, and stay that way over several vertices. That leaves out:
+
+- **Layers** lying on each other, like a trim on a panel: they run the same way.
+- **Ribbons, straps and narrow notches:** their two sides face each other, but they're only their width apart over their faces.
+- **Parts that only touch**, like the hems of two trouser legs: they bend away from each other, while a rip narrows to its ends or keeps its width.
+
+How the two sides are put back together:
+
+- **Split seams** that are still closed count as joined and stay closed. Where a split seam was torn open, its vertices are paired one to one again: both sides have as many.
+- **Cracks between parts made with different edges** (the coarse edge of one panel along a finer one): the coarser side's vertices are put on the finer side, which keeps its curve. With straight coarse edges in between, a hairline crack can stay where the finer side curves between them, like in the original model. Turn on **Weld** to close that too.
+- **Which side was moved can't be told** from the mesh, so both sides move halfway. To keep one side where it is, hide it (**H**): hidden vertices never move, and the other side goes the whole way.
+- **Gaps the model came with close too**, when they look like a rip: Close Rips doesn't know the shape before it tore. Find Rips shows them, so you can deselect the ones that belong.
+
+| Option | What it does |
+| --- | --- |
+| Max Gap | How far apart the two sides of a rip may be (1 cm). Raise it for a wider rip; lower it when parts that should stay apart get picked. |
+| Spread | How far along the mesh around a rip the vertices move along with its sides, less and less (3 cm). |
+| Weld | Also joins the two sides into one piece, so they can't tear apart again. Matched vertices are merged, and the coarser side's edges are split where the other side's vertices meet them. Merges that would fold faces onto each other (where the sides overlap) are left out. |
+
+- Without Weld, only positions change: vertex count, UVs, normals and weights stay as they are. Weld adds vertices where it splits edges (they take the weights and UVs of their edge) and merges vertices, which can change custom normals along the seam.
+- Close Rips works on every mesh in Edit Mode, and closes rips between them too (Weld only joins within one mesh). Like Fit Move, it works on the active shape key, and on meshes displayed posed or with other shape keys as they're shown.
+
+## Rebuild Mesh
+
+### Use
+
+1. In Object Mode, open the **Mesh Repair** tab's **Mesh Rebuild** sub-tab and select the mesh parts to rebuild. Select all parts that touch each other, so their shared edges stay aligned.
+2. Optional: **Analyze** reports what's wrong with the mesh (non-manifold edges, seams, winding changes, hidden under-layers…).
+3. Under **Afterwards**, **Smooth Normals** is on. Switch it off for hair or anything with hand-edited normals. Switch on **Rebuild UVs** if you want a new UV layout too.
+4. Click **Rebuild**. The job runs in the background with progress in the status bar. **Esc** cancels, and nothing changes until the meshes are written.
+
+Each object keeps its name, modifiers, custom properties, vertex groups and material slots; only its mesh data is replaced. With **Keep Original** (on by default) the old mesh stays in the .blend as *<mesh> (original)*, **Restore Original** swaps it back and **Discard Original** deletes it. Rebuilding a rebuilt object again keeps the first original. Meshes rebuilt with the standalone Resurface add-on can be restored here too.
+
+### Settings
+
+| Setting | What it does |
+|---|---|
+| **Resolution** | *Relative*: **Density** 1.0 aims at the input's triangle count, lower is coarser (default 0.6). *Edge Length*: a fixed base edge length. |
+| **Adaptive Detail**, **Tolerance** | Use smaller triangles where the new surface would deviate from the original by more than *Tolerance* (percent of the base edge length), such as wrinkle crests and tight folds. |
+| **Smallest Edge** | Adaptive refinement never goes below this share of the base edge length, nor finer than the input's own triangles there. |
+| **Iterations** | Remeshing passes. 10 is plenty for most meshes. |
+| **Remove Hidden Layers** | Delete under-layers that can never be seen (see [Hidden layers](#hidden-layers)). Off by default. |
+| **Afterwards: Smooth Normals** | Recompute the normals with the Normals sub-tab. Off: the input normals are carried over. |
+| **Afterwards: Rebuild UVs** | Make a new UV layout with the UV sub-tab. Off: the input layout is carried over unchanged. |
+| *Preserve:* **UV Seams**, **Color Seams** | Keep seams as edges, so UVs and colors transfer exactly. |
+| *Preserve:* **Sharp Edges**, **Sharp Angle** | Keep creases as edges. For hard-surface models; leave off for cloth. |
+| *Preserve:* **Seam Threshold** | UV or color differences below this aren't seams (0.002 is about 1 pixel on a 512 texture). Decimators leave many sub-pixel UV splits that would otherwise pin vertices. |
+| *Preserve:* **Ignore Tiny Features** | Dissolve seam and crease fragments smaller than the new triangles, and flip small patches wound the wrong way. Real UV island borders stay. |
+| *Preserve:* **Corner Angle** | Border and seam points that turn sharper than this stay fixed. |
+| *Cleanup:* **Layer Gap** | Largest distance between a shell and the hidden layer under it. 0 = 1% of the selection's size. |
+| *Cleanup:* **Merge Distance** | Vertices closer than this count as one. Also used by Smooth Normals, Rebuild UVs and the Index Map Generator. |
+| *Cleanup:* **Fragments** | Delete loose pieces with at most this many triangles and practically no area. |
+| *Output:* **Max Weights** | Limit bone influences per vertex (0 = like the input). |
+| *Output:* **Keep Original** | Keep the old mesh so it can be restored. |
+
+Borders and non-manifold junctions are always kept.
+
+On the test dress, the defaults give about the input's triangle count (60k in, 61k out) in about 12 seconds, with a median triangle quality of 0.97 (1.0 is equilateral). 99% of the original surface lies within about 0.4 mm of the result.
+
+### How it works
+
+1. **Heal:** merge split vertices, remove degenerate faces and zero-area debris. The author's face orientation is kept; only tiny flipped slivers are fixed.
+2. **Find features:** borders, non-manifold junctions (where the outer cloth, the lining and a seam flange meet), UV and color seams, borders between the selected objects, winding changes and, optionally, sharp creases become *feature curves*. They split the surface into *patches*.
+3. **Remesh:** adaptive isotropic remeshing (split, collapse, flip, relax, project). Feature curves are resampled but never lost. Vertices are tracked on the surface of their own patch, so they can't jump to a nearby layer. An edge that would join two different curves across a strip is never collapsed, so thin strips survive.
+4. **Adapt:** where the new surface deviates from the original by more than the tolerance, triangles get smaller.
+5. **Transfer:** every new corner is located on the original surface, on the right side of every seam, and UVs, colors, normals, weights, shape keys and other attributes are interpolated from there.
+
+### Hidden layers
+
+Some models carry a second copy of a surface a few millimetres under the visible one, facing the same way, usually from simulated cloth thickness or duplicated panels. On the test dress, 46% of the surface is such an under-layer (the front panel, both back halves and the straps). It can never be seen: from outside the shell covers it, and from inside it's a back face. It still costs triangles, and in Edit Mode its edges show through the shell.
+
+**Analyze** reports these layers, and **Rebuild** prints a tip when it finds them. With **Remove Hidden Layers** on, they're deleted before rebuilding. The decision is made per patch, so a string or strap crossing a panel never punches a hole. Where the under-layer stuck out past the shell's edge (by about a millimetre on the dress's scalloped rims), that sliver goes too.
+
+Keep it off when the outer layer uses see-through textures (lace, mesh fabric), because the layer below shows through the holes. After removal, the old junction line is marked sharp to keep the original's split normals there.
+
+![Rebuilt with the under-layer kept (its edges show through the shell) and with Remove Hidden Layers](images/hidden-layers.jpg)
+
+### Notes
+
+- **Backface copies** (parts made by Instant Edit's *Generate Duplicate with Backfaces*, or any exact duplicate faces) are rebuilt on the new surface in their own object, with their own UVs and flipped winding.
+- **Fixed corners:** very noisy feature networks, such as a junction line that a decimator broke into dashes, leave a few fixed points. The triangles right next to them are the only ones that can stay thin.
+
+## Smooth Normals
+
+On the **Mesh Repair** tab's **Normals** sub-tab. It works on any selected meshes, rebuilt or not, and processes them together. Rebuild Mesh uses it when *Afterwards: Smooth Normals* is on.
+
+*Recalculate Outside* + *Set from Faces* often fails on game cloth. Strings, straps and seam strips meet the panels at non-manifold junctions, and some regions are wound the other way, so the average mixes faces of different sheets or cancels them out. Smooth Normals instead:
+
+- welds vertices by position, so UV seams and part borders don't show in the shading;
+- groups the faces around each vertex. Faces join across an edge when their angle is below **Smooth Angle**, measured after aligning faces that are wound the other way;
+- averages each group, weighted by corner angles;
+- optionally blurs the result (**Blur** passes) to soften lumpy, decimated surfaces. Hard edges are never blurred across.
+
+It never changes face winding, so what is visible from outside and from inside stays exactly the same. **Fix Flipped Faces** (off by default) also flips tiny stray groups of faces wound against their surroundings. Larger inward-facing regions, like seam allowances or the insides of straps, are usually meant to be seen from inside and are left alone.
+
+## Normal Map Seams
+
+On the **Normals** sub-tab, under Smooth Normals. It finds normal maps whose green channel points the wrong way. That shows as hard lines along UV seams in Material Preview and in game, most visibly on glossy materials. Recalculating or smoothing the normals doesn't help, because the mesh normals are fine.
+
+Normal maps come in two styles. Blender and FFXIV expect green to point up (OpenGL style), while most other engines, Unreal among them, have it pointing down (DirectX style). Textures ported from those games keep their style, so the bumps are lit the wrong way along the texture's height. Inside one UV island that only looks slightly off. Where two islands meet whose UVs are turned differently, though, the two sides disagree, and reflections break along the seam.
+
+- **Check** reads the normal maps in the selected meshes' materials, meaning Image Texture nodes that feed a *Normal Map* node in Tangent Space, as in XIV Instant Edit's material previews. Along every UV seam it compares the two sides, once with the map as it is and once with green flipped. For each map it reports:
+  - *green points up, fine*;
+  - *green points down (DirectX style)*, and how much better the seams fit with green flipped;
+  - *no UV seams to compare*, *too few UV seams to tell* or *can't tell*: the map's islands don't touch each other, or the map is flat.
+- **Fix** runs the check and replaces every map whose green points down with a flipped copy named `<name>_green_up`. The copy is saved as PNG next to the original file when there is one, otherwise it is packed into the .blend. The original image stays in the file, and **Ctrl+Z** undoes the fix. **Also Unclear Ones** (press **F9** after Fix) flips the maps the check can't judge as well, for example the remaining textures of a port whose other maps point down.
+- **From File** checks an image file instead of the materials' normal maps. The normal map Instant Edit loads into Blender can differ from the one the game actually uses, so to judge what the game shows, pick the mod's own normal texture here: the `.tex` file from the mod's folder, or a PNG or DDS exported from Penumbra. All of the game's texture formats are read, compressed ones (BC1 to BC7) included. The file is read on the faces of the active object's active material, with the UV map of that material's Normal Map node (or the mesh's render UV map); the panel shows which material. Fix then saves a flipped copy next to the file and leaves the materials in Blender as they are. For a `.tex` that's `<name>_green_up.tex`, with as many mip levels as the original, ready to use in the mod in place of it. It is uncompressed, because Blender can't compress textures, so it is about four times the size of a BC7 file; Penumbra's Advanced Editing window can compress it. For other files it's `<name>_green_up.png`. Clear the field to check the materials again.
+
+The fix only changes the texture in Blender. For the game, flip green in the mod's normal texture too:
+
+- **In Penumbra**, open the texture in the Advanced Editing window's Textures tab. Set the color matrix so that green becomes 1 − green (−1 for green to green, and 1 as green's constant), then save the texture as BC7.
+- **Or** pick the mod's `.tex` under **From File** and run Fix, which saves `<name>_green_up.tex` next to it.
+
+After a fix, leave Transfer Texture's **Green Points Down** off for these maps.
+
+## Rebuild UVs
+
+On the **Mesh Repair** tab's **UV** sub-tab. It replaces the UVs of the selected meshes with a clean layout without overlaps. The previous UVs are kept in a layer named **Old UVs**, which Transfer Texture reads and the MDL exporter ignores. Delete it once you no longer need it.
+
+Smart UV Project cuts by face angle, so on ruched cloth every wrinkle becomes a seam. Plain Unwrap needs seams, and a rebuilt mesh is welded into one surface. Rebuild UVs places the seams from the model's structure:
+
+1. **Seams** along the old UV island borders (**Use Old Islands**; usually the original pattern pieces, whose outline is fine even when their layout isn't), along junctions of three or more sheets, borders between parts or materials and winding changes. **Cut Sharp Edges** adds creases sharper than its **Sharp Angle**.
+2. **Disk shapes:** rings and tubes get the shortest cut joining their borders, closed pieces get a slit, and anything else that can't be flattened is split until it can.
+3. **Unwrap** with Blender's *Minimum Stretch* unwrapper, then cut narrow bridges the first unwrap reveals, and split thin strips far longer than the panels so they pack well.
+4. **Pack** with equal texel density and **Margin** between islands. With **Keep Orientation**, each island is turned the way it was in the old UVs and packed without rotating, which keeps textures and normal maps easy to transfer.
+
+On the test dress, 55 overlapping islands using 20% of the texture (12.9% of it claimed twice) become 97 islands using 50%, with no overlap.
+
+## Transfer Texture
+
+On the UV sub-tab, under Rebuild UVs. It moves a texture painted for the old UVs (the **Old UVs** layer) onto the current layout, and saves `<name>_newuv.png` next to the original file.
+
+- **Diffuse or Mask:** smooth (bilinear) resampling.
+- **Index / ID:** nearest resampling, so `_id` colorset indices are never blended.
+- **Normal Map:** R and G (the tangent direction) are turned with each island; B and A, which FFXIV uses for other data, are copied unchanged. **Green Points Down** is for DirectX-style maps and only matters for turned islands.
+- **Padding:** pixels added around each island so filtering doesn't pull in the background.
+
+Export the textures from Penumbra or TexTools as PNG, transfer them, and import the results back as `.tex`.
+
+## Resize Canvas
+
+On the UV sub-tab. When a texture's canvas was cropped or extended in an image editor, its pixels didn't change, they only moved. This tool moves the active UV map the same way, so every face keeps showing the same pixels.
+
+1. **Old Size** and **New Size**: the texture before and after, in pixels.
+2. **Anchor**: where the new canvas sits on the old one. Use the same anchor as in the image editor's canvas size dialog.
+3. **Offset** (optional): an extra shift in pixels, right and down. With the top-left anchor, it's the top-left corner of a crop rectangle. **From Selection** sets it to the top-left corner of the selected UVs.
+4. **Resize UV Canvas.** In Edit Mode, **Only Selected Faces** limits it to the selection; otherwise whole meshes change.
+
+The line above the button shows the resulting scale and crop position. It's exact for any anchor or offset and works on several objects at once, in Object and Edit Mode.
+
+## Index Map Generator
+
+On the UV sub-tab. It paints an FFXIV index (`_id`) texture for Dawntrail colorsets from the active UV map of the selected meshes (or the ones in Edit Mode). Red selects the row pair (`00`, `11`, … `FF` for pairs 1–16), green selects row A (`FF`) or B (`00`). Texture that no face covers is black, which reads as row 1B.
+
+**Rows:**
+
+- **Automatic:** the rows are found for you and handed out by area, largest first (1A, 2A, 2B, 3A, … 16B). **Detect** chooses what they're based on (below). **Max Rows** caps the count; when more are found, the most alike share a row (the closest colours, or the islands most similar in shape and size).
+- **Manual:** in Edit Mode, select faces, pick a row and **Assign** (or **Remove**). The list shows the rows in use with their colours and face counts; its buttons select or clear a row. **Fill Unassigned** gives every face without a row the row Automatic would give it, as a starting point. Faces without a row are painted as 1B.
+
+**Output:** **Size**, **Padding** (pixels added around each island so filtering and mip maps don't pull in the background) and **Save To** (a PNG file or folder; empty keeps the image packed in the .blend). Running it again updates the same image, so a material that shows it updates too.
+
+### Detect: UV Islands
+
+Needs nothing but the mesh: every UV island gets its own row. Islands are found on the welded surface, so a game mesh split along hard edges isn't cut into extra islands. Islands stacked on the same texture area (mirrored halves, duplicated layers) always share a row, because the texture can't tell them apart. **Match Similar Shapes** also gives islands of the same shape and size one row (within **Shape Tolerance**), such as left and right pieces laid out side by side.
+
+### Detect: Texture
+
+Reads the base colour texture (`_base` or `_d`, as PNG) painted for the active UV map and gives every region of one colour its own row, also inside an island. A panel with painted trim, straps or a logo is split along the painted edges, and the same colour on different islands shares a row. Only texels the UV layout uses count.
+
+- **Color Tolerance** (CIE ΔE; about 2 is barely visible, 10 clearly different): colours closer than this share a row. Lower it to split close shades, raise it to join them.
+- **Detail Size** (percent of the texture): print, stitching, grime and lines smaller or thinner than this join the area around them.
+- **Whole Islands:** every island takes the row of its main colour instead of being split. Islands of the same colour still share a row.
+- Baked shading is recognised: where one colour fades into another gradually, both sides stay one row. See-through texels (alpha below 50%, such as holes in lace) take the row around them.
+
+The result box lists every row with the average colour of its area and its share of the texture (`1A #9F7269 32%`), so you can tell which row is which when you set up the colorset. The texture is analysed at up to 1024 px; a larger index map is scaled from that, with exact island borders. It takes a few seconds per 2048 px texture.
+
+### Where rows are stored
+
+Manual rows are stored per face in an integer attribute named `colorset_row`. It survives Rebuild Mesh, joining and separating, and the MDL exporter ignores it. The older *XIV Index Map Generator* script stored rows in `UV_Group…` vertex groups, which Instant Edit exports as bones. When such groups are present, the panel offers **Convert Old Row Groups**, which turns them into face rows and deletes the groups.
 
 ## Customize+
 

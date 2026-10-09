@@ -19,6 +19,8 @@ from .operators import (
     MAGIC_FIT_OT_face_pose,
     MAGIC_FIT_OT_face_repair,
     MAGIC_FIT_OT_face_weights,
+    MAGIC_FIT_OT_close_rips,
+    MAGIC_FIT_OT_find_rips,
     MAGIC_FIT_OT_fit_move,
     MAGIC_FIT_OT_hair_weights,
     MAGIC_FIT_OT_heel_weights,
@@ -692,8 +694,15 @@ class VIEW3D_PT_magic_fit_tabs(bpy.types.Panel):
             general = settings.weights_tab == 'GENERAL'
             shown = general or settings.weights_tab == 'SKIRT'
             needed = general or (settings.weights_tab == 'SKIRT' and settings.skirt_skin_weight > 0.0)
+        elif tab in tabs.SUBTABS:
+            prop, items = tabs.SUBTABS[tab]
+            _draw_line(col)
+            _draw_tabs(context, col, workspace, prop, items)
+            # Of the Body Fit tools, Fit Move needs no body. Mesh Repair's tools never do.
+            shown = needed = tab == 'FIT' and getattr(workspace, prop) != 'MOVE'
         else:
-            shown = needed = tab in {'FIT', 'LINE_UP'}
+            # Auto Resize has bodies of its own.
+            shown = needed = tab == 'LINE_UP'
         if tab == 'LINE_UP':
             # Outfits line up with the shared body, hair on a head of its own.
             lineup_settings = context.scene.body_fit_brush
@@ -727,6 +736,8 @@ class _WholeMeshPanel(tabs.TabPanel):
         col = layout.column()
         _draw_choice(col, settings, "group_mode")
         self.draw_mode(col, settings)
+        self.draw_options(layout, settings)
+        col = layout.column()
         problem = check_whole_mesh_ready(context, self.kind)
         if problem is not None:
             col.box().label(text=problem, icon='ERROR')
@@ -740,6 +751,18 @@ class _WholeMeshPanel(tabs.TabPanel):
     @staticmethod
     def draw_mode(layout, settings):
         """The mode's settings, which the brush uses too."""
+
+    @staticmethod
+    def draw_options(layout, settings):
+        """The mode's other settings, in a section of their own."""
+
+
+def _draw_options(layout, idname, draw):
+    """An Options section, closed at first, for the settings that rarely need changing."""
+    header, body = layout.panel(idname, default_closed=True)
+    header.label(text="Options")
+    if body is not None:
+        draw(body.column())
 
 
 class _WeightBrushPanel(tabs.TabPanel):
@@ -766,7 +789,7 @@ class VIEW3D_PT_connect_parts_sidebar(tabs.TabPanel, bpy.types.Panel):
     """Make loose parts that lie on each other (belts, loops, flaps, buckles) move together"""
     bl_label = "Connect Parts"
     bl_order = 2
-    weights_tabs = {'GENERAL'}
+    subtabs = {'GENERAL'}
 
     def draw(self, context):
         layout = _panel_layout(self.layout)
@@ -789,7 +812,7 @@ class VIEW3D_PT_magic_fit_sidebar(_WeightBrushPanel, bpy.types.Panel):
     """Paint to copy the body's weights, straighten creases in the pose, or smooth weights"""
     bl_label = "Weight Brushes"
     bl_order = 3
-    weights_tabs = {'GENERAL'}
+    subtabs = {'GENERAL'}
 
     @staticmethod
     def draw_mode(layout, settings):
@@ -808,20 +831,23 @@ class VIEW3D_PT_skirt_weights_sidebar(_WholeMeshPanel, bpy.types.Panel):
     """Give whole skirts and long dresses the weights of the skirt bones"""
     bl_label = "Skirt Weights"
     bl_order = 1
-    weights_tabs = {'SKIRT'}
+    subtabs = {'SKIRT'}
     kind = 'SKIRT'
 
     @staticmethod
     def draw_mode(layout, settings):
         _draw_skirt_main(layout, settings)
-        _draw_skirt_more(layout, settings)
+
+    @staticmethod
+    def draw_options(layout, settings):
+        _draw_options(layout, "magic_fit_skirt_options", lambda body: _draw_skirt_more(body, settings))
 
 
 class VIEW3D_PT_skirt_brush_sidebar(_WeightBrushPanel, bpy.types.Panel):
     """Paint skirt weights with the brush, with the Skirt Weights settings"""
     bl_label = "Skirt Brush"
     bl_order = 2
-    weights_tabs = {'SKIRT'}
+    subtabs = {'SKIRT'}
     button = "Paint Skirt Weights"
 
 
@@ -829,7 +855,7 @@ class VIEW3D_PT_heel_weights_sidebar(_WholeMeshPanel, bpy.types.Panel):
     """Make whole heels and boots rigid below the ankle"""
     bl_label = "Heel Weights"
     bl_order = 1
-    weights_tabs = {'HEELS'}
+    subtabs = {'HEELS'}
     kind = 'HEELS'
 
     @staticmethod
@@ -839,27 +865,17 @@ class VIEW3D_PT_heel_weights_sidebar(_WholeMeshPanel, bpy.types.Panel):
 
 class VIEW3D_PT_heels_brush_sidebar(_WeightBrushPanel, bpy.types.Panel):
     """Paint heel weights with the brush, with the Heel Weights settings"""
-    bl_label = "Heels Brush"
+    bl_label = "Heel Brush"
     bl_order = 2
-    weights_tabs = {'HEELS'}
+    subtabs = {'HEELS'}
     button = "Paint Heel Weights"
-
-
-class _ComingPanel(tabs.TabPanel):
-    """A sub-tab of the Weights tab whose weights aren't there yet."""
-    what = ''
-
-    def draw(self, context):
-        box = self.layout.box().column(align=True)
-        box.label(text="Weights for {:s}".format(self.what), icon='INFO')
-        box.label(text="come in a later version", icon='BLANK1')
 
 
 class VIEW3D_PT_hair_weights_sidebar(tabs.TabPanel, bpy.types.Panel):
     """Give whole hair meshes FFXIV hair bone weights, using the hair skeleton that fits best"""
     bl_label = "Hair Weights"
     bl_order = 1
-    weights_tabs = {'HAIR'}
+    subtabs = {'HAIR'}
 
     def draw(self, context):
         layout = _panel_layout(self.layout)
@@ -873,10 +889,11 @@ class VIEW3D_PT_hair_weights_sidebar(tabs.TabPanel, bpy.types.Panel):
             row.operator(MAGIC_FIT_OT_pick_hair_skeleton.bl_idname, text="", icon='VIEWZOOM')
             self.draw_pick_hint(col, settings)
         _draw_hair_main(col, settings)
-        _draw_hair_more(col, settings)
         if settings.group_mode == 'ACTIVE':
             # Hair Weights needs All Groups, and no other panel on this tab has the choice.
             _draw_choice(col, settings, "group_mode")
+        _draw_options(layout, "magic_fit_hair_options", lambda body: _draw_hair_more(body, settings))
+        col = layout.column()
         problem = check_hair_weights_ready(context)
         if problem is not None:
             col.box().label(text=problem, icon='ERROR')
@@ -941,7 +958,7 @@ class VIEW3D_PT_hair_brush_sidebar(_WeightBrushPanel, bpy.types.Panel):
     """Paint hair weights with the brush, using the Hair Weights settings and the hair's skeleton"""
     bl_label = "Hair Brush"
     bl_order = 2
-    weights_tabs = {'HAIR'}
+    subtabs = {'HAIR'}
     button = "Paint Hair Weights"
 
 
@@ -949,7 +966,7 @@ class VIEW3D_PT_face_weights_sidebar(tabs.TabPanel, bpy.types.Panel):
     """Weight custom faces and their parts like the game face they replace"""
     bl_label = "Face Weights"
     bl_order = 1
-    weights_tabs = {'FACE'}
+    subtabs = {'FACE'}
 
     def draw(self, context):
         layout = _panel_layout(self.layout)
@@ -976,7 +993,7 @@ class VIEW3D_PT_face_repair_sidebar(tabs.TabPanel, bpy.types.Panel):
     """Repair one thing at a time on a custom face: lids, lashes, mouth, parts or neck"""
     bl_label = "Face Repairs"
     bl_order = 2
-    weights_tabs = {'FACE'}
+    subtabs = {'FACE'}
 
     def draw(self, context):
         layout = _panel_layout(self.layout)
@@ -993,7 +1010,7 @@ class VIEW3D_PT_face_pose_sidebar(tabs.TabPanel, bpy.types.Panel):
     """Pose the face like the game's animations, to check how it moves"""
     bl_label = "Test Poses"
     bl_order = 3
-    weights_tabs = {'FACE'}
+    subtabs = {'FACE'}
 
     def draw(self, context):
         layout = _panel_layout(self.layout)
@@ -1011,7 +1028,7 @@ class VIEW3D_PT_face_brush_sidebar(_WeightBrushPanel, bpy.types.Panel):
     """Paint face weights with the brush, with the Face Weights settings"""
     bl_label = "Face Brush"
     bl_order = 4
-    weights_tabs = {'FACE'}
+    subtabs = {'FACE'}
     button = "Paint Face Weights"
 
 
@@ -1023,6 +1040,7 @@ class VIEW3D_PT_body_fit_sidebar(tabs.TabPanel, bpy.types.Panel):
     bl_label = "Body Fit"
     bl_order = 1
     tab = 'FIT'
+    subtabs = {'FIT'}
 
     def draw(self, context):
         layout = _panel_layout(self.layout)
@@ -1041,6 +1059,7 @@ class VIEW3D_PT_fit_move_sidebar(tabs.TabPanel, bpy.types.Panel):
     bl_label = "Fit Move"
     bl_order = 1
     tab = 'FIT'
+    subtabs = {'MOVE'}
 
     def draw(self, context):
         layout = _panel_layout(self.layout)
@@ -1051,6 +1070,51 @@ class VIEW3D_PT_fit_move_sidebar(tabs.TabPanel, bpy.types.Panel):
         col.label(text="Moves the selection without reaching across gaps")
         _draw_use_button(col, 'MOVE', "Fit Move", "fit_move")
 
+
+class VIEW3D_PT_clipping_sidebar(tabs.TabPanel, bpy.types.Panel):
+    """Shows where the edited meshes clip into the body"""
+    bl_label = "Clipping"
+    bl_order = 1
+    tab = 'FIT'
+    subtabs = {'CLIPPING'}
+
+    def draw_header(self, context):
+        self.layout.prop(context.scene.magic_fit_clipping, "show", text="")
+
+    def draw(self, context):
+        settings = context.scene.magic_fit_clipping
+        layout = _panel_layout(self.layout)
+        col = layout.column()
+        col.active = settings.show
+        col.prop(settings, "color")
+        col.prop(settings, "margin")
+        col.prop(settings, "show_in_front")
+        if not settings.show:
+            return
+        if context.scene.magic_fit.target is None:
+            layout.label(text="Pick the body above", icon='INFO')
+            return
+        report = clipping.status(context)
+        if report is None:
+            return
+        if not report:
+            layout.label(text="Edit or select a mesh to check it", icon='INFO')
+            return
+        col = layout.column(align=True)
+        for name, inside, close, measuring in report:
+            if measuring:
+                text, icon = "{:s}: measuring...".format(name), 'TIME'
+            elif inside:
+                text, icon = "{:s}: {:d} vertices clip".format(name, inside), 'ERROR'
+            else:
+                text, icon = "{:s}: clear".format(name), 'CHECKMARK'
+            if close and not measuring:
+                text += ", {:d} within the margin".format(close)
+            col.label(text=text, icon=icon)
+
+
+# -----------------------------------------------------------------------------
+# Auto Resize tab
 
 def _draw_key_search(layout, settings, prop, obj, text):
     """A shape key of ``obj`` to pick, by name."""
@@ -1168,9 +1232,9 @@ _HAS_PLACEHOLDER = 'placeholder' in bpy.types.UILayout.bl_rna.functions['prop'].
 
 class VIEW3D_PT_resize_sidebar(tabs.TabPanel, bpy.types.Panel):
     """Reshape meshes made for one body to fit another, such as another body mod, or other sizes of it"""
-    bl_label = "Resize"
-    bl_order = 2
-    tab = 'FIT'
+    bl_label = "Auto Resize"
+    bl_order = 1
+    tab = 'RESIZE'
 
     def draw(self, context):
         layout = _panel_layout(self.layout)
@@ -1224,49 +1288,9 @@ class VIEW3D_PT_resize_sidebar(tabs.TabPanel, bpy.types.Panel):
                      text="Resize to {:d} Sizes".format(count) if count > 1 else "Resize")
 
 
-class VIEW3D_PT_clipping_sidebar(tabs.TabPanel, bpy.types.Panel):
-    """Shows where the edited meshes clip into the body"""
-    bl_label = "Clipping"
-    bl_order = 3
-    tab = 'FIT'
-
-    def draw_header(self, context):
-        self.layout.prop(context.scene.magic_fit_clipping, "show", text="")
-
-    def draw(self, context):
-        settings = context.scene.magic_fit_clipping
-        layout = _panel_layout(self.layout)
-        col = layout.column()
-        col.active = settings.show
-        col.prop(settings, "color")
-        col.prop(settings, "margin")
-        col.prop(settings, "show_in_front")
-        if not settings.show:
-            return
-        if context.scene.magic_fit.target is None:
-            layout.label(text="Pick the body above", icon='INFO')
-            return
-        report = clipping.status(context)
-        if report is None:
-            return
-        if not report:
-            layout.label(text="Edit or select a mesh to check it", icon='INFO')
-            return
-        col = layout.column(align=True)
-        for name, inside, close, measuring in report:
-            if measuring:
-                text, icon = "{:s}: measuring...".format(name), 'TIME'
-            elif inside:
-                text, icon = "{:s}: {:d} vertices clip".format(name, inside), 'ERROR'
-            else:
-                text, icon = "{:s}: clear".format(name), 'CHECKMARK'
-            if close and not measuring:
-                text += ", {:d} within the margin".format(close)
-            col.label(text=text, icon=icon)
-
-
 # -----------------------------------------------------------------------------
-# Line Up and Texture Relax tabs (Customize+ has its own module)
+# Line Up and Mesh Repair tabs (Customize+, and Mesh Repair's Mesh Rebuild, Normals and UV
+# sub-tabs, have modules of their own)
 
 class VIEW3D_PT_line_up_sidebar(tabs.TabPanel, bpy.types.Panel):
     """Scale, turn and pose an imported model so it lines up with the body, or hair so it sits on the head"""
@@ -1306,7 +1330,8 @@ class VIEW3D_PT_texture_relax_sidebar(tabs.TabPanel, bpy.types.Panel):
     """Fix stretched or squashed textures with the Texture Relax brush"""
     bl_label = "Texture Relax"
     bl_order = 1
-    tab = 'RELAX'
+    tab = 'REPAIR'
+    subtabs = {'RELAX'}
 
     def draw(self, context):
         layout = _panel_layout(self.layout)
@@ -1317,6 +1342,29 @@ class VIEW3D_PT_texture_relax_sidebar(tabs.TabPanel, bpy.types.Panel):
         col.label(text="Slides vertices until the texture is even")
         _draw_choice(col, context.scene.texture_relax_brush, "boundary")
         _draw_use_button(col, 'RELAX', "Relax Texture", "texture_relax")
+
+
+class VIEW3D_PT_close_rips_sidebar(tabs.TabPanel, bpy.types.Panel):
+    """Find where a mesh was pulled apart, and pull it back together"""
+    bl_label = "Close Rips"
+    bl_order = 1
+    tab = 'REPAIR'
+    subtabs = {'RIPS'}
+
+    def draw(self, context):
+        layout = _panel_layout(self.layout)
+        settings = context.scene.close_rips
+        col = layout.column()
+        col.prop(settings, "max_gap")
+        col.prop(settings, "spread")
+        col.prop(settings, "use_weld")
+        if context.mode != 'EDIT_MESH':
+            col.box().label(text="Edit a mesh to close its rips", icon='INFO')
+        col.separator()
+        row = col.row(align=True)
+        row.scale_y = 1.4
+        row.operator(MAGIC_FIT_OT_find_rips.bl_idname, icon='VIEWZOOM')
+        row.operator(MAGIC_FIT_OT_close_rips.bl_idname, icon='AUTOMERGE_ON')
 
 
 # -----------------------------------------------------------------------------
@@ -1508,7 +1556,7 @@ class FitMoveTool(bpy.types.WorkSpaceTool):
 
 
 # The tabs first. The other sidebar panels are sorted by their bl_order, then by registration; the
-# Weight Transfer and Customize+ panels are registered with their modules.
+# Weight Transfer, Customize+ and Mesh Rebuild, Normals and UV panels are registered with their modules.
 classes = (
     VIEW3D_PT_magic_fit_options,
     VIEW3D_PT_body_fit_options,
@@ -1529,10 +1577,11 @@ classes = (
     VIEW3D_PT_face_brush_sidebar,
     VIEW3D_PT_body_fit_sidebar,
     VIEW3D_PT_fit_move_sidebar,
-    VIEW3D_PT_resize_sidebar,
     VIEW3D_PT_clipping_sidebar,
+    VIEW3D_PT_resize_sidebar,
     VIEW3D_PT_line_up_sidebar,
     VIEW3D_PT_texture_relax_sidebar,
+    VIEW3D_PT_close_rips_sidebar,
 )
 
 

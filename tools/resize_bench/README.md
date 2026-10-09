@@ -17,7 +17,7 @@ blender -b --factory-startup --python tools/resize_bench/dump_body.py -- SCENE.b
 blender -b --factory-startup --python tools/resize_bench/dump_garments.py -- ITEMS.tsv bench_data --blend wip2.blend
 ```
 
-- `dump_body.py` takes the From Body of the scene's Resize panel. With `--clothing`, the meshes of that
+- `dump_body.py` takes the From Body of the scene's Auto Resize panel. With `--clothing`, the meshes of that
   collection, hidden ones too, become the garment `snapshot`, fitted to the size the body shows. The scene used
   so far is an Instant Edit export's snapshot: the YAB 4.2 Mannequin, at Medium Rue, with a backless sleeve top,
   its skin and its piercings.

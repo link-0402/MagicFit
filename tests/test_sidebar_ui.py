@@ -22,6 +22,7 @@ sys.path.insert(0, ROOT)
 import magic_fit  # noqa: E402
 from magic_fit import operators, tabs, tool  # noqa: E402
 from magic_fit.cplus import ui as cplus_ui  # noqa: E402
+from magic_fit.resurface import ui as repair_ui  # noqa: E402
 from magic_fit.robust_transfer import ui as transfer_ui  # noqa: E402
 
 SHOTS = os.environ.get("MF_SCREENSHOTS")
@@ -29,17 +30,24 @@ FAILURES = []
 DRAWN = set()  # labels of the sidebar panels drawn since it was cleared
 DRAW_ERRORS = []
 
-TABS_PANEL = "Magic Fit"  # the tabs, the Weights sub-tabs and the Body row
-# The panels on each tab (and sub-tab of the Weights tab), top to bottom, besides the tabs.
+TABS_PANEL = "Magic Fit"  # the tabs, the sub-tabs and the Body row
+# The panels on each tab (and sub-tab), top to bottom, besides the tabs.
 EXPECTED = (
     ('WEIGHTS', 'GENERAL', ["Weight Transfer", "Connect Parts", "Weight Brushes"]),
     ('WEIGHTS', 'SKIRT', ["Skirt Weights", "Skirt Brush"]),
-    ('WEIGHTS', 'HEELS', ["Heel Weights", "Heels Brush"]),
+    ('WEIGHTS', 'HEELS', ["Heel Weights", "Heel Brush"]),
     ('WEIGHTS', 'HAIR', ["Hair Weights", "Hair Brush"]),
     ('WEIGHTS', 'FACE', ["Face Weights", "Face Repairs", "Test Poses", "Face Brush"]),
-    ('FIT', None, ["Body Fit", "Fit Move", "Resize", "Clipping"]),
+    ('FIT', 'FIT', ["Body Fit"]),
+    ('FIT', 'MOVE', ["Fit Move"]),
+    ('FIT', 'CLIPPING', ["Clipping"]),
+    ('RESIZE', None, ["Auto Resize"]),
     ('LINE_UP', None, ["Line Up"]),
-    ('RELAX', None, ["Texture Relax"]),
+    ('REPAIR', 'RELAX', ["Texture Relax"]),
+    ('REPAIR', 'RIPS', ["Close Rips"]),
+    ('REPAIR', 'REBUILD', ["Rebuild Mesh"]),
+    ('REPAIR', 'NORMALS', ["Smooth Normals", "Normal Map Seams"]),
+    ('REPAIR', 'UV', ["Rebuild UVs", "Transfer Texture", "Resize Canvas", "Index Map Generator"]),
     ('CPLUS', None, ["Customize+"]),
 )
 
@@ -128,8 +136,8 @@ def steps():
     check(not scene.magic_fit_clipping.show, "clipping marks are off by default")
     with bpy.context.temp_override(window=window, area=area, region=sidebar):
         per_row = tool._tabs_per_row(bpy.context, [item[1] for item in tabs.TABS])
-    check(sidebar.width == 280 and per_row == 3,
-          "default sidebar: the tabs take two rows, three in the first ({:d} px, {:d})".format(sidebar.width, per_row))
+    check(sidebar.width == 280 and per_row == 2,
+          "default sidebar: the tabs take three rows of two ({:d} px, {:d})".format(sidebar.width, per_row))
     fit = scene.body_fit_brush
     check(fit.mode == 'FIT' and abs(fit.offset - 0.001) < 1e-9 and not fit.lineup_stretch and not fit.resize_use_keys,
           "defaults: Fit at 1 mm, no stretched limbs, no shapekeys")
@@ -137,13 +145,25 @@ def steps():
     # --- Every tab and sub-tab shows its own panels, and only those.
     for number, (tab, sub, expected) in enumerate(EXPECTED, 1):
         workspace.magic_fit_tab = tab
-        if sub is not None:
+        if tab == 'WEIGHTS':
             settings.weights_tab = sub
+        elif sub is not None:
+            setattr(workspace, tabs.SUBTABS[tab][0], sub)
         yield redraw()
         name = tab.lower() + ("_" + sub.lower() if sub else "")
         check(DRAWN == {TABS_PANEL, *expected}, "{:s}: panels {!r}".format(name, sorted(DRAWN)))
         screenshot("sidebar_{:02d}_{:s}.png".format(number, name))
     check(not DRAW_ERRORS, "the panels drew without errors")
+
+    # --- Normal Map Seams with a texture from a file names the material it's read on.
+    garment.data.materials.append(bpy.data.materials.new("Garment Material"))
+    scene.magic_fit_repair.normalmap_file = "//game_n.png"
+    workspace.magic_fit_tab = 'REPAIR'
+    setattr(workspace, tabs.SUBTABS['REPAIR'][0], 'NORMALS')
+    yield redraw()
+    check(not DRAW_ERRORS, "Normal Map Seams draws with a texture from a file")
+    screenshot("sidebar_18b_normal_map_file.png")
+    scene.magic_fit_repair.normalmap_file = ""
 
     # --- The icon at the right end of the Magic Fit header opens the links.
     x, y = sidebar.x + sidebar.width - 59, sidebar.y + sidebar.height - 14
@@ -162,7 +182,7 @@ def steps():
     ], "the links go to XIV Mod Archive, GitHub, Bluesky and Ko-fi")
     if SHOTS:
         with bpy.context.temp_override(window=window, area=area):
-            bpy.ops.screen.screenshot(filepath=os.path.join(SHOTS, "sidebar_10_links.png"))
+            bpy.ops.screen.screenshot(filepath=os.path.join(SHOTS, "sidebar_19_links.png"))
     window.event_simulate(type='ESC', value='PRESS', x=x, y=y)
     window.event_simulate(type='ESC', value='RELEASE', x=x, y=y)
     yield redraw()
@@ -176,8 +196,8 @@ def steps():
             bpy.ops.ed.undo_push(message="Radius {:d}".format(radius))
     yield redraw()
     # The tabs are at the top of the sidebar's first panel, below its header. In the default sidebar Body Fit is
-    # the middle one of the first row.
-    x, y = sidebar.x + 128, sidebar.y + sidebar.height - 48
+    # the right one of the first row.
+    x, y = sidebar.x + 178, sidebar.y + sidebar.height - 48
     window.event_simulate(type='MOUSEMOVE', value='NOTHING', x=x, y=y)
     yield 0.1
     window.event_simulate(type='LEFTMOUSE', value='PRESS', x=x, y=y)
@@ -221,19 +241,22 @@ def steps():
     yield redraw()
     check(bpy.context.mode == 'EDIT_MESH', "Fit to Body switched to Edit Mode")
     check(active_tool('EDIT_MESH') == "magic_fit.body_fit_tool", "Fit to Body picked the Body Fit brush")
-    check(workspace.magic_fit_tab == 'FIT' and "Body Fit" in DRAWN, "Fit to Body shows the Body Fit tab")
+    check(workspace.magic_fit_tab == 'FIT' and workspace.magic_fit_fit_tab == 'FIT' and "Body Fit" in DRAWN,
+          "Fit to Body shows the Body Fit tab's Fit sub-tab")
     screenshot("sidebar_20_body_fit_brush.png")
 
     use_tool('MOVE')
     yield redraw()
-    check(active_tool('EDIT_MESH') == "magic_fit.fit_move_tool" and workspace.magic_fit_tab == 'FIT',
-          "Fit Move picked the tool and shows the Body Fit tab")
+    check(active_tool('EDIT_MESH') == "magic_fit.fit_move_tool" and workspace.magic_fit_tab == 'FIT' and
+          workspace.magic_fit_fit_tab == 'MOVE' and "Fit Move" in DRAWN,
+          "Fit Move picked the tool and shows the Body Fit tab's Move sub-tab")
     screenshot("sidebar_22_fit_move.png")
 
     use_tool('RELAX')
     yield redraw()
-    check(active_tool('EDIT_MESH') == "magic_fit.texture_relax_tool" and workspace.magic_fit_tab == 'RELAX',
-          "Relax Texture picked the brush and shows its tab")
+    check(active_tool('EDIT_MESH') == "magic_fit.texture_relax_tool" and workspace.magic_fit_tab == 'REPAIR' and
+          workspace.magic_fit_repair_tab == 'RELAX' and "Texture Relax" in DRAWN,
+          "Relax Texture picked the brush and shows the Mesh Repair tab's Texture Relax sub-tab")
     screenshot("sidebar_21_texture_relax_brush.png")
 
     workspace.magic_fit_tab = 'WEIGHTS'
@@ -289,10 +312,14 @@ def steps():
 
 
 def run():
-    for module in (tool, transfer_ui, cplus_ui):
+    for module in (tool, transfer_ui, cplus_ui, repair_ui):
         for cls in module.classes:
             if getattr(cls, "bl_category", None) == tabs.CATEGORY:
                 watch(cls)
+    # Open the UV sub-tab's panels that start closed, so they draw too.
+    for cls in repair_ui.classes:
+        cls.bl_options = set(getattr(cls, "bl_options", ())) - {'DEFAULT_CLOSED'}
+    repair_ui.PANELS_CLOSED = False
     watch(tool.VIEW3D_MT_magic_fit_links)
     magic_fit.register()
     gen = steps()

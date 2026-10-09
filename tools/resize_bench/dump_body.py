@@ -1,6 +1,6 @@
 """Write the resize bench's body file, and optionally a garment file of the clothing in the .blend.
 
-Opens a .blend whose Resize panel has a devkit body as the From Body (a YAB devkit body with Sizes), and writes
+Opens a .blend whose Auto Resize panel has a devkit body as the From Body (a YAB devkit body with Sizes), and writes
 ``<data>/body.npz``: the body's triangles, its shape at every size of the grid (Chest x Lavabod x Rue x Buff,
 the rest of its settings as they are now), which size it shows now, the Resize settings, and a region per vertex
 (from the bone it's weighted to most). With ``--clothing COLLECTION`` (a name or the start of one) the meshes

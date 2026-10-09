@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Resizing meshes to sizes, for the Resize panel and for other add-ons, like Instant Edit's export.
+"""Resizing meshes to sizes, for the Auto Resize panel and for other add-ons, like Instant Edit's export.
 
 Other add-ons find this module by the add-on's name, whichever repository installed it, and check VERSION:
 
@@ -17,13 +17,13 @@ Other add-ons find this module by the add-on's name, whichever repository instal
                 return api if getattr(api, "VERSION", 0) >= 1 else None
         return None
 
-An export of the model in ``collection`` at every size picked in Magic Fit's Resize panel:
+An export of the model in ``collection`` at every size picked in Magic Fit's Auto Resize panel:
 
     for size in api.resize_collection(collection):
         with size.shown():
             export(collection, size.name)
 
-`resize_collection` resizes the clothing among the collection's meshes from the Resize panel's From Body to each
+`resize_collection` resizes the clothing among the collection's meshes from the Auto Resize panel's From Body to each
 size, as the Resize button does: each size becomes a shape key of each mesh, kept in the file and reused while
 neither the mesh nor the body changes, so a key fixed by hand stays as it is. Meshes whose shape keys follow the
 sizes' settings, a devkit's body parts (the YAB devkit's Torso, Waist, Hands and Feet), aren't resized:
@@ -76,8 +76,8 @@ BASE_NAME = "Base"
 
 
 class Picks:
-    """The sizes picked in the Resize panel's Sizes: ``settings`` (sizing.Setting, as the panel lists them, with the
-    values the body has ``now``), ``varied`` (the settings picked with several values) and ``sizes`` (Size)."""
+    """The sizes picked in the Auto Resize panel's Sizes: ``settings`` (sizing.Setting, as the panel lists them, with
+    the values the body has ``now``), ``varied`` (the settings picked with several values) and ``sizes`` (Size)."""
 
     def __init__(self, settings, picks, now):
         self.settings, self.now = settings, now
@@ -101,7 +101,7 @@ class Picks:
 
 
 def picked(brush):
-    """The sizes picked in the Resize panel (Picks) of ``brush`` (Scene.body_fit_brush), or None with Sizes off, or
+    """The sizes picked in the Auto Resize panel (Picks) of ``brush`` (Scene.body_fit_brush), or None with Sizes off, or
     for a body it lists none for."""
     if not brush.resize_use_sizes or not len(brush.resize_sizes):
         return None
@@ -122,7 +122,7 @@ def picked(brush):
 
 
 def picked_sizes(scene=None):
-    """The sizes picked in the Resize panel's Sizes of ``scene`` (the current one when None): a list of Size, every
+    """The sizes picked in the Auto Resize panel's Sizes of ``scene`` (the current one when None): a list of Size, every
     combination of the values picked. Empty with Sizes off."""
     picks = picked((scene or bpy.context.scene).body_fit_brush)
     return [] if picks is None else list(picks.sizes)
@@ -138,8 +138,8 @@ def body_sizes(body):
 # Resizing
 
 class Job:
-    """A resize as the Resize panel's settings (``brush``, Scene.body_fit_brush) say: the From and To bodies (the To
-    body None for the From body itself), their keys, how the bodies are matched and the options. ``body`` overrides
+    """A resize as the Auto Resize panel's settings (``brush``, Scene.body_fit_brush) say: the From and To bodies (the
+    To body None for the From body itself), their keys, how the bodies are matched and the options. ``body`` overrides
     the From Body."""
 
     def __init__(self, brush, body=None):
@@ -481,7 +481,7 @@ class Resizer:
         brush = scene.body_fit_brush
         job = self.job = Job(brush, body)
         if job.body is None:
-            raise ResizeError("Pick the From Body in Magic Fit's Resize panel")
+            raise ResizeError("Pick the From Body in Magic Fit's Auto Resize panel")
         problem = resizing.check_shapes(job.body, job.from_key, job.to_body, job.to_key, job.match, True)
         if problem is not None:
             raise ResizeError(problem)
@@ -489,7 +489,7 @@ class Resizer:
             sizes = picked_sizes(scene) if body is None or body == brush.resize_from_object else []
             if not sizes:
                 if resizing.check_shapes(job.body, job.from_key, job.to_body, job.to_key, job.match) is not None:
-                    raise ResizeError("Pick the sizes to resize to in Magic Fit's Resize panel")
+                    raise ResizeError("Pick the sizes to resize to in Magic Fit's Auto Resize panel")
                 sizes = [None]
         else:
             sizes = self._sizes(sizes)
@@ -538,7 +538,7 @@ class Resizer:
 
 
 def resize_collection(target, sizes=None, *, scene=None, body=None, progress=None):
-    """Resize the clothing in ``target`` to ``sizes`` for an export, as the Resize panel of ``scene`` (the current
+    """Resize the clothing in ``target`` to ``sizes`` for an export, as the Auto Resize panel of ``scene`` (the current
     scene when None) is set: from its From Body (or ``body``, a Mannequin-like mesh), with its options.
 
     ``target`` is a collection (its visible meshes, in its child collections too) or the meshes themselves.

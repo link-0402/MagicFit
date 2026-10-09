@@ -78,14 +78,14 @@ def steps():
         sidebar.active_panel_category = "Magic Fit"
     except AttributeError:
         pass
-    bpy.context.workspace.magic_fit_tab = 'FIT'
+    bpy.context.workspace.magic_fit_tab = 'RESIZE'
     for area in env.window.screen.areas:
         area.tag_redraw()
     yield 0.5
     panel = getattr(bpy.types, "VIEW3D_PT_resize_sidebar", None)
     with bpy.context.temp_override(window=env.window, area=env.area, region=sidebar):
         shown = panel is not None and panel.poll(bpy.context)
-    check(shown, "panel: Resize is on the Body Fit tab")
+    check(shown, "panel: Auto Resize is on its own tab")
     check(operators.check_resize_ready(bpy.context) is None, "panel: ready with a From body, a To key and meshes selected")
     env.screenshot("resize_01_panel.png")
 

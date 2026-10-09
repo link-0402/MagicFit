@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Magic Fit",
     "author": "Luci_xiv",
-    "description": "Copy weights from a body, fit, resize and line up meshes on it, weight hair and custom faces like the game's, preview Customize+ templates and relax stretched textures",
+    "description": "Copy weights from a body, fit, resize and line up meshes on it, weight hair and custom faces like the game's, preview Customize+ templates, and repair meshes: relax stretched textures, close rips, rebuild topology, normals and UVs",
     "version": (1, 0, 6),
     "blender": (5, 2, 0),
     "location": "3D Viewport > Sidebar (N) > Magic Fit tab, and the Weight Paint / Edit Mode toolbars",
@@ -15,17 +15,17 @@ bl_info = {
 # modules are reloaded too, in dependency order. (Every version so far has had `properties`.)
 _reloading = "properties" in locals()
 
-from . import properties, tabs, painting, fitting, moving, straighten, goals, skirting, heeling, hairing, smoothing, connecting, gamefiles, facedata, facing, relaxing, resizing, refining, sizing, api, lineup, hairlineup, clipping, operators, tool  # noqa: E402
-from . import robust_transfer, cplus, preferences  # noqa: E402
+from . import properties, tabs, painting, fitting, moving, mending, straighten, goals, skirting, heeling, hairing, smoothing, connecting, gamefiles, facedata, facing, relaxing, resizing, refining, sizing, api, lineup, hairlineup, clipping, operators, tool  # noqa: E402
+from . import robust_transfer, cplus, resurface, preferences  # noqa: E402
 
 if _reloading:
     import importlib
-    for _module in (properties, tabs, painting, fitting, moving, straighten, goals, skirting, heeling, hairing, smoothing,
-                    connecting, gamefiles, facedata, facing, relaxing, resizing, refining, sizing, api, lineup,
-                    hairlineup, clipping, operators, tool, robust_transfer, cplus, preferences):
+    for _module in (properties, tabs, painting, fitting, moving, mending, straighten, goals, skirting, heeling, hairing,
+                    smoothing, connecting, gamefiles, facedata, facing, relaxing, resizing, refining, sizing, api, lineup,
+                    hairlineup, clipping, operators, tool, robust_transfer, cplus, resurface, preferences):
         importlib.reload(_module)
 
-_modules = (properties, tabs, operators, tool, clipping, robust_transfer, cplus, preferences)
+_modules = (properties, tabs, operators, tool, clipping, robust_transfer, cplus, resurface, preferences)
 
 
 def register():

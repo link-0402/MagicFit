@@ -76,7 +76,7 @@ class VIEW3D_PT_weight_transfer_sidebar(tabs.TabPanel, bpy.types.Panel):
     bl_label = "Weight Transfer"
     # First on the Weights tab's General sub-tab, before the Weight Brushes.
     bl_order = 1
-    weights_tabs = {'GENERAL'}
+    subtabs = {'GENERAL'}
 
     def draw(self, context):
         layout = self.layout
