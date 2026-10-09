@@ -15,8 +15,9 @@
     and checks like "only under the brush" fail.
 
     If Blender crashes, the script closes the "Blender has stopped working"
-    dialog itself (it kills the process once the crash log is written), marks
-    that test failed and goes on.
+    dialog itself (it kills the process once a crash log is written), marks
+    that test failed and goes on. So it does with a test still running after
+    -TimeoutMinutes, and a test script that raises an error counts as failed.
 
     Tests load the add-on from the repository with --factory-startup, so your
     Blender profile isn't touched.
@@ -44,6 +45,9 @@
 .PARAMETER SkipFace
     Leaves out the face tests, for computers without the game.
 
+.PARAMETER TimeoutMinutes
+    How long a test may run before it's stopped and counted as failed.
+
 .EXAMPLE
     .\tools\run-tests.ps1
 
@@ -60,12 +64,17 @@ param(
     [int[]] $Position = @(),
     [string[]] $Only = @(),
     [switch] $SkipUi,
-    [switch] $SkipFace
+    [switch] $SkipFace,
+    [int] $TimeoutMinutes = 30
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$crashLog = Join-Path $env:TEMP 'blender.crash.txt'
+# Blender names its crash log after the open file: blender.crash.txt without one.
+$crashLogs = Join-Path $env:TEMP '*.crash.txt'
+# Each run's output files of its own, so runs at the same time don't mix them up.
+$outFile = Join-Path $env:TEMP "magic_fit_test_$PID.out"
+$errFile = Join-Path $env:TEMP "magic_fit_test_$PID.err"
 
 if (-not $BlenderPath) {
     $default = 'C:\Program Files\Blender Foundation\Blender 5.2\blender.exe'
@@ -109,33 +118,36 @@ try {
         } else {
             $blenderArgs = @('-b') + $blenderArgs
         }
-        $blenderArgs += '--python', "tests/test_$($t.Name).py"
+        # An error the test script doesn't catch fails the test (Blender would exit with 0).
+        $blenderArgs += '--python-exit-code', '1', '--python', "tests/test_$($t.Name).py"
 
         # Blender writes its crash log, then waits behind a "Blender has stopped
         # working" dialog. Watch for the log and kill the process so nobody has
-        # to click the dialog away.
+        # to click the dialog away; so too for a test that runs too long.
         $started = Get-Date
-        $outFile = Join-Path $env:TEMP 'magic_fit_test.out'
-        $errFile = Join-Path $env:TEMP 'magic_fit_test.err'
         $process = Start-Process -FilePath $BlenderPath -ArgumentList $blenderArgs -NoNewWindow -PassThru `
             -RedirectStandardOutput $outFile -RedirectStandardError $errFile
         $null = $process.Handle  # keeps ExitCode readable after WaitForExit(timeout)
-        $crashed = $false
+        $crashed = $null
+        $timedOut = $false
         while (-not $process.WaitForExit(500)) {
-            $log = Get-Item $crashLog -ErrorAction SilentlyContinue
-            if ($log -and $log.LastWriteTime -ge $started) {
-                Start-Sleep -Seconds 1
+            $crashed = Get-ChildItem $crashLogs -ErrorAction SilentlyContinue |
+                Where-Object { $_.LastWriteTime -ge $started } | Select-Object -First 1
+            $timedOut = ((Get-Date) - $started).TotalMinutes -ge $TimeoutMinutes
+            if ($crashed -or $timedOut) {
+                if ($crashed) { Start-Sleep -Seconds 1 }
                 $process.Kill()
                 $process.WaitForExit()
-                $crashed = $true
                 break
             }
         }
-        $exitCode = if ($crashed) { 'crashed' } else { $process.ExitCode }
+        $exitCode = if ($crashed -or $timedOut) { 'stopped' } else { $process.ExitCode }
         if ($exitCode -eq 0) {
             'ok      {0}' -f $t.Name
         } else {
-            'FAILED  {0} ({1})' -f $t.Name, $(if ($crashed) { 'Blender crashed, see ' + $crashLog } else { "exit $exitCode" })
+            $why = if ($crashed) { 'Blender crashed, see ' + $crashed.FullName }
+                   elseif ($timedOut) { "still running after $TimeoutMinutes minutes" } else { "exit $exitCode" }
+            'FAILED  {0} ({1})' -f $t.Name, $why
             Get-Content $outFile, $errFile -ErrorAction SilentlyContinue | Select-Object -Last 15 |
                 ForEach-Object { '         ' + $_.TrimEnd() }
             $failed += $t.Name
@@ -148,4 +160,5 @@ try {
     "All $($tests.Count) tests passed."
 } finally {
     Pop-Location
+    Remove-Item $outFile, $errFile -ErrorAction SilentlyContinue
 }
