@@ -1,6 +1,6 @@
 # Magic Fit: development notes
 
-How to build, test and work on Magic Fit, and the measurements behind its tools and defaults. For using it, see the [guide](guide.md).
+How to build, test and work on Magic Fit, and the measurements behind its tools and defaults. For using it, see the [wiki](https://github.com/link-0402/MagicFit/wiki).
 
 ## Building and installing from source
 
