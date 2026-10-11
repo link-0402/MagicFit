@@ -15,7 +15,7 @@ from mathutils.bvhtree import BVHTree
 from mathutils.geometry import intersect_line_line, intersect_line_plane
 
 from . import (api, connecting, facedata, facing, fitting, goals, hairing, hairlineup, heeling, lineup, mending, moving,
-               painting, refining, relaxing, resizing, sizing, skirting, smoothing, straighten, tabs)
+               painting, refining, relaxing, resizing, sizing, skirting, sliders, smoothing, straighten, tabs)
 from .cplus import rig as cplus_rig
 from .properties import COMING_MODES, sync_sizes
 
@@ -3052,6 +3052,68 @@ class MAGIC_FIT_OT_resize_sizes_read(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def check_match_sliders_ready(context):
+    """Why Match Sliders can't run right now, or None."""
+    settings = context.scene.body_fit_brush
+    body, other = settings.resize_from_object, settings.resize_slider_body
+    if body is None or body.type != 'MESH':
+        return "Pick the From Body"
+    if other is None or other.type != 'MESH':
+        return "Pick the mod's body"
+    if other == body:
+        return "Pick another body than the From Body"
+    if not sliders.sliders(body):
+        return "'{:s}' has no sliders: shape keys nothing drives".format(body.name)
+    return None
+
+
+def _slider_label(name):
+    # The devkit's chest keys start with dashes, one more per chest size.
+    return name.lstrip("- ") or name
+
+
+class MAGIC_FIT_OT_match_sliders(bpy.types.Operator):
+    """Set the From body's sliders (its shape keys nothing drives, like the chest's Squeeze, Squish and Push-Up) so
+    it takes the shape of the mod's body lying on it. Its sizes (chest size, Rue...) must be the mod's already"""
+    bl_idname = "magic_fit.match_sliders"
+    bl_label = "Match Sliders"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    # The gap left (mean, meters) past which the mod's body is said to differ from what the sliders can reach.
+    FAR = 0.0005
+
+    @classmethod
+    def poll(cls, context):
+        problem = check_match_sliders_ready(context)
+        if problem is not None:
+            cls.poll_message_set(problem)
+            return False
+        return True
+
+    def execute(self, context):
+        settings = context.scene.body_fit_brush
+        body = settings.resize_from_object
+        try:
+            match = sliders.match_sliders(body, settings.resize_slider_body)
+        except resizing.ResizeError as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
+        sliders.apply(body, match)
+        gaps = "{:.2f} mm apart on average, was {:.2f} mm".format(match.gap * 1000.0, match.gap_before * 1000.0)
+        if match.values:
+            text = "Set {:s} on '{:s}': {:s}".format(", ".join(
+                "{:s} {:.2f}".format(_slider_label(name), value) for name, value in match.values.items()),
+                body.name, gaps)
+        else:
+            text = "'{:s}' matches already: {:.2f} mm apart on average".format(body.name, match.gap * 1000.0)
+        if match.gap > self.FAR:
+            self.report({'WARNING'}, text + ". Still far: are the sizes (chest, Rue, Lavabod...) the mod's, and the "
+                                            "bodies lined up?")
+        else:
+            self.report({'INFO'}, text)
+        return {'FINISHED'}
+
+
 class MAGIC_FIT_OT_resize(bpy.types.Operator):
     """Add a shape key to the selected meshes (or those in Edit Mode) that reshapes them from the From body
     to the To body"""
@@ -3244,6 +3306,44 @@ class MAGIC_FIT_OT_resize_subdivide(bpy.types.Operator):
             return {'FINISHED'}
         self.report({'INFO'}, "Cut {:d} face(s) on {:d} mesh(es), {:d} vertices added{:s}: resize again to remake their "
                               "keys".format(cut, meshes, added, skipped))
+        return {'FINISHED'}
+
+
+class MAGIC_FIT_OT_remove_resized_keys(bpy.types.Operator):
+    """Remove the shape keys Auto Resize made on the selected meshes (or those in Edit Mode), from this panel or an
+    export, those changed by hand too; a mesh showing one goes back to the shape it was resized from"""
+    bl_idname = "magic_fit.remove_resized_keys"
+    bl_label = "Remove Resized Keys"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        if not resize_targets(context):
+            cls.poll_message_set("Select the meshes to remove the resized keys from")
+            return False
+        return True
+
+    def execute(self, context):
+        targets = resize_targets(context)
+        edit = context.mode == 'EDIT_MESH'
+        if edit:
+            bpy.ops.object.mode_set(mode='OBJECT')
+        try:
+            removed = edited = meshes = 0
+            for obj in targets:
+                count, changed = resizing.remove_resized_keys(obj)
+                if count:
+                    removed += count
+                    edited += changed
+                    meshes += 1
+        finally:
+            if edit:
+                bpy.ops.object.mode_set(mode='EDIT')
+        if not removed:
+            self.report({'INFO'}, "The selected meshes have no keys Auto Resize made")
+            return {'FINISHED'}
+        self.report({'INFO'}, "Removed {:d} key(s) from {:d} mesh(es){:s}".format(
+            removed, meshes, ", {:d} of them changed by hand".format(edited) if edited else ""))
         return {'FINISHED'}
 
 
@@ -3574,6 +3674,8 @@ classes = (
     MAGIC_FIT_OT_pick_face,
     MAGIC_FIT_OT_face_pose,
     MAGIC_FIT_OT_read_game_faces,
+    MAGIC_FIT_OT_match_sliders,
+    MAGIC_FIT_OT_remove_resized_keys,
     MAGIC_FIT_OT_resize_pick,
     MAGIC_FIT_OT_resize_sizes_read,
     MAGIC_FIT_OT_resize,

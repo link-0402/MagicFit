@@ -2282,6 +2282,37 @@ def write_resized_key(obj, label, world_co, record, show=False):
     return block, stuck
 
 
+def remove_resized_keys(obj):
+    """Remove the shape keys Resize made on mesh ``obj`` (see RECORD), those changed by hand since too, and their
+    records. When one of them shows, the mesh's other keys go back to the values they had when it was made, so the
+    mesh shows the shape it was resized from. Keys nothing drives only; the basis stays. Must be out of Edit Mode.
+    Returns (keys removed, how many of them were changed by hand)."""
+    records = resized_keys(obj)
+    keys = obj.data.shape_keys
+    if not records:
+        if keys is not None and RECORD in keys:
+            del keys[RECORD]
+        return 0, 0
+    blocks = keys.key_blocks
+    edited = sum(1 for name, record in records.items()
+                 if record.get("edited") or (record.get("count") == len(obj.data.vertices) and
+                                             fingerprint(_key_positions(blocks[name])) != record.get("result")))
+    showing = next((name for name in records if not blocks[name].mute and blocks[name].value != 0.0), None)
+    if showing is not None:
+        for name, value in records[showing].get("mix", {}).items():
+            block = blocks.get(name)
+            if block is not None and name not in records and not _driven(keys, block, "value"):
+                block.value = value
+    for name in records:
+        obj.shape_key_remove(blocks[name])
+    keys = obj.data.shape_keys
+    if keys is not None and RECORD in keys:
+        del keys[RECORD]
+    obj.active_shape_key_index = 0
+    obj.data.update()
+    return len(records), edited
+
+
 def show_key(obj, block):
     """Turn shape key ``block`` of ``obj`` fully on and the others that shape the mesh off, and make it active.
     Returns the keys that couldn't be turned off (driven ones)."""

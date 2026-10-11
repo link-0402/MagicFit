@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(ROOT, "tests"))
 
 import resize  # noqa: E402
 import magic_fit  # noqa: E402
-from magic_fit import api, fitting, lineup, operators, properties, refining, resizing, sizing  # noqa: E402
+from magic_fit import api, fitting, lineup, operators, properties, refining, resizing, sizing, sliders  # noqa: E402
 
 FAILURES = []
 
@@ -86,7 +86,7 @@ def reset_settings():
     settings = bpy.context.scene.body_fit_brush
     for prop in ("resize_from_object", "resize_from_key", "resize_to_object", "resize_to_key", "resize_match",
                  "resize_radius", "resize_bridge", "resize_rigid_size", "resize_keep_close", "resize_key_name",
-                 "resize_use_keys_state", "resize_use_sizes", "resize_sizes_problem"):
+                 "resize_use_keys_state", "resize_use_sizes", "resize_sizes_problem", "resize_slider_body"):
         settings.property_unset(prop)
     settings.resize_sizes.clear()
     return settings
@@ -1603,6 +1603,143 @@ def test_resizer():
     small = resizer.resize({"chest_size": 2, "rue": 1})
     check(small.name == "Small Rue" and small.keys == together[1].keys, "resizer: a size given as values, kept")
     check(api.VERSION >= 2, "resizer: VERSION 2 has it")
+
+
+def slider_body():
+    """The devkit body (see resize.devkit_body) with sliders: '- Squeeze' (at 0.3, muted past the Large chest),
+    '- Push-Up' and 'Far' (moving only the chest's right edge, at 0.4), keys nothing drives; and a game key
+    'shpx_test'. Returns the body."""
+    body, _garments = resize.devkit_body()
+    large, _small, _quads = resize.body_shapes()
+    x, z = large[:, :1], large[:, 2:]
+    front = np.array((0.0, -1.0, 0.0))
+    shapes = {
+        "- Push-Up": large + 0.006 * (x / 0.17) ** 2 * front + 0.003 * np.clip(z / 0.1, 0.0, 1.0) * (0.0, 0.0, 1.0),
+        "Far": large + 0.01 * np.clip((x - 0.12) / 0.05, 0.0, 1.0) * front,
+        "shpx_test": large + 0.005 * front,
+    }
+    for name, co in shapes.items():
+        block = body.shape_key_add(name=name, from_mix=False)
+        block.data.foreach_set("co", np.asarray(co).astype(np.float32).ravel())
+        block.value = 0.0
+    keys = body.data.shape_keys
+    keys.key_blocks["Far"].value = 0.4
+    # (The plain body's own key, muted: muted keys aren't sliders.)
+    keys.key_blocks["Small"].mute = True
+    resize.drive(keys, "- Push-Up", 'mute', "size != 0", (("size", "chest_size"),))
+    bpy.context.view_layer.update()
+    return body
+
+
+def mod_body(body, values, keep=None, offset=(0.0, 0.0, 0.0), name="Mod Body"):
+    """A mesh of ``body``'s shape with its keys at ``values`` (like a body mod exported from the devkit), without
+    keys, with only the vertices ``keep`` says (a function of their positions) and their faces."""
+    co = resizing._transform(resizing.rest_shape(body, values), body.matrix_world) + np.asarray(offset)
+    faces = [tuple(polygon.vertices) for polygon in body.data.polygons]
+    kept = np.ones(len(co), dtype=bool) if keep is None else keep(co)
+    faces = [face for face in faces if kept[list(face)].all()]
+    used = np.unique(np.concatenate([np.asarray(face) for face in faces]))
+    number = np.full(len(co), -1)
+    number[used] = np.arange(len(used))
+    return resize.mesh_object(name, co[used], [tuple(number[list(face)]) for face in faces])
+
+
+def test_match_sliders():
+    body = slider_body()
+    keys = body.data.shape_keys
+    check(sliders.sliders(body) == ["- Squeeze", "- Push-Up", "Far"],
+          "sliders: the keys nothing drives, not the game's ({!s})".format(sliders.sliders(body)))
+    other = mod_body(body, {"- Squeeze": 0.7, "- Push-Up": 0.4}, keep=lambda co: co[:, 0] < 0.1)
+    before = key_states(body)
+    match = sliders.match_sliders(body, other)
+    check(match.values == {"- Squeeze": 0.7, "- Push-Up": 0.4},
+          "match: the mod's slider values found ({!s})".format(match.values))
+    check("Far" not in match.sliders and set(match.sliders) == {"- Squeeze", "- Push-Up"},
+          "match: a key moving nothing under the mod's body stays as it is")
+    check(match.gap < 1e-5 and match.gap_before > 1e-4,
+          "match: the gap closed ({:.2g} m, was {:.2g} m)".format(match.gap, match.gap_before))
+    check(key_states(body) == before, "match: nothing changed until applied")
+
+    settings = reset_settings()
+    settings.resize_from_object = body
+    settings.resize_slider_body = other
+    check(operators.check_match_sliders_ready(bpy.context) is None, "operator: ready")
+    check(bpy.ops.magic_fit.match_sliders() == {'FINISHED'}, "operator: ran")
+    check(abs(keys.key_blocks["- Squeeze"].value - 0.7) < 1e-6 and abs(keys.key_blocks["- Push-Up"].value - 0.4) < 1e-6
+          and abs(keys.key_blocks["Far"].value - 0.4) < 1e-6, "operator: the body's sliders set")
+    again = sliders.match_sliders(body, other)
+    check(not again.values, "match: nothing to change once matched ({!s})".format(again.values))
+
+    keys.key_blocks["- Squeeze"].value = 0.3
+    keys.key_blocks["- Push-Up"].value = 0.0
+    off = mod_body(body, {"- Squeeze": 0.7, "- Push-Up": 0.4}, offset=(0.0, -0.004, 0.0), name="Off Body")
+    check(sliders.match_sliders(body, off).gap > operators.MAGIC_FIT_OT_match_sliders.FAR,
+          "match: a body the sliders can't reach leaves a gap to warn of")
+    away = mod_body(body, {}, offset=(1.0, 0.0, 0.0), name="Away Body")
+    try:
+        sliders.match_sliders(body, away)
+        refused = None
+    except resizing.ResizeError as error:
+        refused = str(error)
+    check(refused is not None and "doesn't lie on" in refused, "match: a body elsewhere is refused ({!s})".format(
+        refused))
+    settings.resize_slider_body = body
+    check(operators.check_match_sliders_ready(bpy.context) is not None, "operator: not with the From body itself")
+
+    bpy.context.scene.ya_devkit_props.mannequin_state.chest_size = "1"
+    bpy.context.view_layer.update()
+    check(sliders.sliders(body) == ["Far"], "sliders: those of other sizes, muted, aren't ({!s})".format(
+        sliders.sliders(body)))
+    bpy.context.scene.ya_devkit_props.mannequin_state.chest_size = "0"
+    bpy.context.view_layer.update()
+
+
+def test_remove_resized_keys():
+    body, garments = resize.build()
+    suit, strap = garments["Suit"], garments["Strap A"]
+    # A key of the suit's own, on at 0.5: Resize turns it off to show its keys, and it comes back.
+    suit.shape_key_add(name="Basis", from_mix=False)
+    mine = suit.shape_key_add(name="Mine", from_mix=False)
+    co = resize.positions(suit) + (0.0, 0.0, 0.002)
+    mine.data.foreach_set("co", co.astype(np.float32).ravel())
+    mine.value = 0.5
+    shown_before = resizing.rest_shape(suit)
+    settings = reset_settings()
+    settings.resize_from_object = body
+    settings.resize_use_keys = True
+    settings.resize_to_key = "Small"
+    select_only([suit, strap])
+    for name in ("Size A", "Size B"):
+        settings.resize_key_name = name
+        check(bpy.ops.magic_fit.resize() == {'FINISHED'}, "remove: resized to " + name)
+    blocks = suit.data.shape_keys.key_blocks
+    check([block.name for block in blocks] == ["Basis", "Mine", "Size A", "Size B"] and blocks["Mine"].value == 0.0
+          and blocks["Size B"].value == 1.0, "remove: two keys made, the last shown")
+    # Size A changed by hand.
+    hand = resize.positions(suit, "Size A")
+    hand[0] += (0.0, 0.0, 0.001)
+    blocks["Size A"].data.foreach_set("co", hand.astype(np.float32).ravel())
+
+    select_only([suit, strap, body])
+    check(bpy.ops.magic_fit.remove_resized_keys() == {'FINISHED'}, "remove: ran")
+    check([block.name for block in suit.data.shape_keys.key_blocks] == ["Basis", "Mine"]
+          and [block.name for block in strap.data.shape_keys.key_blocks] == ["Basis"],
+          "remove: only the keys Resize made are gone, those changed by hand too")
+    check(resizing.resized_keys(suit) == {} and resizing.RECORD not in suit.data.shape_keys
+          and resizing.RECORD not in strap.data.shape_keys, "remove: their records too")
+    check(abs(suit.data.shape_keys.key_blocks["Mine"].value - 0.5) < 1e-6
+          and np.abs(resizing.rest_shape(suit) - shown_before).max() < 1e-6,
+          "remove: the mesh shows the shape it was resized from again")
+    check([block.name for block in body.data.shape_keys.key_blocks] == ["Basis", "Small"],
+          "remove: the body's keys stay")
+    check(bpy.ops.magic_fit.remove_resized_keys() == {'FINISHED'}, "remove: nothing left to remove is fine")
+
+    select_only([suit, strap])
+    settings.resize_key_name = "Size A"
+    check(bpy.ops.magic_fit.resize() == {'FINISHED'} and "Size A" in suit.data.shape_keys.key_blocks
+          and len(resizing.resized_keys(suit)) == 1, "remove: resizing again makes the key again")
+    select_only([])
+    check(not operators.MAGIC_FIT_OT_remove_resized_keys.poll(bpy.context), "remove: needs selected meshes")
 
 
 def test_registered():
