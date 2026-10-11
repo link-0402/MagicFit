@@ -1012,6 +1012,16 @@ class BodyFitBrushSettings(bpy.types.PropertyGroup):
         name="To Shapekey",
         description="The shape key to fit the meshes to. Empty or Basis: the body as it looks now",
     )
+    # Match Sliders sets the From body's sliders to this body's shape.
+    resize_slider_body: PointerProperty(
+        name="Mod Body",
+        description=(
+            "A body imported from a mod, lying on the From body: Match Sliders sets the From body's sliders "
+            "(like Squeeze, Squish or Push-Up) to its shape. The From body's sizes must be the mod's already"
+        ),
+        type=bpy.types.Object,
+        poll=_poll_mesh,
+    )
     # Sizes: the To shape is the To body (or the From body) at the sizes picked, its drivers worked out without
     # switching anything (see sizing).
     resize_use_sizes: BoolProperty(

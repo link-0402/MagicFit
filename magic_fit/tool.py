@@ -26,7 +26,9 @@ from .operators import (
     MAGIC_FIT_OT_heel_weights,
     MAGIC_FIT_OT_line_up,
     MAGIC_FIT_OT_line_up_hair,
+    MAGIC_FIT_OT_match_sliders,
     MAGIC_FIT_OT_paint,
+    MAGIC_FIT_OT_remove_resized_keys,
     MAGIC_FIT_OT_pick_face,
     MAGIC_FIT_OT_pick_hair_skeleton,
     MAGIC_FIT_OT_resize,
@@ -1247,6 +1249,15 @@ class VIEW3D_PT_resize_sidebar(tabs.TabPanel, bpy.types.Panel):
         row = col.row()
         row.active = settings.resize_to_object not in (None, body)
         row.prop(settings, "resize_match")
+
+        # The From body's sliders set to a body imported from a mod.
+        header, panel = layout.panel("magic_fit_match_sliders", default_closed=True)
+        header.label(text="Match Sliders")
+        if panel is not None:
+            col = panel.column()
+            col.prop(settings, "resize_slider_body")
+            col.operator(MAGIC_FIT_OT_match_sliders.bl_idname, icon='SHAPEKEY_DATA')
+
         # Read once for the whole panel: reading them walks every driver of the body.
         picks = resize_sizes(settings)
         _draw_resize_sizes(context, layout, settings, picks)
@@ -1280,7 +1291,9 @@ class VIEW3D_PT_resize_sidebar(tabs.TabPanel, bpy.types.Panel):
             col.box().label(text=problem, icon='ERROR')
         col.separator()
         # Low-poly clothing gets more faces where the sizes reshape the body within its faces, before resizing.
-        col.operator(MAGIC_FIT_OT_resize_subdivide.bl_idname, icon='MOD_SUBSURF')
+        row = col.row(align=True)
+        row.operator(MAGIC_FIT_OT_resize_subdivide.bl_idname, icon='MOD_SUBSURF')
+        row.operator(MAGIC_FIT_OT_remove_resized_keys.bl_idname, text="", icon='TRASH')
         row = col.row()
         row.scale_y = 1.4
         count = len(picks.changed) if picks is not None and problem is None else 0
