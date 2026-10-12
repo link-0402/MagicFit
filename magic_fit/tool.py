@@ -1293,7 +1293,7 @@ class VIEW3D_PT_resize_sidebar(tabs.TabPanel, bpy.types.Panel):
         # Low-poly clothing gets more faces where the sizes reshape the body within its faces, before resizing.
         row = col.row(align=True)
         row.operator(MAGIC_FIT_OT_resize_subdivide.bl_idname, icon='MOD_SUBSURF')
-        row.operator(MAGIC_FIT_OT_remove_resized_keys.bl_idname, text="", icon='TRASH')
+        row.operator(MAGIC_FIT_OT_remove_resized_keys.bl_idname, text="Remove Keys", icon='TRASH')
         row = col.row()
         row.scale_y = 1.4
         count = len(picks.changed) if picks is not None and problem is None else 0
