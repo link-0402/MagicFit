@@ -6,20 +6,6 @@ Magic Fit is a Blender add-on for Final Fantasy XIV modders. It gets clothing, h
 
 **New here?** Install it below. The [wiki](https://github.com/link-0402/MagicFit/wiki) explains every tool step by step.
 
-## What do you want to do?
-
-| I want to… | Use | Read |
-| --- | --- | --- |
-| Make clothing move with a character's body | Weight Transfer, Connect Parts | [Weight Transfer](https://github.com/link-0402/MagicFit/wiki/Weight-Transfer) |
-| Fix weights where they look wrong | Weight Brushes | [Weight Brushes](https://github.com/link-0402/MagicFit/wiki/Weight-Brushes) |
-| Make skirts swing and heels stay stiff | Skirt and Heel weights | [Skirt and Heel Weights](https://github.com/link-0402/MagicFit/wiki/Skirt-and-Heel-Weights) |
-| Weight new hair or a custom face | Hair and Face weights | [Hair Weights](https://github.com/link-0402/MagicFit/wiki/Hair-Weights), [Face Weights](https://github.com/link-0402/MagicFit/wiki/Face-Weights) |
-| Push clothing out of the body where it clips | Body Fit, Fit Move | [Body Fit](https://github.com/link-0402/MagicFit/wiki/Body-Fit) |
-| Move an outfit to another body mod or size | Auto Resize | [Auto Resize](https://github.com/link-0402/MagicFit/wiki/Auto-Resize) |
-| Bring in a model from another game | Line Up | [Line Up](https://github.com/link-0402/MagicFit/wiki/Line-Up) |
-| Fix stretched textures, torn seams, messy meshes, bad shading or UVs | Mesh Repair | [Texture Relax and Close Rips](https://github.com/link-0402/MagicFit/wiki/Texture-Relax-and-Close-Rips), [Rebuild Mesh](https://github.com/link-0402/MagicFit/wiki/Rebuild-Mesh) |
-| See how a Customize+ template changes an outfit | Customize+ | [Customize+](https://github.com/link-0402/MagicFit/wiki/Customize-Plus) |
-
 ## Requirements
 
 - **Blender 5.2 or newer.**
@@ -44,12 +30,19 @@ Add this repository to Blender once. You then install Magic Fit from Blender and
 
 More help is on the wiki's [Installation and Setup](https://github.com/link-0402/MagicFit/wiki/Installation-and-Setup) page.
 
-## Good to know
+## What do you want to do?
 
-- **Turn Customize+ off before exporting.** Otherwise the exporter can bake the template into your mesh.
-- **Ctrl Z undoes** every button and brush stroke.
-- **A dashed brush circle** means the brush can't work yet. The text under it says why, for example that no Body is picked.
-- **New hair needs one more step in Penumbra.** Hair Weights tells you which EST entry to set. See [Hair Weights](https://github.com/link-0402/MagicFit/wiki/Hair-Weights).
+| I want to… | Use | Read |
+| --- | --- | --- |
+| Make clothing move with a character's body | Weight Transfer, Connect Parts | [Weight Transfer](https://github.com/link-0402/MagicFit/wiki/Weight-Transfer) |
+| Fix weights where they look wrong | Weight Brushes | [Weight Brushes](https://github.com/link-0402/MagicFit/wiki/Weight-Brushes) |
+| Make skirts swing and heels stay stiff | Skirt and Heel weights | [Skirt and Heel Weights](https://github.com/link-0402/MagicFit/wiki/Skirt-and-Heel-Weights) |
+| Weight new hair or a custom face | Hair and Face weights | [Hair Weights](https://github.com/link-0402/MagicFit/wiki/Hair-Weights), [Face Weights](https://github.com/link-0402/MagicFit/wiki/Face-Weights) |
+| Push clothing out of the body where it clips | Body Fit, Fit Move | [Body Fit](https://github.com/link-0402/MagicFit/wiki/Body-Fit) |
+| Move an outfit to another body mod or size | Auto Resize | [Auto Resize](https://github.com/link-0402/MagicFit/wiki/Auto-Resize) |
+| Bring in a model from another game | Line Up | [Line Up](https://github.com/link-0402/MagicFit/wiki/Line-Up) |
+| Fix stretched textures, torn seams, messy meshes, bad shading or UVs | Mesh Repair | [Texture Relax and Close Rips](https://github.com/link-0402/MagicFit/wiki/Texture-Relax-and-Close-Rips), [Rebuild Mesh](https://github.com/link-0402/MagicFit/wiki/Rebuild-Mesh) |
+| See how a Customize+ template changes an outfit | Customize+ | [Customize+](https://github.com/link-0402/MagicFit/wiki/Customize-Plus) |
 
 ## Help
 
