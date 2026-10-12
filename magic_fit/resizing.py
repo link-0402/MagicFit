@@ -112,6 +112,13 @@ COVER_HALVINGS = 4
 # skin does (see ShapeChange.bind), and grow or shrink with it (see keep_rigid).
 RIGID_ON_BODY = 0.005
 RIGID_ON_BODY_SHARE = 0.9
+# Rigid parts this close to each other touch. Touching parts no larger together than this (a piercing's bar and balls)
+# lie on the body, or partly, as one part. In a larger group (a chain), the parts lying on the body follow its surface by
+# moving along, and the parts touching them take that move in turn, fading over about this many parts: a chain hanging
+# into the cleavage, its links bound to the skin one by one, came apart between those that were and those that weren't.
+RIGID_TOUCH = 0.0005
+RIGID_GROUP = 0.04
+RIGID_CHAIN_FADE = 4.0
 
 # Skin: a mesh with this share of its vertices within this distance of the From shape (a mod's own skin, a
 # copy of the body's) follows the body's surface exactly (see ShapeChange.bind) instead of moving like
@@ -158,6 +165,12 @@ BRIDGE_BLEND = 0.003
 # ...averaged over the clothing around each point across this distance, so neighbouring points (and
 # layers) blend alike and the clothing doesn't tear where the two moves differ.
 BRIDGE_BLEND_WIDTH = 0.015
+# Clothing down in a crease, under the crease-free surface, moves with the crease-free shapes only from this share of
+# the way up from the skin to that surface, fully at it (the height averaged like the blend): a corset's front and
+# what hangs on it at the bottom of the cleavage lie on the breastbone, which stays put while the crease-free surface
+# over it falls back with smaller breasts; moved with it, they sank and Keep Close pushed the layers through each
+# other.
+BRIDGE_DEPTH = 0.5
 
 
 class ResizeError(Exception):
@@ -525,13 +538,19 @@ class _FromShape:
             bridged_from = bridged(source, tris, bridge)
             self.bridged = (bridged_from, _vertex_areas(bridged_from, tris)[self.used],
                             _Levels(bridged_from[self.used], self.radius))
-        self._surface = None
+        self._surface = self._bridged_surface = None
 
     def surface(self, source, tris):
         """The source shape as a BodySurface (made when first asked for), for binding skin to it."""
         if self._surface is None:
             self._surface = _surface(source, tris)
         return self._surface
+
+    def bridged_surface(self, source, tris):
+        """The source shape's crease-free version as a BodySurface (made when first asked for)."""
+        if self._bridged_surface is None:
+            self._bridged_surface = _surface(self.bridged[0], tris, like=self.surface(source, tris))
+        return self._bridged_surface
 
 
 class ShapeChange:
@@ -733,30 +752,59 @@ class ShapeChange:
         if rigid is not None:
             # Rigid parts lying on the body (piercings, studs, a ring on the skin) follow its surface exactly, as
             # the mesh's skin does (see `bind`), rather than the smooth move, which lags it. Only whole: a part
-            # partly off the body, aimed two ways at once, can come out turned over.
+            # partly off the body, aimed two ways at once, can come out turned over. Small groups of touching parts
+            # count as one part; in a chain, the links on the body pull the others along (see RIGID_TOUCH).
             rigid = np.asarray(rigid)
             on_body = np.zeros(len(rigid), dtype=bool)
             members = np.flatnonzero(rigid >= 0)
-            share = owner = near = None
+            owner = near = small = chained = None
             if len(members):
-                _labels, owner = np.unique(rigid[members], return_inverse=True)
+                _labels, part = np.unique(rigid[members], return_inverse=True)
+                part = part.reshape(-1)
+                from .fitting import _connected
+                touching = _touching(start[members], part)
+                group = _connected(int(part.max()) + 1, touching)[0]
+                _labels, owner = np.unique(group[part], return_inverse=True)
                 owner = owner.reshape(-1)
                 near = clothing.near(self)[copies][members] <= RIGID_ON_BODY
-                share = np.bincount(owner, weights=near) / np.bincount(owner)
-                on_body[members] = share[owner] >= RIGID_ON_BODY_SHARE
+                groups = int(owner.max()) + 1
+                # Groups no larger than RIGID_GROUP, or of a single part, aren't chains.
+                parts_in = np.bincount(np.unique(np.stack((owner, part), axis=1), axis=0)[:, 0], minlength=groups)
+                small = (part_sizes(start[members], owner, groups) <= RIGID_GROUP) | (parts_in == 1)
+                chained = ~small[owner]
+                # A small group by its share of points on the body, a chain's link by its own.
+                group_share = np.bincount(owner, weights=near) / np.bincount(owner)
+                part_share = np.bincount(part, weights=near) / np.bincount(part)
+                on_body[members] = (group_share[owner] >= RIGID_ON_BODY_SHARE) & small[owner]
+                linked = (part_share[part] >= RIGID_ON_BODY_SHARE) & chained
             if on_body.any():
                 result[on_body] = self.bind(start[on_body])
             keep_rigid(start, result, rigid, on_body=on_body)
-            # A part partly on the body is moved, without turning, as far as its points on the body fall short of
-            # following it.
-            partly = near & ~on_body[members] if near is not None else None
+            if chained is not None and linked.any():
+                # Links of a chain lying on the body move along, without turning or growing, as far as they fall short
+                # of following it, and the other links take that move, fading away from them along the chain. Bound
+                # to the body one by one, links lying in a crease, their points bound to both sides of it, grew or
+                # turned as the sides parted.
+                count = int(part.max()) + 1
+                rows = members[linked]
+                short = self.bind(start[rows]) - result[rows]
+                values = np.stack([np.bincount(part[linked], weights=short[:, k], minlength=count)
+                                   for k in range(3)], axis=1)
+                fixed = np.bincount(part[linked], minlength=count) > 0
+                values[fixed] /= np.bincount(part[linked], minlength=count)[fixed, None]
+                shift = _screened_fill(values, np.zeros(count), touching, count, 1.0, 1.0 / RIGID_CHAIN_FADE ** 2,
+                                       fixed=fixed)
+                result[members[chained]] += shift[part[chained]]
+            # A part (or small group) partly on the body is moved, without turning, as far as its points on the body
+            # fall short of following it.
+            partly = near & ~on_body[members] & ~chained if near is not None else None
             if partly is not None and partly.any():
                 rows = members[partly]
                 short = self.bind(start[rows]) - result[rows]
-                shift = np.stack([np.bincount(owner[partly], weights=short[:, k], minlength=len(share))
+                shift = np.stack([np.bincount(owner[partly], weights=short[:, k], minlength=groups)
                                   for k in range(3)], axis=1)
-                shift /= np.maximum(np.bincount(owner[partly], minlength=len(share)), 1)[:, None]
-                moved = ~on_body[members]
+                shift /= np.maximum(np.bincount(owner[partly], minlength=groups), 1)[:, None]
+                moved = ~on_body[members] & ~chained
                 result[members[moved]] += shift[owner[moved]]
         if cover is not None:
             result = self.keep_covered(start, result, cover, rigid)
@@ -808,6 +856,14 @@ class _Clothing:
         if change.bridge > 0.0:
             self.distance = _distances(self.points, change.source, change._tree_tris)
             self.free = _blend_shares(self.points, _smoothstep(BRIDGE_HUG, BRIDGE_HUG + BRIDGE_BLEND, self.distance))
+            # Clothing down in a crease, nearer the skin than the crease-free surface over it, follows the skin.
+            spanning = np.flatnonzero(self.free > 0.0)
+            if len(spanning):
+                surface = change._from.bridged_surface(change.source, change.tris)
+                under = np.maximum(-surface.nearest(self.points[spanning]).distance, 0.0)
+                height = np.ones(len(self.points))
+                height[spanning] = self.distance[spanning] / np.maximum(self.distance[spanning] + under, 1e-12)
+                self.free = self.free * _smoothstep(BRIDGE_DEPTH, 1.0, _blend_shares(self.points, height))
         self._first = {}
         self._kept = {}
         self._followers = {}
@@ -1299,6 +1355,20 @@ def keep_rigid(before, after, groups, on_body=None):
         scale = 1.0 + (share / count[:, 0]) * (scale - 1.0)
         turned *= scale[owner, None]
     after[members] = center_after[owner] + turned
+
+
+def _touching(points, parts):
+    """Pairs of rigid parts touching each other, closer than RIGID_TOUCH, for ``points`` of them (``parts``, from 0, per
+    point)."""
+    from .fitting import weld_groups
+    if not len(points):
+        return np.zeros((0, 2), dtype=np.int64)
+    weld, groups = weld_groups(points, RIGID_TOUCH)
+    first = np.zeros(groups, dtype=np.int64)
+    first[weld[::-1]] = parts[::-1]
+    pairs = np.stack((parts, first[weld]), axis=1)
+    pairs = np.sort(pairs[pairs[:, 0] != pairs[:, 1]], axis=1)
+    return np.unique(pairs, axis=0) if len(pairs) else np.zeros((0, 2), dtype=np.int64)
 
 
 def loose_parts(co, edges):
