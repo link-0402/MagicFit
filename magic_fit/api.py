@@ -26,11 +26,12 @@ An export of the model in ``collection`` at every size picked in Magic Fit's Aut
 `resize_collection` resizes the clothing among the collection's meshes from the Auto Resize panel's From Body to each
 size, as the Resize button does: each size becomes a shape key of each mesh, kept in the file and reused while
 neither the mesh nor the body changes, so a key fixed by hand stays as it is. Meshes whose shape keys follow the
-sizes' settings, a devkit's body parts (the YAB devkit's Torso, Waist, Hands and Feet), aren't resized:
-`SizedMeshes.shown` sets their keys as the body's would be at that size, and turns the clothing's key for the size
-on, until the ``with`` block ends. At the size the body shows, the clothing shows the shape it fits the body in,
-even while it shows another size's key. Everything else (Smoothing, Bridge Creases...) is as set in the Resize
-panel.
+sizes' settings, a devkit's body parts (the YAB devkit's Torso, Waist, Hands and Feet, and Piercing B, whose key
+follows a modifier of the Torso), aren't resized: until the ``with`` block ends, `SizedMeshes.shown` switches the
+devkit's settings they follow to the size, so their keys and modifiers (the Torso's Rue weights) follow by their
+own drivers, sets their sliders as the body's are at that size, and turns the clothing's key for the size on. At
+the size the body shows, the clothing shows the shape it fits the body in, even while it shows another size's key.
+Everything else (Smoothing, Bridge Creases...) is as set in the Resize panel.
 
 To resize one size at a time (VERSION 2 on), with a step of a modal operator per size so Blender's UI stays alive,
 make a Resizer, which reads the meshes and keeps what the sizes share, and resize it to each of its sizes:
@@ -41,6 +42,21 @@ make a Resizer, which reads the meshes and keeps what the sizes share, and resiz
         with sized.shown():
             export(collection, sized.name)
 
+A model made with a devkit carries copies of the devkit's parts it shows (the skin under a top, a navel piercing).
+Resized, they'd keep the From size's weights and placements; the devkit's own parts have each size's. With
+``substitute=True`` (VERSION 3 on), each mesh that stands for a devkit part (the same slot, material and attributes,
+lying on it at the From size, see bodyparts) isn't resized, and `Resizer.substitutes` maps it to that part, to
+export in its place; `shown` shows the parts and puts them in the size:
+
+    resizer = api.Resizer(collection, substitute=True)
+    objects = [resizer.substitutes.get(obj, obj) for obj in collection_meshes]
+    for size in resizer.sizes:
+        sized = resizer.resize(size)
+        with sized.shown():
+            export(objects, sized.name)
+
+Without it, those copies are resized like clothing, as before.
+
 Errors meant for the user raise ResizeError.
 """
 
@@ -50,11 +66,12 @@ import time
 import bpy
 import numpy as np
 
-from . import properties, resizing, sizing
+from . import bodyparts, properties, resizing, sizing
 from .resizing import ResizeError
 
-# Raised when what this module offers changes; other add-ons check they know it. 2 added Resizer.
-VERSION = 2
+# Raised when what this module offers changes; other add-ons check they know it. 2 added Resizer, 3 its
+# ``substitute`` (and resize_collection's) and SizedMeshes.substitutes, and shown() switching the devkit's settings.
+VERSION = 3
 
 __all__ = ("VERSION", "ResizeError", "Resizer", "Size", "SizedMeshes", "body_sizes", "picked_sizes",
            "resize_collection")
@@ -389,58 +406,233 @@ def resize_meshes(meshes, sizes, job, labels, show=False, progress=None):
 # -----------------------------------------------------------------------------
 # Instant Edit's export
 
+def _fixed(body):
+    """The settings the From ``body`` follows, as (owner pointer, path): never switched, it stays the From body."""
+    if body is None:
+        return set()
+    return {(owner.as_pointer(), path) for _name, owner, path in sizing.setting_sources(body)}
+
+
+def _blocked(part, names, fixed):
+    """The settings among ``names`` that body ``part`` follows but that can't be switched: the From body's
+    (``fixed``, see _fixed), or one whose add-on isn't running."""
+    return {name for name, owner, path in sizing.setting_sources(part)
+            if name in names and ((owner.as_pointer(), path) in fixed or not sizing.can_set(owner, path))}
+
+
+class _StateSwitch:
+    """How SizedMeshes.shown puts the body ``parts`` into a size: ``sources``, the settings their keys follow (see
+    sizing.setting_sources) as (name, owner, path), in the order the devkit's own callbacks take them (the chest
+    before Lavabod, which has no Masc chest), never those of the From body (``fixed``, see _fixed) nor those that
+    can't be set; ``reads`` ({part: {(owner pointer, path): name} of the sources it follows}); ``blocked`` ({part:
+    names of the settings it follows that can't be switched}); ``keys``, the Keys along the parts' chains (see
+    sizing.chain_keys); and ``notes`` on those of the settings ``names`` that can't be set."""
+
+    def __init__(self, parts, names, fixed):
+        self.sources, self.reads, self.blocked, self.keys, self.notes = [], {}, {}, [], []
+        listed, chained = set(), set()
+        for part in parts:
+            reads, blocked, unset = {}, set(), []
+            for name, owner, path in sizing.setting_sources(part):
+                source = (owner.as_pointer(), path)
+                if source in fixed:
+                    blocked.add(name)
+                elif not sizing.can_set(owner, path):
+                    blocked.add(name)
+                    if name in names:
+                        unset.append(path)
+                else:
+                    reads[source] = name
+                    if source not in listed:
+                        listed.add(source)
+                        self.sources.append((name, owner, path))
+            if unset:
+                self.notes.append("'{:s}' can't be switched to the sizes: '{:s}' can't be set (is the devkit's "
+                                  "script running?). Only the shape keys Magic Fit works out are set, its modifiers "
+                                  "stay as they are".format(part.name, unset[0]))
+            self.reads[part], self.blocked[part] = reads, blocked
+            for keys in sizing.chain_keys(part):
+                if keys.as_pointer() not in chained:
+                    chained.add(keys.as_pointer())
+                    self.keys.append(keys)
+        order = {name: index for index, name in enumerate(sizing._Yab.NAMED)}
+        self.sources.sort(key=lambda source: (order.get(source[0], len(order)), source[0], source[2]))
+
+    def by_hand(self, values, failed=()):
+        """The parts whose keys are set, their drivers muted, at a size of ``values`` ({setting name: value}) once
+        the sources ``failed`` couldn't be set: those following a setting of the size that can't be switched, and
+        those following none of them."""
+        result = set()
+        for part, reads in self.reads.items():
+            needed = {source for source, name in reads.items() if name in values}
+            if not needed or self.blocked[part].intersection(values) or needed.intersection(failed):
+                result.add(part)
+        return result
+
+
 class SizedMeshes:
     """The meshes resize_collection resized, at one size: ``name`` (for the size's file or mod option), ``size``
     (Size; None for the To shape without sizes), ``keys`` ({clothing mesh: the name of its key for the size, None
-    where it stays as it is}), ``parts`` ({body part: {key name: value}}: the body parts' keys at the size),
-    ``notes`` (messages for the user) and ``own`` ({clothing mesh staying as it is: the key values that show it
-    so, see SizeRun})."""
+    where it stays as it is}), ``parts`` ({body part: {key name: value}}: the body parts' keys at the size, the
+    substitutes' too), ``substitutes`` ({export mesh: the devkit part exported in its place}, see
+    Resizer), ``notes`` (messages for the user) and ``own`` ({clothing mesh staying as it is: the key values that
+    show it so, see SizeRun})."""
 
-    def __init__(self, name, size, keys, parts, notes, own=None):
+    def __init__(self, name, size, keys, parts, notes, own=None, substitutes=None, switch=None):
         self.name, self.size, self.keys, self.parts, self.notes = name, size, keys, parts, notes
         self.own = own or {}
+        self.substitutes = dict(substitutes or {})
+        # How the body parts are put into the size (_StateSwitch); None sets their keys, their drivers muted.
+        self._switch = switch
 
     def __repr__(self):
-        return "SizedMeshes({!r}, {:d} resized, {:d} body parts)".format(
-            self.name, sum(name is not None for name in self.keys.values()), len(self.parts))
+        return "SizedMeshes({!r}, {:d} resized, {:d} body parts, {:d} substituted)".format(
+            self.name, sum(name is not None for name in self.keys.values()), len(self.parts), len(self.substitutes))
 
     @contextlib.contextmanager
     def shown(self):
         """Show the meshes at this size until the ``with`` block ends: each clothing mesh's key for the size fully
-        on and its other keys off, or for one staying as it is, the shape it fits the From body in (not a size it
-        shows); the body parts' keys set as the size has them. Drivers of the keys set are muted meanwhile;
-        everything is put back afterwards, whatever happens."""
+        on and its other keys off (their drivers muted meanwhile), or for one staying as it is, the shape it fits
+        the From body in (not a size it shows). The body parts take the size as the devkit's own UI puts them in
+        it: the settings they follow are switched, so their driven keys and modifiers follow by their own drivers
+        (never the From body's settings: it stays the From body), and their keys nothing drives (sliders) are set
+        as the size has them. The substitutes are shown. Everything is put back afterwards, whatever happens."""
         undo = []
         try:
-            for obj, name in self.keys.items():
-                keys = obj.data.shape_keys
-                if keys is None:
-                    continue
-                if name is None:
-                    for own_name, value in self.own.get(obj, {}).items():
-                        block = keys.key_blocks.get(own_name)
-                        if block is not None and (0.0 if block.mute else block.value) != value:
-                            _set_key(keys, block, value, undo)
-                    continue
-                if keys.key_blocks.get(name) is None:
-                    continue
-                for block in keys.key_blocks:
-                    if block == keys.reference_key:
-                        continue
-                    if block.name == name:
-                        _set_key(keys, block, 1.0, undo)
-                    elif not block.mute and block.value != 0.0:
-                        _set_key(keys, block, 0.0, undo)
-            for obj, values in self.parts.items():
-                keys = obj.data.shape_keys
-                for name, value in values.items():
-                    block = keys.key_blocks.get(name)
-                    if block is not None:
-                        _set_key(keys, block, value, undo)
+            self._show_clothing(undo)
+            switching = self._switch is not None and self.size is not None
+            by_hand = None
+            if switching:
+                # Shown first, so the drivers' values are evaluated back below before they're hidden again: Blender
+                # runs no drivers in an excluded collection and evaluates no modifiers of hidden objects.
+                _show_objects(self.substitutes.values(), undo)
+                by_hand = self._switch_settings(undo)
+            self._set_parts(undo, by_hand)
+            bpy.context.view_layer.update()
             yield self
         finally:
+            # Each step is put back, also when another can't be.
+            failure = None
             for restore in reversed(undo):
-                restore()
+                try:
+                    restore()
+                except Exception as error:  # noqa: BLE001 - raised once the others are back
+                    failure = failure or error
+            if failure is not None:
+                raise failure
+
+    def _show_clothing(self, undo):
+        """Show each clothing mesh's key for the size, or the shape it fits the From body in."""
+        for obj, name in self.keys.items():
+            keys = obj.data.shape_keys
+            if keys is None:
+                continue
+            if name is None:
+                for own_name, value in self.own.get(obj, {}).items():
+                    block = keys.key_blocks.get(own_name)
+                    if block is not None and (0.0 if block.mute else block.value) != value:
+                        _set_key(keys, block, value, undo)
+                continue
+            if keys.key_blocks.get(name) is None:
+                continue
+            for block in keys.key_blocks:
+                if block == keys.reference_key:
+                    continue
+                if block.name == name:
+                    _set_key(keys, block, 1.0, undo)
+                elif not block.mute and block.value != 0.0:
+                    _set_key(keys, block, 0.0, undo)
+
+    def _switch_settings(self, undo):
+        """Switch the settings the body parts follow to the size's (see _StateSwitch), the devkit's callbacks
+        running as when they're switched by hand. Returns the parts whose keys are set by hand."""
+        switch, values = self._switch, self.size.values
+        wanted = [(name, owner, path) for name, owner, path in switch.sources if name in values]
+        if not wanted:
+            return switch.by_hand(values)
+        # The devkit's callbacks may change other settings along, and sliders (Lavabod swaps the chest's).
+        keep = sizing.keep_settings([(owner, path) for _name, owner, path in switch.sources])
+        saved = [(block, block.value, block.mute) for keys in switch.keys for block in keys.key_blocks]
+
+        def restore():
+            keep()
+            for block, value, mute in saved:
+                if block.value != value:
+                    block.value = value
+                if block.mute != mute:
+                    block.mute = mute
+        # Undone in this order: the settings put back, then evaluated, so what their drivers set is as before.
+        undo.append(lambda: bpy.context.view_layer.update())
+        undo.append(restore)
+        failed = set()
+        for name, owner, path in wanted:
+            if not sizing.set_setting(owner, path, values[name]):
+                failed.add((owner.as_pointer(), path))
+        return switch.by_hand(values, failed)
+
+    def _set_parts(self, undo, by_hand):
+        """Set the body parts' keys the size changes: all of them for those in ``by_hand`` (all when None), their
+        drivers muted; for the others those nothing drives, which no setting switches."""
+        for obj, values in self.parts.items():
+            keys = obj.data.shape_keys
+            hand = by_hand is None or obj in by_hand
+            for name, value in values.items():
+                block = keys.key_blocks.get(name)
+                if block is None:
+                    continue
+                if hand:
+                    _set_key(keys, block, value, undo)
+                elif not resizing._driven(keys, block, "value"):
+                    _set_slider(keys, block, value, undo)
+
+
+def _show_objects(objects, undo):
+    """Show ``objects`` in the viewport: the layer collections holding them (and those around those) neither
+    excluded nor hidden, the collections and the objects neither disabled nor hidden. Adds what puts each back to
+    ``undo``."""
+    view_layer = bpy.context.view_layer
+
+    def turn(owner, attribute, value):
+        old = getattr(owner, attribute)
+        if old != value:
+            setattr(owner, attribute, value)
+            undo.append(lambda: setattr(owner, attribute, old))
+    for obj in objects:
+        for collection in obj.users_collection:
+            for layer in _layer_path(view_layer.layer_collection, collection):
+                turn(layer, "exclude", False)
+                turn(layer, "hide_viewport", False)
+                if layer.collection != view_layer.layer_collection.collection:
+                    turn(layer.collection, "hide_viewport", False)
+        turn(obj, "hide_viewport", False)
+        if obj.name in view_layer.objects and obj.hide_get(view_layer=view_layer):
+            obj.hide_set(False, view_layer=view_layer)
+            undo.append(lambda obj=obj: obj.hide_set(True, view_layer=view_layer)
+                        if obj.name in view_layer.objects else None)
+
+
+def _layer_path(layer, collection):
+    """The layer collections from ``layer`` down to the one of ``collection``, or [] when it's not under it."""
+    if layer.collection == collection:
+        return [layer]
+    for child in layer.children:
+        path = _layer_path(child, collection)
+        if path:
+            return [layer] + path
+    return []
+
+
+def _set_slider(keys, block, value, undo):
+    """Set ``block`` of ``keys`` (a key nothing drives) to ``value``, unmuted unless a driver mutes it, and add what
+    puts it back to ``undo``."""
+    saved = (block.value, block.mute)
+
+    def restore():
+        block.value, block.mute = saved
+    undo.append(restore)
+    block.value = value
+    if not resizing._driven(keys, block, "mute"):
+        block.mute = False
 
 
 def _set_key(keys, block, value, undo):
@@ -495,13 +687,16 @@ class Resizer:
             with sized.shown():
                 export(collection, sized.name)
 
-    ``target``, ``sizes``, ``scene`` and ``body`` are as for resize_collection, and making one raises the errors it
-    raises. ``sizes`` lists the sizes to resize to (Size, or None for the To shape alone). It reads the meshes and
-    bodies when made, and keeps what every size shares (the clothing's shape, its distances from the From body,
-    the From body's crease-free copy...) until each of them is resized: make another after changing them.
+    ``target``, ``sizes``, ``scene``, ``body`` and ``substitute`` are as for resize_collection, and making one raises
+    the errors it raises. ``sizes`` lists the sizes to resize to (Size, or None for the To shape alone), ``parts``
+    the body parts among the meshes and ``clothing`` those it resizes. With ``substitute``, ``substitutes`` maps
+    each mesh standing for a devkit part (see bodyparts.find_substitutes) to that part, which is exported in its
+    place: such a mesh is neither resized nor a body part. It reads the meshes and bodies when made, and keeps
+    what every size shares (the clothing's shape, its distances from the From body, the From body's crease-free
+    copy...) until each of them is resized: make another after changing them.
     """
 
-    def __init__(self, target, sizes=None, *, scene=None, body=None):
+    def __init__(self, target, sizes=None, *, scene=None, body=None, substitute=False):
         scene = scene if scene is not None else bpy.context.scene
         brush = scene.body_fit_brush
         job = self.job = Job(brush, body)
@@ -523,10 +718,26 @@ class Resizer:
         body_values = [sizing.size_values(job.sized, size.values) if size is not None else {} for size in sizes]
         names = {name for size in sizes if size is not None for name in size.values}
         changed = {name for values in body_values for name in values}
-        # Meshes whose keys follow the sizes (body parts) aren't resized.
-        self.parts = [obj for obj in meshes if names and sizing.follows(obj, names, changed)]
-        self.clothing = [obj for obj in meshes if obj not in self.parts]
+        fixed = _fixed(job.body)
+
+        def part(obj):
+            # Whether mesh ``obj`` is a body part, whose keys follow the sizes: but for one following them only
+            # through another part whose settings can't be switched (the From body's), which would stay as it is.
+            if not names or not sizing.follows(obj, names, changed):
+                return False
+            return sizing.follows(obj, names, changed, through=False) or not _blocked(obj, names, fixed)
         with _object_mode():
+            # Meshes standing for the devkit's parts are exported as those.
+            self.substitutes, notes = {}, []
+            if substitute:
+                self.substitutes, notes = bodyparts.find_substitutes(meshes, job, names, changed, scene, usable=part)
+            meshes = [obj for obj in meshes if obj not in self.substitutes]
+            # Meshes whose keys follow the sizes (body parts) aren't resized.
+            self.parts = [obj for obj in meshes if part(obj)]
+            self.clothing = [obj for obj in meshes if obj not in self.parts]
+            self._switch = _StateSwitch(self.parts + list(self.substitutes.values()), names, fixed)
+            # Given with the first size resized.
+            self._notes = notes + self._switch.notes
             self._work = _Sizes(self.clothing, job, share=len(self.sizes) > 1)
         # What the sizes share is let go once each of them is resized (it can take hundreds of megabytes).
         self._pending = list(self.sizes)
@@ -558,16 +769,18 @@ class Resizer:
         self._pending = [pending for pending in self._pending if pending is not size]
         if not self._pending:
             self._work.shared = None
-        values =sizing.size_values(self.job.sized, size.values) if size is not None else {}
+        values = sizing.size_values(self.job.sized, size.values) if size is not None else {}
         part_values = {}
-        for part in self.parts:
+        for part in self.parts + list(self.substitutes.values()):
             changes = sizing.size_values(part, size.values, values) if size is not None else {}
             if changes:
                 part_values[part] = changes
-        return SizedMeshes(label, size, dict(run.keys), part_values, notes, dict(run.own))
+        notes, self._notes = self._notes + notes, []
+        return SizedMeshes(label, size, dict(run.keys), part_values, notes, dict(run.own), self.substitutes,
+                           self._switch)
 
 
-def resize_collection(target, sizes=None, *, scene=None, body=None, progress=None):
+def resize_collection(target, sizes=None, *, scene=None, body=None, progress=None, substitute=False):
     """Resize the clothing in ``target`` to ``sizes`` for an export, as the Auto Resize panel of ``scene`` (the current
     scene when None) is set: from its From Body (or ``body``, a Mannequin-like mesh), with its options.
 
@@ -575,12 +788,14 @@ def resize_collection(target, sizes=None, *, scene=None, body=None, progress=Non
     ``sizes`` are Size, or dicts of setting values (see sizing.Setting); None takes those picked in the panel's
     Sizes, or the panel's To shape when it picks no sizes. Meshes whose shape keys follow the sizes' settings (body
     parts) aren't resized, nor are the bodies themselves; the others get a shape key per size, kept and reused (see
-    resize_meshes). Returns a list of SizedMeshes, one per size; show one with its ``shown()``. Raises ResizeError.
-    To resize one size at a time, use a Resizer.
+    resize_meshes). With ``substitute``, meshes standing for a devkit's parts aren't resized either: each
+    SizedMeshes' ``substitutes`` maps them to the parts to export in their place (see Resizer). Returns a list of
+    SizedMeshes, one per size; show one with its ``shown()``. Raises ResizeError. To resize one size at a time, use
+    a Resizer.
     """
     started = time.perf_counter()
     with _object_mode():
-        resizer = Resizer(target, sizes, scene=scene, body=body)
+        resizer = Resizer(target, sizes, scene=scene, body=body, substitute=substitute)
         results, notes = [], []
         for index, size in enumerate(resizer.sizes):
             def step(done, index=index):

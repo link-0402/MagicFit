@@ -19,7 +19,8 @@ sys.path.insert(0, os.path.join(ROOT, "tests"))
 
 import resize  # noqa: E402
 import magic_fit  # noqa: E402
-from magic_fit import api, fitting, lineup, operators, properties, refining, resizing, sizing, sliders  # noqa: E402
+from magic_fit import (api, bodyparts, fitting, lineup, operators, properties, refining, resizing, sizing,  # noqa: E402
+                       sliders)
 
 FAILURES = []
 
@@ -1172,9 +1173,13 @@ def key_states(obj):
     return [(block.name, block.value, block.mute) for block in obj.data.shape_keys.key_blocks]
 
 
-def devkit_state():
-    state = bpy.context.scene.ya_devkit_props.mannequin_state
+def devkit_state(group="mannequin_state"):
+    state = getattr(bpy.context.scene.ya_devkit_props, group)
     return [getattr(state, name) for name in ("chest_size", "leg_size", "rue", "buff", "lavabod", "alt_hips")]
+
+
+def torso_state():
+    return devkit_state("torso_state")
 
 
 def size_error(body, size):
@@ -1305,6 +1310,102 @@ def test_body_parts():
           "parts: a copy without drivers takes the body's keys by name")
 
 
+def test_follows_through_part():
+    body, _garments = resize.devkit_body()
+    part = resize.devkit_part(body, "0.1 Torso")
+    piercing = resize.devkit_piercing(part)
+    names = [setting.name for setting in sizing.body_settings(body)[0]]
+    check(sizing.follows(piercing, names), "through parts: Piercing B follows the settings through the Torso")
+    check(sizing.size_values(piercing, {"chest_size": 1, "rue": 1}) == {},
+          "through parts: ...its key follows the Torso's modifier by itself")
+    sources = sizing.state_sources(part)
+    check(set(sources) == {"chest_size", "lavabod", "rue", "buff"}
+          and all(path.startswith("ya_devkit_props.torso_state.") for _owner, path in sources.values()),
+          "through parts: the Torso's settings ({!s})".format(sources))
+    check(sizing.state_sources(piercing) == sources, "through parts: Piercing B's are the Torso's, not the "
+                                                     "modifier's visibility ({!s})".format(
+                                                         sizing.state_sources(piercing)))
+    check([keys.name for keys in sizing.chain_keys(piercing)] == [piercing.data.shape_keys.name,
+                                                                  part.data.shape_keys.name],
+          "through parts: the keys along the chain")
+    plain = resize.coarse_body("Plain")
+    plain.modifiers.new("Rue Weights", 'DATA_TRANSFER')
+    other = resize.devkit_piercing(plain, "1.1 Other")
+    check(not sizing.follows(other, names) and not sizing.state_sources(other),
+          "through parts: not through a mesh that follows nothing")
+    # Two meshes reading each other's modifiers.
+    loop_a, loop_b = resize.coarse_body("Loop A"), resize.coarse_body("Loop B")
+    for obj, read in ((loop_a, loop_b), (loop_b, loop_a)):
+        obj.modifiers.new("Rue Weights", 'DATA_TRANSFER')
+        resize.drive_by_object(obj.data.shape_keys, "Small", read, 'modifiers["Rue Weights"].show_viewport')
+    check(not sizing.follows(loop_a, names) and not sizing.state_sources(loop_a), "through parts: loops end")
+
+
+def test_find_substitutes():
+    body, garments = resize.devkit_body()
+    part = resize.devkit_part(body, "0.1 Torso")
+    piercing = resize.devkit_piercing(part)
+    _collection, skin, stud = resize.export_copies(part, piercing)
+    settings = reset_settings()
+    settings.resize_from_object = body
+    job = api.Job(settings)
+    names = {setting.name for setting in sizing.body_settings(body)[0]}
+    meshes = list(garments.values()) + [skin, stud]
+
+    def found(more=()):
+        return bodyparts.find_substitutes(meshes + list(more), job, names, set())
+
+    matches, notes = found()
+    check(matches == {skin: part, stud: piercing}, "substitutes: the skin's copy is the Torso, the piercing's Piercing B "
+                                                   "({!s})".format(matches))
+    check(notes == ["'0.1 c0201b0001_bibo' is exported as the devkit's '0.1 Torso'",
+                    "'1.0 c0201b0001_piercings' is exported as the devkit's '1.0 Piercing B'"],
+          "substitutes: a note per match ({!s})".format(notes))
+    check(bodyparts.material_key(part) == "mt_c0201b0001_bibo.mtrl"
+          and bodyparts.material_key(stud) == "mt_c0201b0001_piercings.mtrl",
+          "substitutes: the material by its xiv_material, else its first material's name")
+    check(bodyparts.slot("0.1 c0201b0001_bibo LOD0.001") == (0, 1) and bodyparts.slot("Aura Part 0.2") == (0, 2)
+          and bodyparts.slot("1.0 Piercing B.001") == (1, 0) and bodyparts.slot("Suit") is None,
+          "substitutes: slots read as Instant Edit reads them")
+
+    skin["xiv_material"] = "/mt_c0201b0001_top_a.mtrl"
+    check(skin not in found()[0], "substitutes: not with another material")
+    skin["xiv_material"] = "mt_c0201b0001_bibo.mtrl [4f128fd5]"
+    check(found()[0].get(skin) == part, "substitutes: ...but with the same one as Instant Edit names it")
+    skin["atr_nek"] = True
+    check(skin not in found()[0], "substitutes: not with other attributes")
+    del skin["atr_nek"]
+    skin.name = "0.2 c0201b0001_bibo"
+    check(skin not in found()[0], "substitutes: not in another slot")
+    skin.name = "0.1 c0201b0001_bibo"
+    part.location.y -= 0.1
+    bpy.context.view_layer.update()
+    matches, notes = found()
+    check(skin not in matches and "No devkit part stands in for '0.1 c0201b0001_bibo': resized as clothing" in notes,
+          "substitutes: not 10 cm away; skin without a part is said ({!s})".format(notes))
+    part.location.y += 0.1
+    bpy.context.view_layer.update()
+
+    twin = part.copy()
+    bpy.context.scene.collection.objects.link(twin)
+    twin.name = "0.1 Torso Twin"
+    check(found()[0].get(skin) == part, "substitutes: of two alike, the first by name")
+    part.hide_set(True)
+    check(found()[0].get(skin) == twin, "substitutes: ...but one shown before one hidden")
+    part.hide_set(False)
+    bpy.data.objects.remove(twin)
+
+    second = skin.copy()
+    second.data = skin.data.copy()
+    skin.users_collection[0].objects.link(second)
+    second.name = "0.1 c0201b0001_bibo.001"
+    matches, notes = found([second])
+    check(matches.get(skin) == part and second not in matches
+          and "'0.1 c0201b0001_bibo.001' matches the devkit's '0.1 Torso' too, which stands in for "
+              "'0.1 c0201b0001_bibo': resized as clothing" in notes, "substitutes: a part stands in for one mesh")
+    check(bodyparts.find_substitutes(meshes, job, set(), set()) == ({}, []), "substitutes: none without sizes")
+
+
 def test_custom_property_settings():
     body, _garments, driver = resize.driver_body()
     settings, problems = listed(body)
@@ -1422,9 +1523,11 @@ def test_sizes_operator():
                                                "({:.2g} m off)".format(np.abs(got - expected).max()))
 
     part = resize.devkit_part(body)
-    select_only(list(garments.values()) + [part])
-    check(bpy.ops.magic_fit.resize() == {'FINISHED'} and part.data.shape_keys.key_blocks.get("Medium Rue") is None,
-          "several: a body part selected along isn't resized")
+    piercing = resize.devkit_piercing(part)
+    select_only(list(garments.values()) + [part, piercing])
+    check(bpy.ops.magic_fit.resize() == {'FINISHED'} and part.data.shape_keys.key_blocks.get("Medium Rue") is None
+          and [block.name for block in piercing.data.shape_keys.key_blocks] == ["Basis", "Rue"],
+          "several: a body part selected along isn't resized, nor a piercing following it")
 
     settings.resize_to_object = copy
     picks = operators.resize_sizes(settings)
@@ -1484,14 +1587,25 @@ def test_resize_collection():
     bpy.context.scene.collection.children.link(collection)
     for obj in list(garments.values()) + [part, body]:
         collection.objects.link(obj)
+    # The model's copy of the devkit's Torso.
+    devkit = resize.devkit_part(body, "0.1 Torso")
+    _export, skin, _stud = resize.export_copies(devkit, resize.devkit_piercing(devkit), collection)
     sizes = api.picked_sizes()
     check([(size.name, size.now) for size in sizes] == [("Large Rue", False), ("Medium Rue", False)],
           "api: the sizes picked ({!s})".format(sizes))
+    substituted = api.resize_collection(collection, substitute=True)
+    check(api.VERSION == 3 and [sized.substitutes for sized in substituted] == [{skin: devkit}] * 2
+          and all(skin not in sized.keys for sized in substituted) and skin.data.shape_keys is None
+          and devkit in substituted[1].parts, "api: with substitute, the skin's copy is exported as the devkit's "
+                                              "Torso instead, not resized")
+    check(substituted[1].notes.count("'0.1 c0201b0001_bibo' is exported as the devkit's '0.1 Torso'") == 1,
+          "api: ...said once ({!s})".format(substituted[1].notes))
     results = api.resize_collection(collection)
     check([result.name for result in results] == ["Large Rue", "Medium Rue"], "api: a result per size")
     medium = results[1]
-    check(set(medium.keys) == set(garments.values()) and part in medium.parts and body not in medium.parts,
-          "api: clothing resized, the body part set, the body left out")
+    check(set(medium.keys) == set(garments.values()) | {skin} and part in medium.parts and body not in medium.parts
+          and not medium.substitutes, "api: clothing resized, the skin's copy too, the body part set, the body left "
+                                      "out")
     # Its keys the torso's settings drive are worked out; the others take the body's values by name.
     check(medium.parts.get(part) == {"MEDIUM": 1.0, "Rue": 1.0, "- Squeeze": 0.0, "Rue/Follow": 1.0},
           "api: the part's keys at the size")
@@ -1499,22 +1613,26 @@ def test_resize_collection():
     blocks = suit.data.shape_keys.key_blocks
     check([block.value for block in blocks][1:] == [0.0, 0.0], "api: the clothing shows its own shape still")
     part_keys = part.data.shape_keys
+    torso = bpy.context.scene.ya_devkit_props.torso_state
     drivers_before = [curve.mute for curve in part_keys.animation_data.drivers]
-    states_before = key_states(part), key_states(suit)
+    states_before = key_states(part), key_states(suit), torso_state()
+    body_before = devkit_state()
     with medium.shown():
         check(blocks[medium.keys[suit]].value == 1.0 and blocks[results[0].keys[suit]].value == 0.0,
               "shown: the clothing's key for the size on")
+        check(torso.chest_size == "1" and torso.rue and devkit_state() == body_before,
+              "shown: the settings the part follows switched to the size, the body's not")
         check(part_keys.key_blocks["MEDIUM"].value == 1.0 and part_keys.key_blocks["Rue"].value == 1.0
-              and all(curve.mute for curve in part_keys.animation_data.drivers
-                      if curve.data_path.split('"')[1] in ("MEDIUM", "Rue")),
-              "shown: the part's keys set, their drivers muted meanwhile")
-        bpy.context.view_layer.update()
+              and not any(curve.mute for curve in part_keys.animation_data.drivers),
+              "shown: the part's driven keys follow their drivers")
+        check(part_keys.key_blocks["Rue/Follow"].value == 1.0 and part_keys.key_blocks["- Squeeze"].value == 0.0,
+              "shown: its keys nothing drives set as the body's")
         evaluated = suit.evaluated_get(bpy.context.evaluated_depsgraph_get()).data
         co = np.empty(len(evaluated.vertices) * 3)
         evaluated.vertices.foreach_get("co", co)
         check(np.allclose(co.reshape(-1, 3), resize.positions(suit, medium.keys[suit]), atol=1e-6),
               "shown: what an export reads is the size")
-    check((key_states(part), key_states(suit)) == states_before
+    check((key_states(part), key_states(suit), torso_state()) == states_before
           and [curve.mute for curve in part_keys.animation_data.drivers] == drivers_before,
           "shown: everything put back afterwards")
     try:
@@ -1522,13 +1640,155 @@ def test_resize_collection():
             raise RuntimeError("export failed")
     except RuntimeError:
         pass
-    check((key_states(part), key_states(suit)) == states_before, "shown: put back after an error too")
+    check((key_states(part), key_states(suit), torso_state()) == states_before, "shown: put back after an error too")
 
     again = api.resize_collection(list(garments.values()) + [part], [{"chest_size": 2}, {"chest_size": 0}])
     check([(result.name, result.size.now) for result in again] == [("Small", False), ("Large", True)]
           and all(name is None for name in again[1].keys.values()) and not again[1].parts,
           "api: sizes given, the one the body shows kept as it is ({!s})".format(again))
     check(sum(1 for block in blocks if block.name == "Small") == 1, "api: the key for the size given")
+
+
+def evaluated_weight(obj, group):
+    """The weight of the first vertex of ``obj`` in its vertex group ``group``, after its modifiers."""
+    mesh = obj.evaluated_get(bpy.context.evaluated_depsgraph_get()).data
+    index = obj.vertex_groups[group].index
+    return next((element.weight for element in mesh.vertices[0].groups if element.group == index), 0.0)
+
+
+def evaluated_positions(obj):
+    mesh = obj.evaluated_get(bpy.context.evaluated_depsgraph_get()).data
+    co = np.empty(len(mesh.vertices) * 3)
+    mesh.vertices.foreach_get("co", co)
+    return co.reshape(-1, 3)
+
+
+def driver_mutes(obj):
+    return [curve.mute for curve in obj.data.shape_keys.animation_data.drivers]
+
+
+def test_shown_switches_state():
+    """Exporting the devkit's parts in place of a model's copies: showing a size switches the settings they follow."""
+    body, garments = resize.devkit_body()
+    part = resize.devkit_part(body, "0.1 Torso")
+    piercing = resize.devkit_piercing(part)
+    # As the devkit's collections: Chest and Hands in a collection of the devkit's.
+    devkit, chest, hands = (bpy.data.collections.new(name) for name in ("Devkit", "Chest", "Hands"))
+    bpy.context.scene.collection.children.link(devkit)
+    devkit.children.link(chest)
+    devkit.children.link(hands)
+    for obj in (part, piercing):
+        bpy.context.scene.collection.objects.unlink(obj)
+        chest.objects.link(obj)
+    _export, skin, stud = resize.export_copies(part, piercing)
+    # Body parts of the model's own: following settings that can't be set (their add-on isn't running), and
+    # following the From body's settings.
+    gone = resize.devkit_part(body, "0.4 Gone", group="gone_state")
+    copied = resize.devkit_part(body, "0.5 Copied", group="mannequin_state")
+    settings = reset_settings()
+    settings.resize_from_object = body
+    settings.resize_use_sizes = True
+    bpy.ops.magic_fit.resize_pick(setting="chest_size", option=1)
+    bpy.ops.magic_fit.resize_pick(setting="rue", option=1)
+    meshes = list(garments.values()) + [skin, stud, gone, copied]
+    check(not api.Resizer(meshes).substitutes, "state: no substitutes without asking")
+    resizer = api.Resizer(meshes, substitute=True)
+    check(resizer.substitutes == {skin: part, stud: piercing} and set(resizer.parts) == {gone, copied}
+          and set(resizer.clothing) == set(garments.values()),
+          "state: the copies stand for the devkit's parts, neither resized nor body parts")
+    sized = resizer.resize(resizer.sizes[0])
+    check(sized.name == "Medium Rue" and skin not in sized.keys and stud not in sized.keys
+          and sized.substitutes == resizer.substitutes and part in sized.parts, "state: resized")
+    gone_note = ("'0.4 Gone' can't be switched to the sizes: 'ya_devkit_props.gone_state.chest_size' can't be set "
+                 "(is the devkit's script running?). Only the shape keys Magic Fit works out are set, its modifiers "
+                 "stay as they are")
+    check(sized.notes == ["'0.1 c0201b0001_bibo' is exported as the devkit's '0.1 Torso'",
+                          "'1.0 c0201b0001_piercings' is exported as the devkit's '1.0 Piercing B'", gone_note],
+          "state: the matches and a part that can't be switched said ({!s})".format(sized.notes))
+    check(resizer.resize(resizer.sizes[0]).notes == [], "state: ...once")
+
+    torso = bpy.context.scene.ya_devkit_props.torso_state
+    view_layer = bpy.context.view_layer
+    outer = view_layer.layer_collection.children[devkit.name]
+    layer, hands_layer = outer.children[chest.name], outer.children[hands.name]
+    modifier = part.modifiers["Rue Weights"]
+    blocks, stud_blocks = part.data.shape_keys.key_blocks, piercing.data.shape_keys.key_blocks
+    piercing_at = evaluated_positions(piercing)
+
+    def state():
+        return (torso_state(), devkit_state(), key_states(part), key_states(piercing), key_states(gone),
+                key_states(copied), driver_mutes(part), driver_mutes(gone), driver_mutes(copied),
+                modifier.show_viewport, [(each.exclude, each.hide_viewport) for each in (outer, layer, hands_layer)],
+                part.hide_viewport, piercing.hide_viewport,
+                piercing.hide_get() if piercing.name in view_layer.objects else None)
+
+    for hidden in ("excluded", "hidden", "excluded around"):
+        if hidden == "excluded":
+            layer.exclude = True
+        elif hidden == "hidden":
+            layer.hide_viewport = True
+            part.hide_viewport = True
+            piercing.hide_set(True)
+        else:
+            hands_layer.exclude = True
+            outer.exclude = True
+        before = state()
+        with sized.shown():
+            check(torso.chest_size == "1" and torso.rue and devkit_state() == before[1],
+                  "state ({:s}): the Torso's settings switched, the body's not".format(hidden))
+            check(blocks["MEDIUM"].value == 1.0 and blocks["Rue"].value == 1.0 and not any(driver_mutes(part)),
+                  "state ({:s}): its keys follow their drivers".format(hidden))
+            weight = evaluated_weight(part, resize.WEIGHT_GROUP)
+            check(modifier.show_viewport and abs(weight - resize.RUE_WEIGHT) < 1e-6,
+                  "state ({:s}): ...and its weights, Rue's ({:.3f})".format(hidden, weight))
+            moved = evaluated_positions(piercing) - piercing_at
+            check(stud_blocks["Rue"].value == 1.0 and np.allclose(moved, (0.0, -resize.PIERCING_RUE, 0.0), atol=1e-6),
+                  "state ({:s}): Piercing B follows the Torso".format(hidden))
+            check(not layer.exclude and not layer.hide_viewport and part.visible_get() and piercing.visible_get(),
+                  "state ({:s}): the substitutes shown".format(hidden))
+            hand = [(obj.data.shape_keys.key_blocks["MEDIUM"].value, obj.data.shape_keys.key_blocks["Rue"].value,
+                     all(curve.mute for curve in obj.data.shape_keys.animation_data.drivers
+                         if curve.data_path.split('"')[1] in ("MEDIUM", "Rue"))) for obj in (gone, copied)]
+            check(hand == [(1.0, 1.0, True)] * 2, "state ({:s}): parts that can't be switched set by hand ({!s})".format(
+                hidden, hand))
+        check(state() == before, "state ({:s}): everything put back".format(hidden))
+        try:
+            with sized.shown():
+                raise RuntimeError("export failed")
+        except RuntimeError:
+            pass
+        check(state() == before, "state ({:s}): ...after an error too".format(hidden))
+        outer.exclude = hands_layer.exclude = layer.exclude = False
+        layer.hide_viewport = part.hide_viewport = False
+        piercing.hide_set(False)
+
+    # The devkit's callbacks: a Masc chest turns Lavabod off (a setting the size doesn't name), and it comes back.
+    torso.lavabod = True
+    torso.chest_size = "2"
+    # (Without the parts whose settings can't be read: a size that doesn't name them all can't be worked out.)
+    meshes = list(garments.values()) + [skin, stud]
+    masc = api.Resizer(meshes, [{"chest_size": 3, "rue": 1}], substitute=True).resize({"chest_size": 3, "rue": 1})
+    before = state()
+    with masc.shown():
+        check(torso.chest_size == "3" and not torso.lavabod and torso.rue, "state: a Masc chest without Lavabod")
+    check(state() == before and torso.lavabod and torso.chest_size == "2",
+          "state: Lavabod and its chest back afterwards")
+    torso.lavabod = False
+    torso.chest_size = "0"
+
+    # A size of settings the Resizer's sizes don't name switches them too.
+    chests = api.Resizer(meshes, [{"chest_size": 1}], substitute=True)
+    with chests.resize({"rue": 1, "buff": 1}).shown():
+        check(torso.rue and torso.buff and blocks["Rue"].value == 1.0 and blocks["Buff"].value == 1.0,
+              "state: a size given afterwards switched too")
+    check(not torso.rue and not torso.buff, "state: ...and back")
+
+    # From the Torso, whose settings are never switched: Piercing B can't follow it, so its copy is resized.
+    settings.resize_from_object = part
+    stuck = api.Resizer(meshes + [piercing], [{"chest_size": 1, "rue": 1}], substitute=True)
+    check(stud in stuck.clothing and piercing in stuck.clothing and not stuck.substitutes,
+          "state: a part following only a From body's settings is resized as before ({!s})".format(stuck.substitutes))
+    settings.resize_from_object = body
 
 
 def test_resize_collection_as_is():
