@@ -17,8 +17,9 @@ Garments, all fitted to the large breasts:
 
 `devkit_body` builds the same scene with the body's keys driven like Yet Another Devkit's Mannequin, by
 stand-ins for the devkit's settings, and `devkit_part` a body part of it, driven from another group of settings like
-the devkit's Torso. `driver_body` drives the keys from custom properties of an object named Driver, like the RueXB
-devkit.
+the devkit's Torso, with a modifier swapping its weights for Rue's; `devkit_piercing` a navel piercing whose key
+follows that modifier, like the devkit's Piercing B, and `export_copies` the copies of both a model carries.
+`driver_body` drives the keys from custom properties of an object named Driver, like the RueXB devkit.
 """
 
 import bpy
@@ -257,12 +258,18 @@ def _chest_items(_self, _context):
     return _CHESTS
 
 
+def _masc_lavabod(self, _context):
+    # As the devkit does: Lavabod has no Masc chest.
+    if self.lavabod and self.chest_size == "3":
+        self.lavabod = False
+
+
 class DevkitKeptKey(bpy.types.PropertyGroup):
     value: FloatProperty()
 
 
 class DevkitState(bpy.types.PropertyGroup):
-    chest_size: EnumProperty(items=_chest_items)
+    chest_size: EnumProperty(items=_chest_items, update=_masc_lavabod)
     leg_size: EnumProperty(items=[(str(index), name, "") for index, name in enumerate(
         ("Melon", "Skull", "Yanilla", "Masc", "Lavabod", "Mini"))])
     rue: BoolProperty()
@@ -354,9 +361,19 @@ def devkit_body():
     return body, garments
 
 
-def devkit_part(body, name="Torso"):
+# The game's materials for the skin and for piercings, as a model names them.
+SKIN_MATERIAL = "/mt_c0201b0001_bibo.mtrl"
+PIERCINGS_MATERIAL = "/mt_c0201b0001_piercings.mtrl"
+# The weight of the devkit part's vertices in WEIGHT_GROUP, and with Rue (its "Rue Weights" modifier on).
+WEIGHT_GROUP = "j_kosi"
+YAB_WEIGHT, RUE_WEIGHT = 0.8, 0.69
+
+
+def devkit_part(body, name="Torso", group="torso_state"):
     """A body part of the devkit body ``body``: a copy of it whose keys the torso's settings drive (as the devkit's
-    Torso, from torso_state): MEDIUM, Rue and Buff."""
+    Torso, from ``group``): MEDIUM, Rue and Buff. Drawn with the game's skin material (its ``xiv_material``), its
+    vertices weigh YAB_WEIGHT in WEIGHT_GROUP, and as the devkit's Torso swaps in Rue's weights, a Data Transfer
+    modifier "Rue Weights", on while its Rue key is (by a driver), gives them RUE_WEIGHT from another mesh."""
     part = body.copy()
     part.data = body.data.copy()
     part.name = name
@@ -367,10 +384,98 @@ def devkit_part(body, name="Torso"):
         block.value = 0.0
     keys.key_blocks["- Squeeze"].value = 0.3
     drive(keys, "MEDIUM", 'value', "size == 1 and lava == 0", (("size", "chest_size"), ("lava", "lavabod")),
-          group="torso_state")
+          group=group)
     for key, setting in (("Rue", "rue"), ("Buff", "buff")):
-        drive(keys, key, 'value', "option == 1", (("option", setting),), group="torso_state")
+        drive(keys, key, 'value', "option == 1", (("option", setting),), group=group)
+    part["xiv_material"] = SKIN_MATERIAL
+    every = list(range(len(part.data.vertices)))
+    part.vertex_groups.new(name=WEIGHT_GROUP).add(every, YAB_WEIGHT, 'REPLACE')
+    source = mesh_object(name + " Rue Source", positions(body, "Basis"),
+                         [tuple(polygon.vertices) for polygon in body.data.polygons])
+    source.vertex_groups.new(name=WEIGHT_GROUP).add(every, RUE_WEIGHT, 'REPLACE')
+    modifier = part.modifiers.new("Rue Weights", 'DATA_TRANSFER')
+    modifier.object = source
+    modifier.use_vert_data = True
+    modifier.data_types_verts = {'VGROUP_WEIGHTS'}
+    modifier.vert_mapping = 'NEAREST'
+    modifier.layers_vgroup_select_src = 'ALL'
+    modifier.layers_vgroup_select_dst = 'NAME'
+    modifier.show_viewport = False
+    driver = modifier.driver_add("show_viewport").driver
+    driver.type = 'AVERAGE'
+    var = driver.variables.new()
+    var.name = "value"
+    var.type = 'SINGLE_PROP'
+    var.targets[0].id_type = 'KEY'
+    var.targets[0].id = keys
+    var.targets[0].data_path = 'key_blocks["Rue"].value'
     return part
+
+
+def drive_by_object(keys, name, obj, path):
+    """Drive the value of shape key ``name`` of ``keys`` (a Key) by property ``path`` of object ``obj``."""
+    driver = keys.key_blocks[name].driver_add("value").driver
+    driver.type = 'AVERAGE'
+    var = driver.variables.new()
+    var.name = "value"
+    var.type = 'SINGLE_PROP'
+    var.targets[0].id_type = 'OBJECT'
+    var.targets[0].id = obj
+    var.targets[0].data_path = path
+
+
+# Where the devkit's navel piercing sits, below the chest, and how far its Rue key moves it forward.
+NAVEL_Z = -0.1
+PIERCING_RUE = 0.01
+
+
+def devkit_piercing(part, name="1.0 Piercing B", modifier="Rue Weights"):
+    """A navel piercing of devkit part ``part``, as the devkit's Piercing B: a small cube drawn with the game's
+    piercings material, whose "Rue" key (moving it PIERCING_RUE forward) is driven by the part's modifier
+    ``modifier`` being on, which the part's Rue key switches."""
+    front = float(body_front(np.array(0.0), np.array(NAVEL_Z)))
+    co, faces = cube((0.0, front - 0.003, NAVEL_Z), 0.006)
+    obj = mesh_object(name, co, faces)
+    material = bpy.data.materials.get(PIERCINGS_MATERIAL) or bpy.data.materials.new(PIERCINGS_MATERIAL)
+    obj.data.materials.append(material)
+    obj.shape_key_add(name="Basis", from_mix=False)
+    key = obj.shape_key_add(name="Rue", from_mix=False)
+    key.data.foreach_set("co", (co + (0.0, -PIERCING_RUE, 0.0)).astype(np.float32).ravel())
+    key.value = 0.0
+    drive_by_object(obj.data.shape_keys, "Rue", part, 'modifiers["{:s}"].show_viewport'.format(modifier))
+    return obj
+
+
+def mixed(obj):
+    """World space positions of ``obj`` in the shape its shape keys give it now."""
+    keys = obj.data.shape_keys
+    co = positions(obj, keys.reference_key.name)
+    for block in keys.key_blocks:
+        if block != keys.reference_key and not block.mute and block.value:
+            co = co + block.value * (positions(obj, block.name) - positions(obj, block.relative_key.name))
+    return co
+
+
+def export_copies(part, piercing, collection=None):
+    """Copies of devkit part ``part`` and its piercing ``piercing`` as a model made with the devkit carries them, as
+    Instant Edit imports it: without shape keys, in the shape their keys give them now, named after their slot and
+    material, the piercing's hidden (the game doesn't draw it). Linked to ``collection`` (a new one, "Export", when
+    None). Returns (the collection, the skin's copy, the piercing's copy)."""
+    if collection is None:
+        collection = bpy.data.collections.new("Export")
+        bpy.context.scene.collection.children.link(collection)
+    copies = []
+    for obj, name in ((part, "0.1 c0201b0001_bibo"), (piercing, "1.0 c0201b0001_piercings")):
+        copy = mesh_object(name, mixed(obj), [tuple(polygon.vertices) for polygon in obj.data.polygons])
+        bpy.context.scene.collection.objects.unlink(copy)
+        collection.objects.link(copy)
+        for slot in obj.material_slots:
+            copy.data.materials.append(slot.material)
+        if "xiv_material" in obj:
+            copy["xiv_material"] = obj["xiv_material"]
+        copies.append(copy)
+    copies[1].hide_set(True)
+    return collection, copies[0], copies[1]
 
 
 def driver_body():

@@ -19,6 +19,11 @@ from other meshes.
 Yet Another Devkit's script also does a few things its drivers don't show, and `_Yab` does them along: Lavabod
 has no Masc chest, Alt Hips goes off with the leg sizes past Yanilla, and switching Lavabod gives the chest's
 sub-keys the values they had the last time.
+
+A part's keys can also follow another part's: the YAB devkit's Piercing B is driven by a modifier of the Torso,
+whose visibility a Torso key drives (`follows`, `state_sources`). A size export switches the devkit's settings
+themselves (`set_setting`), so its parts take a size as its own UI puts them in it, weights and all, and puts them
+back afterwards (`keep_settings`).
 """
 
 import ast
@@ -429,15 +434,24 @@ def _is_yab(settings):
 # -----------------------------------------------------------------------------
 # Working the drivers out
 
-def _settings_read(closure):
-    """{name: (owner, path)} of the settings the drivers of Keys ``closure`` read, the first place each is read."""
-    found = {}
+def _setting_reads(closure):
+    """(name, owner, path) of the settings the drivers of Keys ``closure`` read, each place once."""
+    found, places = [], set()
     for keys in closure:
         for curve in _key_drivers(keys).values():
             for var in curve.driver.variables:
                 setting = _setting_path(var)
-                if setting is not None:
-                    found.setdefault(setting[2], setting[:2])
+                if setting is not None and (setting[0].as_pointer(), setting[1]) not in places:
+                    places.add((setting[0].as_pointer(), setting[1]))
+                    found.append((setting[2], setting[0], setting[1]))
+    return found
+
+
+def _settings_read(closure):
+    """{name: (owner, path)} of the settings the drivers of Keys ``closure`` read, the first place each is read."""
+    found = {}
+    for name, owner, path in _setting_reads(closure):
+        found.setdefault(name, (owner, path))
     return found
 
 
@@ -587,18 +601,87 @@ def size_values(obj, size, body_values=None):
     return result
 
 
-def follows(obj, names, key_names=()):
+def follows(obj, names, key_names=(), through=True, _seen=None):
     """Whether mesh ``obj`` has shape keys that follow the settings ``names``: keys driven by them (or copying keys
-    driven by them), or keys named in ``key_names`` that nothing drives."""
+    driven by them), keys named in ``key_names`` that nothing drives, or with ``through``, keys driven by a property
+    of another mesh that follows them (the YAB devkit's Piercing B reads the Torso's modifier, which a Torso key
+    switches)."""
     keys = _mesh_keys(obj)
     if keys is None:
         return False
+    seen = set() if _seen is None else _seen
+    seen.add(obj.as_pointer())
+    closure = _linked_keys(keys)
     names = set(names)
-    if names & set(_settings_read(_linked_keys(keys))):
+    if names & set(_settings_read(closure)):
         return True
     plain = {name[len(KEY_PREFIX):] for name in names if name.startswith(KEY_PREFIX)} | set(key_names)
-    return any(block.name in plain and block != keys.reference_key and not _driven(keys, block, "value")
-               for block in keys.key_blocks)
+    if any(block.name in plain and block != keys.reference_key and not _driven(keys, block, "value")
+           for block in keys.key_blocks):
+        return True
+    return through and any(other.as_pointer() not in seen and follows(other, names, key_names, True, seen)
+                           for other in _read_meshes(closure))
+
+
+def _read_meshes(closure):
+    """The mesh objects whose properties the drivers of Keys ``closure`` read, other than their shape keys (a
+    modifier's visibility)."""
+    found = []
+    for keys in closure:
+        for curve in _key_drivers(keys).values():
+            for var in curve.driver.variables:
+                if var.type != 'SINGLE_PROP':
+                    continue
+                target = var.targets[0]
+                other = target.id
+                if (isinstance(other, bpy.types.Object) and other.type == 'MESH' and target.data_path
+                        and _KEY_PATH.search(target.data_path) is None and other not in found):
+                    found.append(other)
+    return found
+
+
+def _chain(obj, seen=None):
+    """The Keys the shape keys of mesh ``obj`` follow: its own and those they copy (see _linked_keys), then those of
+    the meshes whose properties their drivers read, and so on. Returns a list of those lists, ``obj``'s first."""
+    keys = _mesh_keys(obj)
+    seen = set() if seen is None else seen
+    if keys is None or obj.as_pointer() in seen:
+        return []
+    seen.add(obj.as_pointer())
+    closure = _linked_keys(keys)
+    result = [closure]
+    for other in _read_meshes(closure):
+        result.extend(_chain(other, seen))
+    return result
+
+
+def setting_sources(obj):
+    """(name, owner, path) of every place a setting is read along the chain the shape keys of mesh ``obj`` follow
+    (see _chain): the Torso's keys read ``ya_devkit_props.torso_state.*``; Piercing B's key reads a modifier of the
+    Torso, so its sources are the Torso's. Settings are those body_settings lists (a modifier's visibility is none),
+    and those that can't be read (the devkit's script isn't running)."""
+    found, places = [], set()
+    for closure in _chain(obj):
+        for name, owner, path in _setting_reads(closure):
+            held = _holder(owner, path)
+            if (owner.as_pointer(), path) not in places and (held is None or _kind(*held) is not None):
+                places.add((owner.as_pointer(), path))
+                found.append((name, owner, path))
+    return found
+
+
+def state_sources(obj):
+    """{setting name: (owner, path)} of the settings the shape keys of mesh ``obj`` follow (see setting_sources),
+    the first place each is read."""
+    found = {}
+    for name, owner, path in setting_sources(obj):
+        found.setdefault(name, (owner, path))
+    return found
+
+
+def chain_keys(obj):
+    """The Keys along the chain the shape keys of mesh ``obj`` follow (see _chain)."""
+    return [keys for closure in _chain(obj) for keys in closure]
 
 
 # -----------------------------------------------------------------------------
@@ -985,3 +1068,132 @@ def size_label(settings, size, now=None, varied=()):
         elif option is None:
             words.append("{:s} {:g}".format(setting.label, value))
     return " ".join(words)
+
+
+# -----------------------------------------------------------------------------
+# Switching settings
+
+# Putting settings back, their add-on's callbacks may change others along (the YAB devkit turns Lavabod off for the
+# Masc chest): those are set again, at most this many times over.
+RESTORE_PASSES = 4
+
+
+def _stored(holder, name, custom):
+    """A setting's value as its property keeps it (an enum's identifier)."""
+    return holder[name] if custom else getattr(holder, name)
+
+
+def can_set(owner, path):
+    """Whether the setting at ``path`` of ``owner`` can be set: the path resolves (its add-on is running) to a
+    setting (see _kind)."""
+    found = _holder(owner, path)
+    return found is not None and _kind(*found) is not None
+
+
+def _enum_identifier(holder, name, value):
+    """The identifier of the item of enum ``name`` of ``holder`` that drivers read as ``value``, or None."""
+    prop = holder.bl_rna.properties[name]
+    if len(prop.enum_items):
+        return next((item.identifier for item in prop.enum_items if float(item.value) == value), None)
+    identifiers = _enum_identifiers(holder, name)
+    whole = float(value).is_integer()
+    if identifiers and all(item.isdigit() for item in identifiers):
+        identifier = str(int(value)) if whole else None
+        return identifier if identifier in identifiers else None
+    index = int(value) if whole else -1
+    return identifiers[index] if 0 <= index < len(identifiers) else None
+
+
+def _put(owner, holder, name, custom, stored):
+    """Give the property ``stored`` (as it keeps it) unless it has it already, so its add-on's callbacks run only
+    for a change. Returns whether it has it now."""
+    try:
+        if _stored(holder, name, custom) == stored:
+            return True
+        if custom:
+            holder[name] = stored
+            # Blender doesn't see a custom property set from Python change.
+            owner.update_tag()
+        else:
+            setattr(holder, name, stored)
+    except (TypeError, ValueError, AttributeError, KeyError):
+        return False
+    return True
+
+
+def set_setting(owner, path, value):
+    """Set the setting at ``path`` of ``owner`` to ``value`` as its drivers read it: an enum to the item they read
+    as that number, a switch on or off, a number keeping its type. Its add-on's callbacks run as when it's set by
+    hand. Returns whether it could be set."""
+    found = _holder(owner, path)
+    if found is None:
+        return False
+    holder, name, custom = found
+    kind = _kind(holder, name, custom)
+    if kind is None:
+        return False
+    if custom:
+        old = holder[name]
+        stored = bool(value) if isinstance(old, bool) else int(round(value)) if isinstance(old, int) else float(value)
+    elif kind == 'ENUM':
+        stored = _enum_identifier(holder, name, value)
+        if stored is None:
+            return False
+    elif kind == 'BOOL':
+        stored = bool(value)
+    else:
+        stored = int(round(value)) if holder.bl_rna.properties[name].type == 'INT' else float(value)
+    return _put(owner, holder, name, custom, stored)
+
+
+def keep_settings(sources):
+    """Remember the settings ``sources`` ((owner, path) pairs, in the order they're set) as they are, with what
+    their add-on's callbacks may change along: the other settings of their property groups (the YAB devkit turns
+    Lavabod off for a Masc chest), and the chest's sub-key values Yet Another Devkit keeps for each body (see
+    _Yab.KEPT_KEYS). Returns a function putting it all back: the settings in the opposite order, again while
+    their callbacks change one another."""
+    saved, held = [], set()
+
+    def remember(owner, holder, name, custom):
+        if (holder.as_pointer(), name) not in held:
+            held.add((holder.as_pointer(), name))
+            saved.append((owner, (holder, name, custom), _stored(holder, name, custom)))
+    found = [(owner, _holder(owner, path)) for owner, path in sources]
+    for owner, place in found:
+        if place is not None:
+            remember(owner, *place)
+    for owner, place in found:
+        if place is not None and not place[2] and isinstance(place[0], bpy.types.PropertyGroup):
+            for prop in place[0].bl_rna.properties:
+                if prop.identifier != "rna_type" and _kind(place[0], prop.identifier, False) is not None:
+                    remember(owner, place[0], prop.identifier, False)
+    kept, groups = [], set()
+    for owner, path in sources:
+        if not _Yab.reads(path):
+            continue
+        try:
+            group = owner.path_resolve(path.rpartition(".")[0])
+        except ValueError:
+            continue
+        for attribute in _Yab.KEPT_KEYS.values():
+            items = getattr(group, attribute, None)
+            if items is not None and (group.as_pointer(), attribute) not in groups:
+                groups.add((group.as_pointer(), attribute))
+                kept.append((items, [(item.name, item.value) for item in items]))
+
+    def restore():
+        for _pass in range(RESTORE_PASSES):
+            changed = False
+            for owner, (holder, name, custom), stored in reversed(saved):
+                if _stored(holder, name, custom) != stored:
+                    _put(owner, holder, name, custom, stored)
+                    changed = True
+            if not changed:
+                break
+        for items, values in kept:
+            if [(item.name, item.value) for item in items] != values:
+                items.clear()
+                for name, value in values:
+                    item = items.add()
+                    item.name, item.value = name, value
+    return restore
