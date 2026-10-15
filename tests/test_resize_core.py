@@ -769,7 +769,7 @@ def test_shared():
                 entries.append(len(shared._entries))
         finally:
             resizing.CACHED_PAIRS = saved
-        check(worst < 1e-6 and entries[0] == entries[-1] == 6,
+        check(worst < 1e-6 and entries[0] == entries[-1] == 7,
               "shared: as each change alone ({:.2g} m off, {!s} entries{:s})".format(
                   worst, entries, ", pairs over the limit" if limit < saved else ""))
 
@@ -918,6 +918,25 @@ def test_keep_covered():
     same = resizing.ShapeChange(flat, flat, body_tris)
     check(np.array_equal(same.apply(sheet, edges=edge_list, cover=sheet_tris), sheet),
           "covered: no change, nothing moves")
+
+    # A chain of 20 links 4 mm long, each end 0.2 mm from the next link's, 6 mm in front of the chest, over the bump.
+    links, link_tris, rigid = [], [], []
+    for i in range(20):
+        x, first = -0.04 + 0.004 * i, 4 * i
+        links += [(x, -0.006, -0.001), (x + 0.0038, -0.006, -0.001), (x + 0.0038, -0.006, 0.001), (x, -0.006, 0.001)]
+        link_tris += [(first, first + 1, first + 2), (first, first + 2, first + 3)]
+        rigid += [i] * 4
+    links, link_tris, rigid = np.array(links), np.array(link_tris), np.array(rigid)
+    link_edges = np.concatenate([link_tris[:, [0, 1]], link_tris[:, [1, 2]], link_tris[:, [2, 0]]])
+    chain = grow.apply(links, rigid=rigid, edges=link_edges, cover=link_tris)
+    moved = chain - links
+    ends = np.array([(4 * i + 1, 4 * i + 4) for i in range(19)] + [(4 * i + 2, 4 * i + 7) for i in range(19)])
+    apart = np.linalg.norm(moved[ends[:, 0]] - moved[ends[:, 1]], axis=1).max()
+    check(apart < 0.001, "covered: a chain over the bump stays together ({:.2f} mm apart)".format(1000 * apart))
+    bvh = BVHTree.FromPolygons(bumped.tolist(), body_tris.tolist(), all_triangles=True)
+    inside = max(float(np.dot(np.array(near[0]) - point, near[1]))
+                 for point, near in ((point, bvh.find_nearest(point.tolist())) for point in chain))
+    check(inside < 0.0, "covered: ...and out over it ({:.2f} mm off)".format(-1000 * inside))
 
 
 def test_subdivide_for_sizes():
