@@ -107,6 +107,15 @@ COVER_SPREAD = 0.02
 COVER_RINGS = 16
 # A push that would turn triangles over is halved at their corners up to this many times, then left out.
 COVER_HALVINGS = 4
+# A rigid part moves whole, along the sum of its points' pushes, as far as its points need: those pushed at least this
+# much the way it moves (the cosine). Moving it gets the others out only slowly: a link in a cleavage closing over it,
+# pushed out by both breasts, was left a small push up or down, and went that way several times as far as it was
+# pushed out.
+COVER_RIGID_FACING = 0.5
+# The links of a chain (see RIGID_TOUCH) aren't pushed each its own way: the pushes are smoothed along the chain, each
+# link held to its neighbours this much more than to its own push (none, for a link that needs none). Pushed one by
+# one, neighbouring links went different ways and the chain came apart.
+COVER_CHAIN_STIFFNESS = 4.0
 
 # Rigid parts with this share of their points closer to the body than this lie on it: they follow its surface, as
 # skin does (see ShapeChange.bind), and grow or shrink with it (see keep_rigid).
@@ -759,18 +768,9 @@ class ShapeChange:
             members = np.flatnonzero(rigid >= 0)
             owner = near = small = chained = None
             if len(members):
-                _labels, part = np.unique(rigid[members], return_inverse=True)
-                part = part.reshape(-1)
-                from .fitting import _connected
-                touching = _touching(start[members], part)
-                group = _connected(int(part.max()) + 1, touching)[0]
-                _labels, owner = np.unique(group[part], return_inverse=True)
-                owner = owner.reshape(-1)
+                part, touching, owner, small = self._rigid_groups(start, rigid)
                 near = clothing.near(self)[copies][members] <= RIGID_ON_BODY
-                groups = int(owner.max()) + 1
-                # Groups no larger than RIGID_GROUP, or of a single part, aren't chains.
-                parts_in = np.bincount(np.unique(np.stack((owner, part), axis=1), axis=0)[:, 0], minlength=groups)
-                small = (part_sizes(start[members], owner, groups) <= RIGID_GROUP) | (parts_in == 1)
+                groups = len(small)
                 chained = ~small[owner]
                 # A small group by its share of points on the body, a chain's link by its own.
                 group_share = np.bincount(owner, weights=near) / np.bincount(owner)
@@ -821,7 +821,36 @@ class ShapeChange:
         fixed = np.zeros(len(start), dtype=bool) if fixed is None else np.asarray(fixed, dtype=bool)
         found = _shared(self._shared, ("cover", self._key, _digest(start, tris, fixed)),
                         lambda: _Cover(start, tris, source, fixed))
-        return keep_covered(found, moved, _surface(self.target, self.tris, like=source), rigid)
+        chain = None
+        if rigid is not None and (np.asarray(rigid) >= 0).any():
+            rigid = np.asarray(rigid)
+            part, touching, owner, small = self._rigid_groups(start, rigid)
+            chained = ~small[owner]
+            if chained.any():
+                link = np.full(len(start), -1, dtype=np.int64)
+                link[np.flatnonzero(rigid >= 0)[chained]] = part[chained]
+                chain = (link, touching, int(part.max()) + 1)
+        return keep_covered(found, moved, _surface(self.target, self.tris, like=source), rigid, chain)
+
+    def _rigid_groups(self, start, rigid):
+        """The rigid parts among points ``start`` (``rigid``, a label per point, -1 for none) and the groups of them
+        touching each other (see RIGID_TOUCH): (for each point in a part, its part, from 0; touching pairs of parts;
+        for each point in a part, its group, from 0; for each group, whether it's small, no larger than RIGID_GROUP or
+        of a single part, rather than a chain)."""
+        def find():
+            members = np.flatnonzero(rigid >= 0)
+            _labels, part = np.unique(rigid[members], return_inverse=True)
+            part = part.reshape(-1)
+            from .fitting import _connected
+            touching = _touching(start[members], part)
+            group = _connected(int(part.max()) + 1, touching)[0]
+            _labels, owner = np.unique(group[part], return_inverse=True)
+            owner = owner.reshape(-1)
+            groups = int(owner.max()) + 1
+            parts_in = np.bincount(np.unique(np.stack((owner, part), axis=1), axis=0)[:, 0], minlength=groups)
+            small = (part_sizes(start[members], owner, groups) <= RIGID_GROUP) | (parts_in == 1)
+            return part, touching, owner, small
+        return _shared(self._shared, ("rigid groups", _digest(start, rigid)), find)
 
     def bind(self, points):
         """Where ``points`` lying on the source shape (skin) go with the target shape: each keeps its spot
@@ -1158,7 +1187,7 @@ def _kept(height):
     return np.minimum(height, COVER_KEEP) - PUSH_SLACK
 
 
-def keep_covered(found, moved, body, rigid=None):
+def keep_covered(found, moved, body, rigid=None, chain=None):
     """Push clothing back out over the body after a move (Keep Covered).
 
     ``found`` (a _Cover) holds, from the source shape, the body under each point of the clothing and the clothing's
@@ -1170,7 +1199,9 @@ def keep_covered(found, moved, body, rigid=None):
     normal), the triangle's corners are pushed out until it covers the vertex as it did, each by its share of the
     spot over the vertex. Pushes go along the body's normal, and are spread to the clothing around within
     COVER_SPREAD so it comes along smoothly; rigid parts (``rigid``, a label per point, -1 for none) move whole, as far
-    as their point that needs it most, and fixed points (skin) never move. Only ever pushes out. Returns the new
+    as their point that needs it most (of those pushed about their way, see COVER_RIGID_FACING), and fixed points
+    (skin) never move. The links of a chain (``chain``: for each point its link, from 0, -1 for none; touching pairs of links;
+    how many links) move along with each other, see COVER_CHAIN_STIFFNESS. Only ever pushes out. Returns the new
     positions.
     """
     from .fitting import _barycentric
@@ -1180,6 +1211,12 @@ def keep_covered(found, moved, body, rigid=None):
     group = np.full(count, -1, dtype=np.int64)
     if rigid is not None:
         np.maximum.at(group, weld, np.asarray(rigid, dtype=np.int64))
+    links = None
+    if chain is not None:
+        link, link_pairs, link_count = chain
+        links = np.full(count, -1, dtype=np.int64)
+        np.maximum.at(links, weld, np.asarray(link, dtype=np.int64))
+        link_pairs = np.asarray(link_pairs, dtype=np.int64).reshape(-1, 2)
     # Points that lay over the body, near enough to sink into it.
     on_body = np.flatnonzero(np.isfinite(found.height) & (found.height > 0.0) & (found.height < COVER_REACH) & ~still)
     body_kept = _kept(found.height[on_body])
@@ -1236,11 +1273,24 @@ def keep_covered(found, moved, body, rigid=None):
             owner = owner.reshape(-1)
             way = np.stack([np.bincount(owner, weights=push[members, k], minlength=len(labels)) for k in range(3)], 1)
             way /= np.maximum(np.linalg.norm(way, axis=1, keepdims=True), 1e-12)
-            reach = need[members] / np.maximum(np.einsum("ij,ij->i", direction[members], way[owner]), 0.3)
+            facing = np.einsum("ij,ij->i", direction[members], way[owner])
+            reach = np.where(facing >= COVER_RIGID_FACING, need[members] / np.maximum(facing, 1e-12), 0.0)
             far = np.zeros(len(labels))
             np.maximum.at(far, owner, reach)
             whole = np.flatnonzero(np.isin(group, labels))
             step[whole] = (way * far[:, None])[np.searchsorted(labels, group[whole])]
+            if links is not None:
+                # A chain's links: their pushes spread along the chain.
+                link_of = np.full(len(labels), -1, dtype=np.int64)
+                link_of[owner] = links[members]
+                pushed_links = link_of >= 0
+                if pushed_links.any():
+                    values = np.zeros((link_count, 3))
+                    values[link_of[pushed_links]] = (way * far[:, None])[pushed_links]
+                    along = _screened_fill(values, np.ones(link_count), link_pairs, link_count,
+                                           COVER_CHAIN_STIFFNESS, 0.0)
+                    in_chain = np.flatnonzero(links >= 0)
+                    step[in_chain] = along[links[in_chain]]
         # The rest: each pushed point as far as it can without turning triangles over, the points around it along,
         # fading with the distance (a push held back isn't spread, or the clothing around would rise in its place).
         loose = pushed & (group < 0)
