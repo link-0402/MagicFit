@@ -770,9 +770,13 @@ class Resizer:
         if not self._pending:
             self._work.shared = None
         values = sizing.size_values(self.job.sized, size.values) if size is not None else {}
+        # The chest sliders every size shares, as the body has them: the parts take them at every size, whatever
+        # they had and whatever the devkit's script keeps for Lavabod.
+        shared = sizing.shared_keys(self.job.sized)
+        shows = sizing.size_values(self.job.sized, size.values, always=shared) if size is not None and shared else {}
         part_values = {}
         for part in self.parts + list(self.substitutes.values()):
-            changes = sizing.size_values(part, size.values, values) if size is not None else {}
+            changes = sizing.part_values(part, size.values, values, shared, shows) if size is not None else {}
             if changes:
                 part_values[part] = changes
         notes, self._notes = self._notes + notes, []

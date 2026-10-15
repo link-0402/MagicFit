@@ -1235,12 +1235,16 @@ def test_size_values():
           "sizes: Lavabod's medium chest isn't MEDIUM")
     check(sizing.size_values(body, {"lavabod": 1, "chest_size": 3}) == sizing.size_values(
         body, {"lavabod": 1, "chest_size": 2}), "sizes: Lavabod has no Masc chest, it takes Small")
-    check(sizing.size_values(body, {"lavabod": 1}) == {"Lavabod": 1.0, "- Squeeze": 0.0},
-          "sizes: switching Lavabod on the first time takes '- Squeeze' off, as the devkit does")
-    kept = state.lava_keys.add()
-    kept.name, kept.value = "- Squeeze", 0.5
-    check(sizing.size_values(body, {"lavabod": 1}) == {"Lavabod": 1.0, "- Squeeze": 0.5},
-          "sizes: ...or gives the sub-keys the values kept from last time")
+    check(sizing.size_values(body, {"lavabod": 1}) == {"Lavabod": 1.0},
+          "sizes: switching Lavabod keeps the chest's shared sliders ('- Squeeze') as the body has them, unlike "
+          "the devkit, which takes '- Squeeze' off the first time")
+    sag = body.shape_key_add(name="- Sag", from_mix=False)
+    for name in ("- Squeeze", "- Sag"):
+        kept = state.lava_keys.add()
+        kept.name, kept.value = name, 0.5
+    check(sizing.size_values(body, {"lavabod": 1}) == {"Lavabod": 1.0, "- Sag": 0.5},
+          "sizes: ...and gives the other sub-keys the values kept from last time, as the devkit does")
+    body.shape_key_remove(sag)
     state.alt_hips = True
     keys.key_blocks["Hip Dips (for YAB)"].value = 1.0
     check(sizing.size_values(body, {"leg_size": 1}) == {"Skull Crushers": 1.0},
@@ -1308,6 +1312,56 @@ def test_body_parts():
     check(sizing.follows(copy, names, body_values)
           and sizing.size_values(copy, {"chest_size": 1, "rue": 1}, body_values) == body_values,
           "parts: a copy without drivers takes the body's keys by name")
+
+
+def test_set_setting_runs_drivers():
+    """A setting set from Python runs the drivers reading it again, also one without an update callback (Rue)."""
+    body, _garments = resize.devkit_body()
+    part = resize.devkit_part(body)
+    bpy.context.view_layer.update()
+    blocks = part.data.shape_keys.key_blocks
+    modifier = part.modifiers["Rue Weights"]
+    seen = []
+    for value in (1.0, 0.0, 1.0, 0.0):
+        sizing.set_setting(bpy.context.scene, "ya_devkit_props.torso_state.rue", value)
+        bpy.context.view_layer.update()
+        seen.append((blocks["Rue"].value, modifier.show_viewport))
+    check(seen == [(1.0, True), (0.0, False), (1.0, True), (0.0, False)],
+          "set_setting: the part's key and modifier follow Rue ({!s})".format(seen))
+
+
+def test_shared_sliders():
+    """The chest sliders every size shares: a body part takes the body's at every size, whatever it has itself."""
+    body, garments = resize.devkit_body()
+    part = resize.devkit_part(body, "0.1 Torso")
+    body_blocks, blocks = body.data.shape_keys.key_blocks, part.data.shape_keys.key_blocks
+    check(sizing.shared_keys(body) == {"- Squeeze": body_blocks["- Squeeze"].value},
+          "shared: the body's chest sliders ({!s})".format(sizing.shared_keys(body)))
+    check(sizing.chest_sliders(body) == {"Squeeze": {0.0: body_blocks["- Squeeze"]}}, "shared: by chest size")
+    check(sizing.shared_settings({"gen": "ya_devkit_props.leg_state.gen", "squish": "", "rue": "ya_devkit_props.x.rue",
+                                  }) == {"gen": "Genitalia"}, "shared: the devkit's leg settings listed apart")
+    bpy.context.scene.ya_devkit_props.torso_state.chest_size = "0"
+    settings = reset_settings()
+    settings.resize_from_object = body
+    meshes = list(garments.values()) + [part]
+    for kind in ("plain", "muted by a driver"):
+        if kind != "plain":
+            # As the devkit's Torso: the sub-key is muted at the other chest sizes.
+            resize.drive(part.data.shape_keys, "- Squeeze", 'mute', "size != 0", (("size", "chest_size"),),
+                         group="torso_state")
+        blocks["- Squeeze"].value = 0.1
+        bpy.context.view_layer.update()
+        resizer = api.Resizer(meshes, [{"chest_size": 0}, {"chest_size": 1}])
+        large, medium = (resizer.resize(size) for size in resizer.sizes)
+        with large.shown():
+            check(abs(blocks["- Squeeze"].value - body_blocks["- Squeeze"].value) < 1e-6
+                  and not blocks["- Squeeze"].mute,
+                  "shared ({:s}): at the size the body shows, the part takes the body's slider".format(kind))
+        check(abs(blocks["- Squeeze"].value - 0.1) < 1e-6, "shared ({:s}): ...and gets its own back".format(kind))
+        with medium.shown():
+            off = blocks["- Squeeze"].mute if kind != "plain" else blocks["- Squeeze"].value == 0.0
+            check(blocks["MEDIUM"].value == 1.0 and off, "shared ({:s}): at Medium it's off, as on the body".format(
+                kind))
 
 
 def test_follows_through_part():
@@ -1644,8 +1698,10 @@ def test_resize_collection():
 
     again = api.resize_collection(list(garments.values()) + [part], [{"chest_size": 2}, {"chest_size": 0}])
     check([(result.name, result.size.now) for result in again] == [("Small", False), ("Large", True)]
-          and all(name is None for name in again[1].keys.values()) and not again[1].parts,
-          "api: sizes given, the one the body shows kept as it is ({!s})".format(again))
+          and all(name is None for name in again[1].keys.values())
+          and again[1].parts == {part: {"- Squeeze": part_keys.key_blocks["- Squeeze"].value}},
+          "api: sizes given, the one the body shows kept as it is, but for the part's shared sliders, synced "
+          "({!s}, {!s})".format(again, again[1].parts))
     check(sum(1 for block in blocks if block.name == "Small") == 1, "api: the key for the size given")
 
 
@@ -1722,7 +1778,7 @@ def test_shown_switches_state():
                 part.hide_viewport, piercing.hide_viewport,
                 piercing.hide_get() if piercing.name in view_layer.objects else None)
 
-    for hidden in ("excluded", "hidden", "excluded around"):
+    for hidden in ("shown", "excluded", "hidden", "excluded around"):
         if hidden == "excluded":
             layer.exclude = True
         elif hidden == "hidden":

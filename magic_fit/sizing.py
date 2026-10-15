@@ -369,6 +369,12 @@ class _Yab:
     # comes on, it takes this key off.
     KEPT_KEYS = {1: "lava_keys", 0: "yab_keys"}
     LAVA_OFF = "- Squeeze"
+    # Each chest size's sliders ('-- Squeeze' is Medium's, also Teardrop's) that every size takes as the body has
+    # them, Lavabod or not: they aren't swapped for kept ones, and the body parts take the body's (see shared_keys).
+    SHARED_KEYS = ("Squeeze", "Squish", "Push-Up")
+    SHARED_KEY = re.compile(r"(-{1,3}) (Squeeze|Squish|Push-Up)")
+    # The leg settings every size shares, as the Sizes section lists them apart: (name, label).
+    SHARED_SETTINGS = (("gen", "Genitalia"), ("squish", "Squish"))
     # Its properties have no names: these label them.
     LABELS = {"chest_size": "Chest", "leg_size": "Legs", "hand_size": "Hands", "gen": "Gen"}
     # Sizes are named in this order, after what changes in it, then after the other settings.
@@ -561,7 +567,7 @@ def _yab_kept_keys(keys, size, worked):
         kept = ()
     values = {item.name: item.value for item in kept} or ({_Yab.LAVA_OFF: 0.0} if lavabod else {})
     for name, value in values.items():
-        if keys.key_blocks.get(name) is not None:
+        if keys.key_blocks.get(name) is not None and _Yab.SHARED_KEY.fullmatch(name) is None:
             worked[(keys.as_pointer(), name, 'value')] = value
 
 
@@ -579,19 +585,20 @@ def _effective(keys, worked):
     return result
 
 
-def size_values(obj, size, body_values=None):
+def size_values(obj, size, body_values=None, always=()):
     """The shape keys of mesh ``obj`` that change at ``size`` ({setting name: value}, see Setting): {key name: value},
     0 for a key that would be muted. Nothing is switched: the drivers are worked out here, with the keys they copy
     from other meshes; keys named in ``size`` (KEY_PREFIX) take their values. ``body_values`` (the keys another
-    mesh changes, the body's) set the keys of ``obj`` of the same names that nothing drives. Raises ResizeError
-    when a driver involved can't be worked out."""
+    mesh changes, the body's) set the keys of ``obj`` of the same names that nothing drives. The keys named in
+    ``always`` are given even where they don't change. Raises ResizeError when a driver involved can't be worked
+    out."""
     keys = _mesh_keys(obj)
     if keys is None or not size:
         return {}
     worked = _work_out(keys, size)
     now = _effective(keys, {})
     after = _effective(keys, worked)
-    result = {name: value for name, value in after.items() if value != now[name]}
+    result = {name: value for name, value in after.items() if value != now[name] or name in always}
     for name, value in (body_values or {}).items():
         block = keys.key_blocks.get(name)
         if block is None or block == keys.reference_key or name in result or _driven(keys, block, "value"):
@@ -599,6 +606,52 @@ def size_values(obj, size, body_values=None):
         if value != now[name]:
             result[name] = value
     return result
+
+
+def shared_keys(obj):
+    """The chest sliders of mesh ``obj`` that every size shares (Yet Another Devkit's Squeeze, Squish and Push-Up of
+    each chest size, see _Yab.SHARED_KEYS), as their values are now: {key name: value}. A body part exported at a
+    size takes the From body's (see part_values), whatever the devkit's script kept for Lavabod."""
+    keys = _mesh_keys(obj)
+    if keys is None:
+        return {}
+    return {block.name: float(block.value) for block in keys.key_blocks
+            if _Yab.SHARED_KEY.fullmatch(block.name) is not None and not _driven(keys, block, "value")}
+
+
+def part_values(part, size, body_values, shared, body_shows):
+    """The shape keys of body part ``part`` at ``size`` (see size_values, with ``body_values``, the body's keys that
+    change), its shared chest sliders always among them, as the body has them: ``shared`` (shared_keys of the body)
+    where a driver mutes them as the size does (the devkit's Torso), else as the body shows them at the size
+    (``body_shows``, the body's size_values with those keys ``always``)."""
+    keys = _mesh_keys(part)
+    names = [name for name in shared_keys(part) if name in shared]
+    if keys is None or not names:
+        return size_values(part, size, body_values)
+    synced = {name: shared[name] if _driven(keys, keys.key_blocks[name], "mute") else body_shows.get(name, shared[name])
+              for name in names}
+    return size_values(part, {**size, **{KEY_PREFIX + name: value for name, value in synced.items()}}, body_values,
+                       always=names)
+
+
+def chest_sliders(obj):
+    """The shared chest sliders of mesh ``obj`` by chest size, to show: {slider name: {chest_size value: ShapeKey}}
+    (Small has no Squish or Push-Up)."""
+    keys = _mesh_keys(obj)
+    result = {}
+    if keys is None:
+        return result
+    for block in keys.key_blocks:
+        found = _Yab.SHARED_KEY.fullmatch(block.name)
+        if found is not None and not _driven(keys, block, "value"):
+            result.setdefault(found.group(2), {})[float(len(found.group(1)) - 1)] = block
+    return {name: result[name] for name in _Yab.SHARED_KEYS if name in result}
+
+
+def shared_settings(paths):
+    """{setting name: label} of the settings among ``paths`` ({setting name: the path its drivers read}) that the
+    Sizes section lists apart, as shared by every size (Yet Another Devkit's Genitalia and leg Squish), in order."""
+    return {name: label for name, label in _Yab.SHARED_SETTINGS if paths.get(name) and _Yab.reads(paths[name])}
 
 
 def follows(obj, names, key_names=(), through=True, _seen=None):
@@ -1112,12 +1165,13 @@ def _put(owner, holder, name, custom, stored):
             return True
         if custom:
             holder[name] = stored
-            # Blender doesn't see a custom property set from Python change.
-            owner.update_tag()
         else:
             setattr(holder, name, stored)
     except (TypeError, ValueError, AttributeError, KeyError):
         return False
+    # Blender doesn't see a property set from Python change (a custom one, or an add-on's without an update
+    # callback, like the YAB devkit's Rue): the drivers reading it would keep their values.
+    owner.update_tag()
     return True
 
 

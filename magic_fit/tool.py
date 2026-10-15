@@ -1133,11 +1133,12 @@ def _draw_key_search(layout, settings, prop, obj, text):
 SIZE_LABEL_SHARE = 0.4
 
 
-def _draw_size_setting(context, layout, item, labels):
-    """A size setting's row: its label, and a button per option, in as many rows as their labels need."""
+def _draw_size_setting(context, layout, item, labels, label=None):
+    """A size setting's row: its label (or ``label``), and a button per option, in as many rows as their labels
+    need."""
     split = layout.split(factor=SIZE_LABEL_SHARE)
     split.alignment = 'RIGHT'
-    split.label(text=item.label)
+    split.label(text=label or item.label)
     room = (context.region.width - SIDEBAR_MARGIN * context.preferences.system.ui_scale) * (1.0 - SIZE_LABEL_SHARE)
     widths = _label_widths(context, labels)
     # Spread evenly over the fewest rows they fit in.
@@ -1172,6 +1173,58 @@ def _draw_wrapped(context, layout, text, icon='NONE'):
         col.label(text=line, icon=icon if index == 0 else 'BLANK1')
 
 
+def _draw_shared(context, layout, settings, body, shared, sliders, picked):
+    """What every size shares: the chest sliders of each chest size picked, edited on ``body`` itself (``sliders``,
+    see sizing.chest_sliders), which the body parts take too, and the settings ``shared`` ({name: label}, see
+    sizing.shared_settings) with their picks."""
+    if sliders:
+        chest = settings.resize_sizes.get("chest_size")
+        if chest is not None:
+            values = sorted(picked("chest_size")) or [option.value for option in chest.options]
+            labels = [option.label for option in chest.options]
+            # Both bodies picked: a column is a YAB chest size and Lavabod's of the same keys.
+            names = [sizing.option_labels("chest_size", labels, lambda name, lava=lava: {lava} if name == "lavabod"
+                                          else picked(name)) for lava in (0.0, 1.0)]
+            # A row of column heads per body picked (Large, then Omoi).
+            heads = [{option.value: names[int(lava)][index] for index, option in enumerate(chest.options)}
+                     for lava in sorted(picked("lavabod") or {0.0})]
+            if len(heads) > 1 and heads[0] == heads[1]:
+                heads = heads[:1]
+        else:
+            values = sorted({value for blocks in sliders.values() for value in blocks})
+            heads = [{value: "{:g}".format(value) for value in values}]
+        values = [value for value in values if any(value in blocks for blocks in sliders.values())]
+        if values:
+            col = layout.column(align=True)
+            for words in heads:
+                split = col.split(factor=SIZE_LABEL_SHARE)
+                split.label(text="")
+                row = split.row(align=True)
+                for value in values:
+                    row.label(text=words.get(value, "{:g}".format(value)))
+            col = layout.column(align=True)
+            for name, blocks in sliders.items():
+                split = col.split(factor=SIZE_LABEL_SHARE)
+                split.alignment = 'RIGHT'
+                split.label(text=name)
+                row = split.row(align=True)
+                for value in values:
+                    block = blocks.get(value)
+                    if block is None:
+                        row.label(text="")
+                    else:
+                        row.prop(block, "value", text="", slider=True)
+    col = layout.column(align=True)
+    for name, label in shared.items():
+        item = settings.resize_sizes.get(name)
+        _draw_size_setting(context, col, item, sizing.option_labels(
+            name, [option.label for option in item.options], picked), label=label)
+    text = "Exported body parts take these too"
+    if sliders:
+        text = "The sliders are {:s}'s own keys. {:s}".format(body.name, text)
+    _draw_wrapped(context, layout.column(), text, icon='INFO')
+
+
 def _draw_resize_sizes(context, layout, settings, picks):
     """The Sizes section: the settings the To body's (else the From body's) shape keys follow, with the values to
     resize to, and the sizes that makes (``picks``, see resize_sizes)."""
@@ -1202,11 +1255,14 @@ def _draw_resize_sizes(context, layout, settings, picks):
         labels = sizing.option_labels(item.name, [option.label for option in item.options], picked)
         _draw_size_setting(context, layout, item, labels)
 
+    # The settings and chest sliders every size shares are listed apart.
+    shared = sizing.shared_settings({item.name: item.path for item in items})
+    sliders = sizing.chest_sliders(body)
     col = panel.column(align=True)
     for item in items:
-        if not item.more:
+        if not item.more and item.name not in shared:
             draw(col, item)
-    more = [item for item in items if item.more]
+    more = [item for item in items if item.more and item.name not in shared]
     if more:
         header, sub = panel.panel("magic_fit_resize_sizes_more", default_closed=True)
         header.label(text="More ({:d})".format(len(more)))
@@ -1214,6 +1270,11 @@ def _draw_resize_sizes(context, layout, settings, picks):
             col = sub.column(align=True)
             for item in more:
                 draw(col, item)
+    if shared or sliders:
+        header, sub = panel.panel("magic_fit_resize_sizes_shared", default_closed=False)
+        header.label(text="Shared by All Sizes")
+        if sub is not None:
+            _draw_shared(context, sub, settings, body, shared, sliders, picked)
     if picks is None:
         return
     col = panel.column()
