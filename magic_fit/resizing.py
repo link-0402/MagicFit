@@ -425,24 +425,47 @@ def _shares(groups, octave):
                 yield level, which[active], share[active]
 
 
-def bridged(co, tris, radius):
+def _welded(co, tris):
+    """``co`` with the vertices at the same spot (split seams) as one: (welded index per vertex, their count, welded
+    edges, welded positions)."""
+    from .fitting import _weld
+    weld, count, pairs = _weld(co, tris)
+    members = np.maximum(np.bincount(weld, minlength=count), 1).astype(np.float64)
+    welded = np.stack([np.bincount(weld, weights=co[:, k], minlength=count) for k in range(3)], 1) / members[:, None]
+    return weld, count, pairs, welded
+
+
+def bridge_passes(co, tris):
+    """How many passes `bridged` smooths the lifts of the body shape ``co`` (triangles ``tris``) in: enough to spread
+    them across BRIDGE_SMOOTHING, by its median edge."""
+    tris = np.asarray(tris, dtype=np.int64).reshape(-1, 3)
+    _weld, _count, pairs, welded = _welded(np.asarray(co, dtype=np.float64), tris)
+    return _passes(pairs, welded)
+
+
+def _passes(pairs, welded):
+    if not len(pairs):
+        return 0
+    edge = float(np.median(np.linalg.norm(welded[pairs[:, 0]] - welded[pairs[:, 1]], axis=1)))
+    return min(BRIDGE_PASSES, int(math.ceil(2.0 * (BRIDGE_SMOOTHING / edge) ** 2))) if edge > 0.0 else 0
+
+
+def bridged(co, tris, radius, passes=None):
     """The body shape ``co`` (triangles ``tris``) with its creases filled: each vertex that a ball of
     ``radius`` rolled over the outside of the body can't reach is lifted onto the closest ball.
 
     There is a ball at every vertex, touching it along the vertex normal; it fits where no other part of
     the body comes closer to its center. The lifts are smoothed over the body, so they change gradually
-    between vertices. Returns positions for the same vertices; those of no face stay where they are.
+    between vertices, in ``passes`` (by default, `bridge_passes` of this shape: two shapes of a body being
+    resized take the source's, or the shape the change leaves alone would be bridged anew). Returns positions
+    for the same vertices; those of no face stay where they are.
     """
     from mathutils.kdtree import KDTree
-
-    from .fitting import _weld
 
     co = np.asarray(co, dtype=np.float64)
     tris = np.asarray(tris, dtype=np.int64).reshape(-1, 3)
     # Vertices at the same spot (split seams) are one, so lifts flow across seams.
-    weld, count, pairs = _weld(co, tris)
-    members = np.maximum(np.bincount(weld, minlength=count), 1).astype(np.float64)
-    welded = np.stack([np.bincount(weld, weights=co[:, k], minlength=count) for k in range(3)], 1) / members[:, None]
+    weld, count, pairs, welded = _welded(co, tris)
     corners = weld[tris]
     a, b, c = (welded[corners[:, k]] for k in range(3))
     face = np.cross(b - a, c - a)
@@ -475,8 +498,8 @@ def bridged(co, tris, radius):
     lift[faced] = np.where(reached[:, None], 0.0, (ball - welded[faced]) * (1.0 - radius / np.maximum(distance, 1e-12))[:, None])
     if len(pairs):
         first, second = pairs[:, 0], pairs[:, 1]
-        edge = float(np.median(np.linalg.norm(welded[first] - welded[second], axis=1)))
-        passes = min(BRIDGE_PASSES, int(math.ceil(2.0 * (BRIDGE_SMOOTHING / edge) ** 2))) if edge > 0.0 else 0
+        if passes is None:
+            passes = _passes(pairs, welded)
         # Each edge both ways, and the lifts by axis (rows), for quick sums over neighbours.
         into, out_of = np.concatenate((first, second)), np.concatenate((second, first))
         degree = np.maximum(np.bincount(into, minlength=count), 1)
@@ -543,8 +566,10 @@ class _FromShape:
         self.levels = _Levels(source[self.used], self.radius)
         self.tree_tris = tris.tolist()
         self.bridged = None
+        # Both shapes' lifts are smoothed alike, in as many passes as the source's take (see `bridged`).
+        self.bridge_passes = bridge_passes(source, tris) if bridge > 0.0 else 0
         if bridge > 0.0:
-            bridged_from = bridged(source, tris, bridge)
+            bridged_from = bridged(source, tris, bridge, self.bridge_passes)
             self.bridged = (bridged_from, _vertex_areas(bridged_from, tris)[self.used],
                             _Levels(bridged_from[self.used], self.radius))
         self._surface = self._bridged_surface = None
@@ -602,7 +627,9 @@ class ShapeChange:
         self._bridged = None
         if self.bridge > 0.0:
             bridged_from, _area, levels = self._from.bridged
-            bridged_to = bridged(self.target, self.tris, self.bridge)
+            # Smoothed in the source's passes: in the target's own (from its median edge, which every size
+            # changes) the crease-free shapes differed by millimetres where the body doesn't change.
+            bridged_to = bridged(self.target, self.tris, self.bridge, self._from.bridge_passes)
             self._bridged = (bridged_from, bridged_to, levels)
             moves = np.maximum(moves, np.linalg.norm(bridged_to - bridged_from, axis=1)[self._used])
             # Where both shapes of a vertex are unlifted the two moves agree; they differ only within reach
