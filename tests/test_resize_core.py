@@ -727,6 +727,33 @@ def test_bridged_shape():
           "bridged: a vertex of no face stays where it is")
 
 
+def test_bridged_alike_where_still():
+    # The chest, and a finer flat sheet 30 cm behind it (facing back) that doubles in width and height: the chest
+    # doesn't change, so neither does its crease-free shape, though the sheet's longer edges would have smoothed the
+    # lifts in fewer passes.
+    large, _small, quads = resize.body_shapes()
+    sheet, sheet_quads = resize.grid(np.linspace(-0.17, 0.17, 137), np.linspace(-0.14, 0.12, 105),
+                                     lambda x, z: np.full_like(x, 0.3))
+    source = np.concatenate([large, sheet])
+    quads = np.concatenate([quads, sheet_quads[:, ::-1] + len(large)])
+    tris = np.concatenate([quads[:, [0, 1, 2]], quads[:, [0, 2, 3]]])
+    target = source.copy()
+    target[len(large):] = sheet * (2.0, 1.0, 2.0)
+    check(resizing.bridge_passes(source, tris) != resizing.bridge_passes(target, tris),
+          "bridged: the two shapes' own edges would smooth in different passes ({}, {})".format(
+              resizing.bridge_passes(source, tris), resizing.bridge_passes(target, tris)))
+    grown = resizing.ShapeChange(source, target, tris, bridge=resizing.BRIDGE_RADIUS)
+    bridged_from, bridged_to, _levels = grown._bridged
+    chest = slice(0, len(large))
+    lifted = np.linalg.norm(bridged_from[chest] - large, axis=1).max()
+    gap = np.abs((bridged_to - target)[chest] - (bridged_from - source)[chest]).max()
+    # (But for which of two balls equally near a vertex of the regular grid the search tree, built anew, finds.)
+    check(lifted > 0.01 and gap < 1e-4, "bridged: the still chest is lifted alike in both shapes ({:.1e} m apart)".format(
+        gap))
+    alone = np.abs(resizing.bridged(target, tris, resizing.BRIDGE_RADIUS)[chest] - bridged_to[chest]).max()
+    check(alone > 1e-4, "bridged: in the target's own passes it would differ ({:.1f} mm)".format(alone * 1000))
+
+
 def small_bridge():
     """A sheet stretched across the chest with small breasts, 8 mm in front of it (spanning the cleavage),
     the chest's triangles and shapes, and the sheet's edges; the same sheet over the large breasts."""
