@@ -17,3 +17,7 @@ blender_repo/index.html
 
 # Resize bench data (tools/resize_bench): source scenes, dumped bodies and garments, runs
 bench_data/
+
+# Local notes; only the images are published (the README uses them)
+/docs/*
+!/docs/images/
