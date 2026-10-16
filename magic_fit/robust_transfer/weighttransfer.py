@@ -612,6 +612,10 @@ HEM_MARGIN = 0.3
 HEM_MIN_GAP = 0.001
 HEM_BOOST = 1.5
 HEM_TRUST = 0.95
+# Vertices the skin moved by a Customize+ template would pass through (transfer.cplus_follow) are kept on
+# their closest-point weights outright: at HEM_TRUST the smoothing gave a thong's crotch edges 0.29 of a
+# thigh whose skin had 0.5, and they still clipped 2.4 mm.
+CPLUS_TRUST = 1.0
 
 
 def _rotation(axis, degrees):
@@ -707,11 +711,22 @@ def hem_follow(vertices, triangles, merge_map, normals, points, point_normals, d
     selected = np.flatnonzero(gate > 0)
     if not len(selected):
         return pull
-    x, p = V[selected], points[selected]
-    towards = np.where(np.einsum('ij,ij->i', x - p, point_normals[selected]) < 0, -1.0, 1.0)
-    n = point_normals[selected] * towards[:, np.newaxis]
-    follow, current = _normalized_rows(matched[selected]), _normalized_rows(solved[selected])
-    needed = np.zeros(len(selected))
+    needed = follow_needed(V[selected], points[selected], point_normals[selected], matched[selected],
+                           solved[selected], poses)
+    pull[selected] = needed * gate[selected]
+    return pull
+
+
+def follow_needed(vertices, points, point_normals, matched, solved, poses):
+    """How far (0 to 1, boosted by HEM_BOOST) each vertex has to blend from its ``solved`` weights towards
+    its closest-point weights ``matched`` to stay HEM_MARGIN of the gap those would keep above the skin at
+    its closest point (``points``, normals ``point_normals``), and at least HEM_MIN_GAP, in each of the
+    ``poses`` (column deform matrices). The skin counts on the side of it the vertex is on."""
+    x, p = np.asarray(vertices, dtype=np.float64), np.asarray(points, dtype=np.float64)
+    towards = np.where(np.einsum('ij,ij->i', x - p, point_normals) < 0, -1.0, 1.0)
+    n = point_normals * towards[:, np.newaxis]
+    follow, current = _normalized_rows(matched), _normalized_rows(solved)
+    needed = np.zeros(len(x))
     for matrices in poses:
         body = _skin(p, follow, matrices)
         body_normals = _skin_normals(n, follow, matrices)
@@ -719,16 +734,17 @@ def hem_follow(vertices, triangles, merge_map, normals, points, point_normals, d
         gap = np.einsum('ij,ij->i', _skin(x, current, matrices) - body, body_normals)
         margin = np.maximum(HEM_MARGIN * keep, HEM_MIN_GAP)
         short = (gap < margin) & (keep - gap > 1e-5)
-        fraction = np.zeros(len(selected))
+        fraction = np.zeros(len(x))
         fraction[short] = np.clip((margin[short] - gap[short]) / (keep[short] - gap[short]), 0, 1)
         needed = np.maximum(needed, fraction)
-    pull[selected] = np.clip(needed * HEM_BOOST, 0, 1) * gate[selected]
-    return pull
+    return np.clip(needed * HEM_BOOST, 0, 1)
 
 
-def hem_follow_trust(confidence, pull):
-    """The trust of vertices pulled by hem_follow: soft, up to HEM_TRUST once pulled by a fifth."""
-    return np.where(pull > 1e-3, np.maximum(confidence, HEM_TRUST * _smoothstep(pull / 0.2)), confidence)
+def hem_follow_trust(confidence, pull, trust=None):
+    """The trust of vertices pulled by hem_follow: soft, up to ``trust`` (HEM_TRUST by default) once pulled
+    by a fifth."""
+    trust = HEM_TRUST if trust is None else trust
+    return np.where(pull > 1e-3, np.maximum(confidence, trust * _smoothstep(pull / 0.2)), confidence)
 
 
 def _union_find_components(vertex_count, edges):

@@ -60,6 +60,8 @@ def check_transfer_ready(context):
             return "Body '{:s}' has several Armature modifiers".format(body.name)
         if armatures[0].object is None:
             return "The Armature modifier of '{:s}' has no armature".format(body.name)
+    if settings.use_cplus and not cplus_on(body):
+        return "Turn Customize+ on to transfer with it"
     targets = transfer_targets(context, settings, body)
     if not targets:
         if settings.apply_to_selected:
@@ -176,19 +178,38 @@ def _bound(body, objects):
     return [obj for obj in objects if armatures and _armatures_of(obj) & armatures]
 
 
-def match_objects(context, settings, body, objects):
+def cplus_on(body):
+    """Whether Customize+ is on for the body's armature."""
+    from ..cplus import rig as cplus_rig
+    return any(not cplus_rig.is_rig(armature) and cplus_rig.is_on(armature) for armature in _armatures_of(body))
+
+
+def cplus_deform(context, body):
+    """`cplus.rig.rest_deform` of the body's armature: how its Customize+ template moves the meshes, or None
+    without one on."""
+    from ..cplus import rig as cplus_rig
+    transfer, _weighttransfer = engine()
+    armature = transfer.rest_armature(body)
+    return cplus_rig.rest_deform(context, armature) if armature is not None else None
+
+
+def match_objects(context, settings, body, objects, cplus=None):
     """Match ``objects`` to the body. Meshes that follow the body's armature (or its Customize+ rig) are
     matched with both in the rest pose, where their weights apply, so neither the pose nor Customize+
     nor the weights they have now change the result. Others are matched as displayed, but without
     Customize+ on either. Returns the targets (in the order of ``objects``) and the body's group names,
-    which of them are deform bones and which are transferred."""
+    which of them are deform bones and which are transferred.
+
+    ``cplus`` (`cplus_deform`): the meshes following the armature also follow the skin where this
+    Customize+ template would push it into them (see transfer.follow_hems)."""
     transfer, weighttransfer = engine()
     bound = _bound(body, objects)
     loose = [obj for obj in objects if obj not in bound]
     targets, groups = {}, None
     fallback = transfer.rest_armature(body)
-    for meshes, state, posed in ((bound, lambda: _rest_pose([body] + bound), False),
-                                 (loose, lambda: _without_cplus([body] + loose), settings.use_deformed_source)):
+    for meshes, state, posed, template in (
+            (bound, lambda: _rest_pose([body] + bound), False, cplus),
+            (loose, lambda: _without_cplus([body] + loose), settings.use_deformed_source, None)):
         if not meshes:
             continue
         with state():
@@ -204,11 +225,15 @@ def match_objects(context, settings, body, objects):
             weights = util.get_groups_arr(source, included)
             strides = transfer.stride_source(body, names, vertices, weights, surface_bvh, posed)
             digits = transfer.digit_columns(names) & np.array(included, dtype=bool)
+            matrices = (np.array([template.get(name, np.eye(4)) for name in names])
+                        if template is not None else None)
             for obj in meshes:
                 target = transfer.make_target(obj, depsgraph, settings)
                 target['deform_armature'] = transfer.deform_armature(obj, fallback)
                 transfer.match_target(target, vertices, triangles, normals, weights, settings, surface_bvh,
                                       strides, digits)
+                if matrices is not None:
+                    target['cplus'] = matrices
                 targets[obj] = target
             groups = (names, deform, included)
     return [targets[obj] for obj in objects], groups
@@ -241,7 +266,9 @@ class MAGIC_FIT_OT_transfer_weights(bpy.types.Operator):
         target_objs = transfer_targets(context, settings, source_original)
         targets = []
         try:
-            targets, (names, deform, included) = match_objects(context, settings, source_original, target_objs)
+            cplus = cplus_deform(context, source_original) if settings.use_cplus else None
+            targets, (names, deform, included) = match_objects(context, settings, source_original, target_objs,
+                                                               cplus)
             fallback = transfer.source_armature(source_original)
             transfer.solve_targets(targets, settings, fallback, partial=settings.partial_reweight)
             for target in targets:
