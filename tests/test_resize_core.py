@@ -902,6 +902,16 @@ def test_keep_close():
     loose = start + 0.01 * normal
     check(np.array_equal(resizing.keep_close(loose, loose + 0.01 * normal, edge_list, body, body, body_tris),
                          loose + 0.01 * normal), "keep close: loose cloth (1 cm off) isn't held to the body")
+    # Cloth 7 mm off, farther than Keep Close holds: sunk 9 mm (2 mm into the body) under one bump, 4 mm (still 3 mm
+    # out) under the other.
+    off = start + 0.005 * normal
+    sunk = off - (0.009 * bump_bag + 0.004 * bump_dent)[:, None] * normal
+    out = resizing.keep_close(off, sunk, edge_list, body, body, body_tris) @ normal
+    print("      cloth 7 mm off: {:.2f} mm off at least where it sank into the body, {:.2f} mm moved where it didn't".format(
+        out[bag].min() * 1000, np.abs(out - sunk @ normal)[dent].max() * 1000))
+    check(out[bag].min() > 0.0, "keep close: cloth farther out that sank into the body comes back out of it "
+          "({:.2f} mm off at least)".format(out[bag].min() * 1000))
+    check(np.abs(out - sunk @ normal)[dent].max() < 0.0005, "keep close: ...not where it sank but stayed out")
 
     # The To body as a mesh of its own (a finer one of the same plane), as when matched by shape.
     other, other_quads = resize.grid(np.linspace(-0.1, 0.1, 61), np.linspace(-0.1, 0.1, 61), lambda X, Z: np.zeros_like(X))
@@ -1002,6 +1012,33 @@ def test_keep_covered():
     inside = max(float(np.dot(np.array(near[0]) - point, near[1]))
                  for point, near in ((point, bvh.find_nearest(point.tolist())) for point in chain))
     check(inside < 0.0, "covered: ...and out over it ({:.2f} mm off)".format(-1000 * inside))
+
+
+def test_keep_covered_not_deeper():
+    # Two boxes 2 cm wide, one on the other 0.2 mm above it and 1.5 cm to the side: a crease that closed, where
+    # points pushed out along the normal of one box's face go into the other box.
+    import bmesh
+    from mathutils import Matrix
+    bm = bmesh.new()
+    for x, z in ((0.0, 0.0), (0.015, 0.0202)):
+        bmesh.ops.create_cube(bm, size=0.02, matrix=Matrix.Translation((x, 0.0, z)))
+    bmesh.ops.triangulate(bm, faces=bm.faces[:])
+    co = np.array([v.co[:] for v in bm.verts])
+    tris = np.array([[v.index for v in f.verts] for f in bm.faces])
+    bm.free()
+    body = resizing._surface(co, tris)
+    # Pushed 2 mm up: in the crease (0.1 mm out of both), inside the lower box under the upper one, and inside the lower
+    # box away from it.
+    points = np.array([(0.008, 0.0, 0.0101), (0.008, 0.0, 0.0098), (-0.005, 0.0, 0.009)])
+    up = np.tile((0.0, 0.0, 0.002), (3, 1))
+    kept = resizing._not_deeper(body, points, up, np.ones(3, dtype=bool))
+    before, after = body.nearest(points).distance, body.nearest(points + kept).distance
+    check(np.all(after >= np.minimum(before, 0.0) - resizing.COVER_DEEPER),
+          "covered: a push never takes a point deeper into the body ({} mm before, {} mm after)".format(
+              np.round(before * 1000, 2).tolist(), np.round(after * 1000, 2).tolist()))
+    check(np.all(kept[:2, 2] < 0.001), "covered: ...pushes into the other side are held back ({} mm)".format(
+        np.round(kept[:2, 2] * 1000, 2).tolist()))
+    check(np.allclose(kept[2], up[2]), "covered: ...but a point inside one box still goes up out of it")
 
 
 def test_subdivide_for_sizes():
