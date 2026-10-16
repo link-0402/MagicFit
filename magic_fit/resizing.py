@@ -777,9 +777,15 @@ class ShapeChange:
                 part_share = np.bincount(part, weights=near) / np.bincount(part)
                 on_body[members] = (group_share[owner] >= RIGID_ON_BODY_SHARE) & small[owner]
                 linked = (part_share[part] >= RIGID_ON_BODY_SHARE) & chained
+            together = None
             if on_body.any():
                 result[on_body] = self.bind(start[on_body])
-            keep_rigid(start, result, rigid, on_body=on_body)
+                # The parts of a small group on the body turn and grow or shrink alike: fitted one by one to the skin
+                # under them, the links of a navel piercing (a millimetre or so across) turned over.
+                together = rigid.copy()
+                grouped = on_body[members]
+                together[members[grouped]] = int(rigid.max()) + 1 + owner[grouped]
+            keep_rigid(start, result, rigid, on_body=on_body, together=together)
             if chained is not None and linked.any():
                 # Links of a chain lying on the body move along, without turning or growing, as far as they fall short
                 # of following it, and the other links take that move, fading away from them along the chain. Bound
@@ -1400,14 +1406,17 @@ def _spread_pushes(found, push, pushed, still, points):
     return result
 
 
-def keep_rigid(before, after, groups, on_body=None):
+def keep_rigid(before, after, groups, on_body=None, together=None):
     """Move each group of points (label >= 0 in ``groups``) from ``before`` the rigid way (rotation and
     translation) that comes closest to where they are in ``after``, in place.
 
     With ``on_body`` (a mask per point: those lying on the body), each group also scales by the share of its points
     on the body, uniformly, as much as the space it is in grows or shrinks (the least-squares scale). A chain link,
     a ring or a band on the body grows with it, so a chain doesn't come apart between its links, and a pendant
-    hanging off it keeps its size."""
+    hanging off it keeps its size.
+
+    Groups with the same label in ``together`` (per point) turn and scale alike, each about its own center, which still
+    goes where its points do."""
     members = np.flatnonzero(groups >= 0)
     if not len(members):
         return
@@ -1418,9 +1427,13 @@ def keep_rigid(before, after, groups, on_body=None):
     center_after = np.stack([np.bincount(owner, weights=after[members, k]) for k in range(3)], 1) / count
     p = before[members] - center_before[owner]
     q = after[members] - center_after[owner]
-    # Kabsch: the rotation that best turns p into q, per group.
-    covariance = np.zeros((len(count), 3, 3))
-    np.add.at(covariance, owner, p[:, :, None] * q[:, None, :])
+    alike = owner
+    if together is not None:
+        alike = np.unique(np.asarray(together)[members], return_inverse=True)[1].reshape(-1)
+    size = int(alike.max()) + 1
+    # Kabsch: the rotation that best turns p into q, per group (or groups turning alike).
+    covariance = np.zeros((size, 3, 3))
+    np.add.at(covariance, alike, p[:, :, None] * q[:, None, :])
     u, _s, vt = np.linalg.svd(covariance)
     turn = np.transpose(vt, (0, 2, 1)) @ np.transpose(u, (0, 2, 1))
     mirror = np.linalg.det(turn) < 0.0
@@ -1429,14 +1442,14 @@ def keep_rigid(before, after, groups, on_body=None):
         flip[:, 2] = -1.0
         v = np.transpose(vt[mirror], (0, 2, 1)) * flip[:, None, :]
         turn[mirror] = v @ np.transpose(u[mirror], (0, 2, 1))
-    turned = np.einsum("nij,nj->ni", turn[owner], p)
+    turned = np.einsum("nij,nj->ni", turn[alike], p)
     if on_body is not None:
-        spread = np.bincount(owner, weights=np.einsum("ij,ij->i", turned, turned), minlength=len(count))
-        scale = np.bincount(owner, weights=np.einsum("ij,ij->i", turned, q), minlength=len(count))
+        spread = np.bincount(alike, weights=np.einsum("ij,ij->i", turned, turned), minlength=size)
+        scale = np.bincount(alike, weights=np.einsum("ij,ij->i", turned, q), minlength=size)
         scale = np.where(spread > 1e-18, scale / np.maximum(spread, 1e-30), 1.0)
-        share = np.bincount(owner, weights=np.asarray(on_body, dtype=np.float64)[members], minlength=len(count))
-        scale = 1.0 + (share / count[:, 0]) * (scale - 1.0)
-        turned *= scale[owner, None]
+        share = np.bincount(alike, weights=np.asarray(on_body, dtype=np.float64)[members], minlength=size)
+        scale = 1.0 + (share / np.bincount(alike, minlength=size)) * (scale - 1.0)
+        turned *= scale[alike, None]
     after[members] = center_after[owner] + turned
 
 

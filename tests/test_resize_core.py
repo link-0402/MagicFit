@@ -531,6 +531,21 @@ def test_rigid_parts():
           "plate on the breast: and stays closer to it than without shrinking ({:.1f} mm, {:.1f} mm)".format(
               np.median(off) * 1000, np.median(off_unscaled) * 1000))
 
+    # Two small plates touching on the breast (a piercing's links): they turn and shrink alike, so they stay together.
+    first = resize.offset_sheet(np.linspace(-0.09, -0.08, 3), np.linspace(-0.005, 0.005, 3), 0.002)[0]
+    second = resize.offset_sheet(np.linspace(-0.0798, -0.0698, 3), np.linspace(-0.005, 0.005, 3), 0.002)[0]
+    links = np.concatenate([first, second])
+    labels = np.repeat([0, 1], len(first))
+    moved = shape_change.apply(links, rigid=labels)
+
+    def fit(a, b):
+        ca, cb = a - a.mean(axis=0), b - b.mean(axis=0)
+        u, _s, vt = np.linalg.svd(ca.T @ cb)
+        return vt.T @ u.T, np.sqrt((cb ** 2).sum() / (ca ** 2).sum())
+    (turn_a, scale_a), (turn_b, scale_b) = fit(first, moved[:9]), fit(second, moved[9:])
+    check(np.abs(turn_a - turn_b).max() < 1e-9 and abs(scale_a - scale_b) < 1e-9 and scale_a < 0.99,
+          "touching plates on the breast: they turn and shrink alike (x{:.3f}, x{:.3f})".format(scale_a, scale_b))
+
     co = np.concatenate([before, before + (0.1, 0.0, 0.0), before + (0.0, 0.0, 0.2)])
     edge_list = np.concatenate([edge_list, edge_list + 8, edge_list + 16])
     parts, count = resizing.loose_parts(co, edge_list)
