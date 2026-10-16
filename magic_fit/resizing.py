@@ -854,11 +854,15 @@ class ShapeChange:
 
     def bind(self, points):
         """Where ``points`` lying on the source shape (skin) go with the target shape: each keeps its spot
-        on its closest triangle of the source and its (small) distance from it along the normal there.
+        on its closest triangle of the source and its (small) offset from it, turned as the surface there
+        turns: along the normal and the triangle's sides.
 
         That is exact for a copy of the body's skin, which the smooth move only approximates: it averages
-        the body's move around each point, and Keep Close leaves tight clothing some slack. A point past
-        an open edge of the body keeps its offset from the edge.
+        the body's move around each point, and Keep Close leaves tight clothing some slack. Keeping only
+        the distance along the normal moved the points whose offset doesn't run along it (in a crease, or
+        where the smooth normal leans off the triangle's), by up to a millimetre or so even where the body
+        didn't change, and turned the small rigid parts bound by them (a navel piercing's links) apart. A
+        point past an open edge of the body keeps its offset from the edge.
         """
         points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
         if not len(points) or self.largest <= 0.0:
@@ -866,10 +870,12 @@ class ShapeChange:
         source = self._from.surface(self.source, self.tris)
         near = _shared(self._shared, ("bound", self._key, _digest(points)), lambda: source.nearest(points))
         target = _surface(self.target, self.tris, like=source)
-        normal = np.einsum("ij,ijk->ik", near.bary, target.normals[near.corners])
-        normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-12)
         location = np.einsum("ij,ijk->ik", near.bary, target.co[near.corners])
-        offset = np.where(near.beyond[:, None], points - near.location, near.distance[:, None] * normal)
+        offset = points - near.location
+        # The offset in the source's frame at the spot, put back in the target's.
+        local = np.einsum("nij,nj->ni", _frames(near.bary, near.corners, source.co, source.normals), offset)
+        turned = np.einsum("nji,nj->ni", _frames(near.bary, near.corners, target.co, target.normals), local)
+        offset = np.where(near.beyond[:, None], offset, turned)
         return np.where(near.found[:, None], location + offset, points)
 
 
@@ -1003,6 +1009,33 @@ def _blend_shares(points, shares):
 def _surface(co, tris, like=None):
     from .fitting import BodySurface
     return BodySurface(co, tris, BVHTree.FromPolygons(co.tolist(), tris.tolist(), all_triangles=True), like)
+
+
+def _frames(bary, corners, co, normals):
+    """Orthonormal frames (n x 3 x 3, the rows: the smooth normal, then two tangents) at spots ``bary`` of triangles
+    ``corners`` of a surface (its positions ``co`` and unit ``normals``): the first tangent along the triangle's first
+    side, taken off the normal. The same spots of the same surface give the same frames."""
+    a, b, c = (co[corners[:, k]] for k in range(3))
+    normal = np.einsum("ij,ijk->ik", bary, normals[corners])
+    length = np.linalg.norm(normal, axis=1, keepdims=True)
+    # Smooth normals cancelling out (a fold): the triangle's own.
+    face = np.cross(b - a, c - a)
+    normal = np.where(length > 1e-12, normal, face)
+    normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-30)
+    frames = np.zeros((len(bary), 3, 3))
+    frames[:, 0] = normal
+    tangent = np.zeros_like(normal)
+    left = np.ones(len(bary), dtype=bool)
+    # The first side, else the second, else any axis, whichever stands off the normal.
+    for side in (b - a, c - a, np.eye(3)[np.argmin(np.abs(normal), axis=1)]):
+        side = side - np.einsum("ij,ij->i", side, normal)[:, None] * normal
+        size = np.linalg.norm(side, axis=1)
+        take = left & (size > 1e-9 * np.maximum(np.linalg.norm(b - a, axis=1), 1e-30))
+        tangent[take] = side[take] / size[take, None]
+        left &= ~take
+    frames[:, 1] = tangent
+    frames[:, 2] = np.cross(normal, tangent)
+    return frames
 
 
 class _KeepClose:
