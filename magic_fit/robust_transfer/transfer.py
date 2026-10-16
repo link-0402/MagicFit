@@ -215,12 +215,13 @@ def match_target(target, source_vertices, source_triangles, source_normals,
     # it copies its weights, where it spans a crease they're inpainted smoothly from both sides.
     # prepare_batch works it out again over meshes sharing a solve.
     target.update(weights=match.weights, masked=masked, outward=outward, digit_share=digit_share,
-                  distances=match.distances, cosines=cosines, points=match.points)
+                  distances=match.distances, cosines=cosines, points=match.points, point_normals=match.normals,
+                  closest_weights=match.weights.copy())
     bridge_trust([target], settings)
     if strides is not None:
         # Where the body touches the mesh from outside, there's no leg under it to follow.
         outside = np.nan_to_num(cosines, nan=0.0) < 0
-        target.update(strides=strides, point_normals=match.normals, closest_weights=match.weights.copy(),
+        target.update(strides=strides,
                       leg_share=np.where(outside, 0.0, (match.weights @ strides['legs']).max(axis=1)))
     if settings.partial_reweight:
         target['strength'] = distance_strength(
@@ -312,7 +313,8 @@ def solve_targets(targets, settings, fallback=None, partial=False):
 
 def follow_hems(batch, domain, settings, partial):
     """Hem Follow: where a hem lies over a leg, pull its weights towards the leg's as far as the
-    strides of weighttransfer.hem_follow need, and solve again on the same Laplacian."""
+    strides of weighttransfer.hem_follow need, and solve again on the same Laplacian. Meshes with a
+    Customize+ template (``target['cplus']``) also follow the skin wherever it would pass through them."""
     offsets = np.cumsum([0] + [len(t['vertices']) for t in batch])
     pulls = [np.zeros(len(t['vertices'])) for t in batch]
     # Meshes solved together are checked together (their seams aren't hems), each group of them with
@@ -335,10 +337,13 @@ def follow_hems(batch, domain, settings, partial):
             strides['poses'], strides['bvh'])
         for position, start, end in zip(members, ends, ends[1:]):
             pulls[position] = pull[start:end]
-    if not any(np.any(pull > 1e-3) for pull in pulls):
+    # With Customize+ (see cplus_follow), anywhere the template's skin would pass through the mesh.
+    templates = [cplus_follow(target) if 'cplus' in target else np.zeros(len(target['vertices'])) for target in batch]
+    if not any(np.any(pull > 1e-3) for pull in pulls + templates):
         return
     priors, confidences = [], []
-    for target, pull in zip(batch, pulls):
+    for target, hem, template in zip(batch, pulls, templates):
+        pull = np.maximum(hem, template)
         # The Inpaint Mask keeps its vertices free, and MAX_DISTANCE is as far as matches reach.
         pull[target_confidence(target) <= 0] = 0
         if 'distances' in target:
@@ -350,7 +355,9 @@ def follow_hems(batch, domain, settings, partial):
             solved /= np.maximum(solved.sum(axis=1, keepdims=True), np.finfo(np.float64).tiny)
             prior[pulled] = (1 - pull[pulled, None]) * solved + pull[pulled, None] * prior[pulled]
         priors.append(prior)
-        confidences.append(weighttransfer.hem_follow_trust(target_confidence(target), pull))
+        trust = weighttransfer.hem_follow_trust(target_confidence(target), hem)
+        template[pull <= 1e-3] = 0
+        confidences.append(weighttransfer.hem_follow_trust(trust, template, weighttransfer.CPLUS_TRUST))
     confidence = np.concatenate(confidences)
     domain = weighttransfer.reweight_domain(
         domain, np.concatenate([t['vertices'] for t in batch]),
@@ -367,6 +374,21 @@ def follow_hems(batch, domain, settings, partial):
         target['weights'] = solved[start:end].copy()
         target['confidence'] = conf
         target['harmonic_fallback'] = target.get('harmonic_fallback') or domain.harmonic_fallback
+
+
+def cplus_follow(target):
+    """How far (0 to 1) to pull each vertex towards its closest-point weights so that the skin its Customize+
+    template moves (``target['cplus']``, deform matrices per weight column) doesn't pass through it: anywhere,
+    also where the skin touches it from outside, like a thigh fold over the edge of a thong's crotch, which
+    the solve otherwise barely trusts (weighttransfer.bridge_confidence)."""
+    pull = np.zeros(len(target['vertices']))
+    rows = np.flatnonzero((target['distances'] <= MAX_DISTANCE) & (target['closest_weights'].sum(axis=1) > 0)
+                          & (target['weights'].sum(axis=1) > 0))
+    if len(rows):
+        pull[rows] = weighttransfer.follow_needed(
+            target['vertices'][rows], target['points'][rows], target['point_normals'][rows],
+            target['closest_weights'][rows], target['weights'][rows], [target['cplus']])
+    return pull
 
 
 def process_weights(target, settings):

@@ -491,6 +491,26 @@ class NumericalTests(unittest.TestCase):
         self.assertLess(pull[middle].max(), pull[near].min())
         self.assertGreater(pull[middle].min(), 0.2)
 
+    def test_customize_plus_follow_pulls_where_the_skin_would_pass_through(self):
+        # A thigh's skin (bone 0) touching a thong's edge 0.5 mm away from outside: the edge lies below it,
+        # with solved weights on the hip (bone 1). Customize+ thickens the thigh by 4 mm towards the edge.
+        edge = np.array([[x, 0.0, -0.0005] for x in np.linspace(-0.02, 0.02, 5)])
+        points = edge.copy()
+        points[:, 2] = 0
+        point_normals = np.tile([0.0, 0.0, 1.0], (len(edge), 1))
+        closest = np.tile([1.0, 0.0], (len(edge), 1))
+        solved = np.tile([0.0, 1.0], (len(edge), 1))
+        template = np.tile(np.eye(4), (2, 1, 1))
+        template[0, 2, 3] = -0.004
+        pull = wt.follow_needed(edge, points, point_normals, closest, solved, [template])
+        np.testing.assert_allclose(pull, 1)
+        # Already following the thigh, or with the thigh moving away, nothing needs to change.
+        np.testing.assert_array_equal(wt.follow_needed(edge, points, point_normals, closest, closest, [template]), 0)
+        template[0, 2, 3] = 0.004
+        np.testing.assert_array_equal(wt.follow_needed(edge, points, point_normals, closest, solved, [template]), 0)
+        trust = wt.hem_follow_trust(np.full(len(edge), 0.01), pull, wt.CPLUS_TRUST)
+        np.testing.assert_allclose(trust, 1)
+
     def test_soft_matches_anchor_otherwise_rejected_parts(self):
         v, f, w, matched = split_surface()
         w[4:] = [0.9, 0.1]
@@ -2170,6 +2190,33 @@ class CreaseSmoothingTests(TransferScene, unittest.TestCase):
         self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
         np.testing.assert_allclose(self.read(gusset, ['L', 'R']), plain, atol=1e-6)
         self.assertEqual([(mod.name, mod.show_viewport) for mod in gusset.modifiers], states)
+
+    def test_customize_plus_option_follows_the_template(self):
+        from magic_fit.cplus import rig as cplus_rig
+        rig, gusset, _x = self.crease_scene(gusset=True)
+        self.settings.use_deformed_source = True
+        self.settings.use_deformed_target = True
+        self.settings.use_cplus = True
+        self.assertEqual(operators.check_transfer_ready(bpy.context), "Turn Customize+ on to transfer with it")
+        fake = bpy.data.objects.new('C+ Rig', rig.data.copy())
+        bpy.context.collection.objects.link(fake)
+        fake.parent = rig
+        fake[cplus_rig.MARK] = '{}'
+        bpy.context.view_layer.update()
+        self.assertEqual(cplus_rig.connect(rig, fake), 2)
+        fake.pose.bones['L'].scale = (1.4, 1.4, 1.4)
+        bpy.context.view_layer.update()
+        self.assertIsNone(operators.check_transfer_ready(bpy.context))
+        with patch.object(transfer, 'cplus_follow', wraps=transfer.cplus_follow) as follow:
+            self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        target = follow.call_args.args[0]
+        names = [g.name for g in self.body.vertex_groups]
+        # The template's matrices in the body's columns: L scaled, R as it is.
+        self.assertAlmostEqual(np.linalg.det(target['cplus'][names.index('L')][:3, :3]), 1.4 ** 3, places=4)
+        np.testing.assert_allclose(target['cplus'][names.index('R')], np.eye(4), atol=1e-6)
+        np.testing.assert_allclose(self.read(gusset, ['L', 'R']).sum(axis=1), 1, atol=1e-5)
+        # The armature's pose is back as it was.
+        self.assertEqual(rig.data.pose_position, 'POSE')
 
     def test_stray_vertices_keep_the_bodys_weights(self):
         _rig, gusset, x = self.crease_scene(gusset=True)

@@ -14,6 +14,7 @@ from .operators import (
     MAGIC_FIT_OT_select_rejected,
     MAGIC_FIT_OT_transfer_weights,
     check_transfer_ready,
+    cplus_on,
     transfer_targets,
 )
 
@@ -117,6 +118,9 @@ class VIEW3D_PT_weight_transfer_sidebar(tabs.TabPanel, bpy.types.Panel):
         row = col.row(align=True, heading="Use Deformed")
         row.prop(settings, "use_deformed_source", text="Body", toggle=True)
         row.prop(settings, "use_deformed_target", text="Meshes", toggle=True)
+        row = col.row(heading="With")
+        row.active = cplus_on(body_settings.target) if body_settings.target is not None else False
+        row.prop(settings, "use_cplus")
 
         problem = check_transfer_ready(context)
         if problem is not None:

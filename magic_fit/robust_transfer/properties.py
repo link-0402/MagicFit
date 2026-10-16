@@ -55,7 +55,7 @@ class WeightTransferSettings(bpy.types.PropertyGroup):
         name="Use Deformed Body",
         description=(
             "Use the body as shaped by its modifiers and shape keys. The pose only counts for meshes that "
-            "don't follow the body's armature. Customize+ never counts"
+            "don't follow the body's armature. Customize+ only counts with With Customize+"
         ),
         default=True,
     )
@@ -66,6 +66,15 @@ class WeightTransferSettings(bpy.types.PropertyGroup):
             "body's armature"
         ),
         default=True,
+    )
+    use_cplus: BoolProperty(
+        name="Customize+",
+        description=(
+            "Where the body's Customize+ template would push the skin through a mesh that follows the body's "
+            "armature, like thick thighs over the edges of a thong's crotch, the mesh takes that skin's "
+            "weights. Needs Customize+ on. The weights then suit that template best"
+        ),
+        default=False,
     )
     apply_to_selected: BoolProperty(
         name="Apply to All Selected",

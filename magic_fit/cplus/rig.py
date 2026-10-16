@@ -449,6 +449,28 @@ def disconnect(armature):
     return count
 
 
+def rest_deform(context, armature):
+    """{bone: world-space deform matrix} of the deform bones of the rig of ``armature`` with the armature in
+    its rest pose: how the template alone moves the meshes. None unless the rig is on."""
+    rig = rig_of(armature)
+    if rig is None or not is_on(armature):
+        return None
+    data = armature.data
+    position = data.pose_position
+    try:
+        data.pose_position = 'REST'  # the rig follows the armature's pose, here its rest pose
+        context.view_layer.update()
+        evaluated = rig.evaluated_get(context.evaluated_depsgraph_get())
+        world = np.array(evaluated.matrix_world)
+        to_rig = np.linalg.inv(world)
+        return {bone.name: world @ np.array(evaluated.pose.bones[bone.name].matrix)
+                @ np.linalg.inv(np.array(bone.matrix_local)) @ to_rig
+                for bone in rig.data.bones if bone.use_deform}
+    finally:
+        data.pose_position = position
+        context.view_layer.update()
+
+
 def missing_meshes(armature):
     """Names of objects that follow ``armature`` but not its rig while it's on (added since)."""
     rig = rig_of(armature)
