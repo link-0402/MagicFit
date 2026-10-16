@@ -87,6 +87,11 @@ KEEP_FADE = 0.9
 KEEP_PASSES = 80
 # Rounds of measuring and correcting (each measures the distances anew).
 KEEP_ROUNDS = 8
+# Clothing farther off the source shape, up to this, is brought back to its old distance only where it ended up inside
+# the target shape (and never pulled in): cloth 4-10 mm under a breast that grows, next to the underbust crease, moved
+# less than the breast's underside (the move averages it with the ribs) and sank into it, where Keep Covered can't push
+# it out through the crease that closed.
+KEEP_SUNK_DISTANCE = 0.01
 
 # Keep Covered: last, clothing that came apart from the body is pushed back out over it. The clothing over a vertex of
 # the body is the first triangle its line out meets within this distance...
@@ -107,6 +112,8 @@ COVER_SPREAD = 0.02
 COVER_RINGS = 16
 # A push that would turn triangles over is halved at their corners up to this many times, then left out.
 COVER_HALVINGS = 4
+# So is a push that would take a point more than this deeper into the body than it is (see `_not_deeper`).
+COVER_DEEPER = 0.0001
 # A rigid part moves whole, along the sum of its points' pushes, as far as its points need: those pushed at least this
 # much the way it moves (the cosine). Moving it gets the others out only slowly: a link in a cleavage closing over it,
 # pushed out by both breasts, was left a small push up or down, and went that way several times as far as it was
@@ -1102,10 +1109,14 @@ class _KeepClose:
             self.on_skin = on.found & ~on.beyond & (np.abs(on.distance) < body_gap)
             self.height = np.where(self.on_skin, on.distance, self.height)
             self.close = (self.close & ~self.on_skin) | (self.on_skin & (np.abs(self.height) < KEEP_CLOSE_DISTANCE))
+        # Points farther out, kept out of the body only (see KEEP_SUNK_DISTANCE).
+        self.sunk = (near.found & ~near.beyond & ~self.on_skin & ~self.close & (self.height >= KEEP_CLOSE_DISTANCE)
+                     & (self.height < KEEP_SUNK_DISTANCE))
         if anchors is not None:
             free = np.ones(count, dtype=bool)
             np.logical_and.at(free, self.weld, np.asarray(anchors, dtype=bool))
             self.close &= free
+            self.sunk &= free
         pairs = np.sort(self.weld[np.asarray(edges, dtype=np.int64).reshape(-1, 2)], axis=1)
         pairs = np.unique(pairs[pairs[:, 0] != pairs[:, 1]], axis=0)
         # Each edge both ways, for sums over each point's neighbours.
@@ -1122,9 +1133,10 @@ def keep_close(start, moved, edges, source, target, tris, anchors=None, progress
     for its ``target`` shape (the body's triangles ``tris``), ``edges`` pairs of points joined by an
     edge. Points closer than KEEP_CLOSE_DISTANCE to the source shape (and in ``anchors``, when given)
     that ended up more than PULL_SLACK farther from the target shape, or PUSH_SLACK closer, are moved
-    back along the body's normal by the difference beyond that. The corrections are spread over the
-    edges, so the rest of the clothing comes along smoothly and it doesn't crease; points at the same
-    spot always move alike. Returns the new positions.
+    back along the body's normal by the difference beyond that. Points farther out, up to
+    KEEP_SUNK_DISTANCE, are moved back only while they're inside the target shape. The corrections are
+    spread over the edges, so the rest of the clothing comes along smoothly and it doesn't crease; points
+    at the same spot always move alike. Returns the new positions.
 
     With ``target_tris``, ``target`` is another mesh (the To body a body of other vertices was matched
     to by shape), and with ``known`` (per vertex of ``source``), only points over source triangles most
@@ -1143,7 +1155,7 @@ def keep_close(start, moved, edges, source, target, tris, anchors=None, progress
         start, edges, source, tris, anchors, None if skin is None else (skin[0], skin[2]))
     count, into, out_of, degree = kept.count, kept.into, kept.out_of, kept.degree
     points = np.asarray(moved, dtype=np.float64)[kept.first]
-    height, close = kept.height, kept.close
+    height, close = kept.height, kept.close | kept.sunk
     if known is not None:
         welded = np.zeros(kept.source_count, dtype=bool)
         welded[kept.source_weld] = np.asarray(known, dtype=bool)
@@ -1162,6 +1174,8 @@ def keep_close(start, moved, edges, source, target, tris, anchors=None, progress
     on_skin = kept.on_skin[which] if skin_surface is not None else np.zeros(len(which), dtype=bool)
     push_slack = np.where(on_skin, SKIN_PUSH_SLACK, PUSH_SLACK)
     pull_slack = np.where(on_skin, SKIN_PULL_SLACK, PULL_SLACK)
+    sunk = kept.sunk[which]
+    pull_slack = np.where(sunk, np.inf, pull_slack)
     settled = False
     for done in range(KEEP_ROUNDS if len(which) else 0):
         if not settled:
@@ -1173,6 +1187,8 @@ def keep_close(start, moved, edges, source, target, tris, anchors=None, progress
             ok = near.found & ~near.beyond
             need = np.where(ok, height[which] - near.distance, 0.0)
             need = np.where(need > 0.0, np.maximum(need - push_slack, 0.0), np.minimum(need + pull_slack, 0.0))
+            # Clothing farther out only where it's inside the body.
+            need = np.where(sunk & (near.distance >= 0.0), 0.0, need)
             # Nothing to correct: nor will there be in the rounds left.
             settled = not need.any()
         if not settled:
@@ -1180,7 +1196,8 @@ def keep_close(start, moved, edges, source, target, tris, anchors=None, progress
             own = np.zeros((3, count))
             own[:, which] = (need[:, None] * near.normal).T
             held = np.zeros(count, dtype=bool)
-            held[which[ok]] = True
+            # (Clothing farther out only while it needs it: held at its spot, it would hold the clothing around back.)
+            held[which[ok & (~sunk | (need != 0.0))]] = True
             keep = np.where(held, KEEP_SHARE, 0.0) * own
             scale = np.where(held, 1.0 - KEEP_SHARE, KEEP_FADE) / degree
             spread = own
@@ -1267,8 +1284,8 @@ def keep_covered(found, moved, body, rigid=None, chain=None):
     COVER_SPREAD so it comes along smoothly; rigid parts (``rigid``, a label per point, -1 for none) move whole, as far
     as their point that needs it most (of those pushed about their way, see COVER_RIGID_FACING), and fixed points
     (skin) never move. The links of a chain (``chain``: for each point its link, from 0, -1 for none; touching pairs of links;
-    how many links) move along with each other, see COVER_CHAIN_STIFFNESS. Only ever pushes out. Returns the new
-    positions.
+    how many links) move along with each other, see COVER_CHAIN_STIFFNESS. Only ever pushes out, and never deeper into
+    the body (see `_not_deeper`). Returns the new positions.
     """
     from .fitting import _barycentric
     weld, first, count, tris = found.weld, found.first, found.count, found.tris
@@ -1365,8 +1382,31 @@ def keep_covered(found, moved, body, rigid=None, chain=None):
             loose &= np.einsum("ij,ij->i", own, push) > 1e-12
             if loose.any():
                 step += _spread_pushes(found, own, loose, still | (group >= 0), now)
+        step = _not_deeper(body, now, step, group < 0)
         total += _unflipped(tris, found.normals, now, step)
     return np.asarray(moved, dtype=np.float64) + total[weld]
+
+
+def _not_deeper(body, points, step, which):
+    """``step`` (a push of ``points``), less where it would take points (of ``which``, a mask) deeper into the ``body``
+    (a BodySurface) than they are: such points move half as far, up to COVER_HALVINGS times, then not at all. In a
+    crease that closed, the body's normal on one side points into the other: pushed out along it, clothing in the
+    crease went into the other side."""
+    moving = np.flatnonzero(which & (np.einsum("ij,ij->i", step, step) > 1e-14))
+    if not len(moving):
+        return step
+    near = body.nearest(points[moving])
+    floor = np.where(near.found & ~near.beyond, np.minimum(near.distance, 0.0), -np.inf) - COVER_DEEPER
+    scale = np.ones(len(moving))
+    for halving in range(COVER_HALVINGS + 1):
+        near = body.nearest(points[moving] + step[moving] * scale[:, None])
+        deeper = near.found & ~near.beyond & (near.distance < floor) & (scale > 0.0)
+        if not deeper.any():
+            break
+        scale[deeper] = scale[deeper] * 0.5 if halving < COVER_HALVINGS else 0.0
+    result = step.copy()
+    result[moving] *= scale[:, None]
+    return result
 
 
 def _unflipped(tris, normals, points, step):
