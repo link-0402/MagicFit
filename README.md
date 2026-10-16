@@ -58,4 +58,4 @@ Papers, game data and licenses are on the wiki's [Credits](https://github.com/li
 
 ## License
 
-Magic Fit is licensed under the [GNU General Public License v3.0 or later](magic_fit/LICENSE). To build it from source or run the tests, read the [development notes](docs/development.md).
+Magic Fit is licensed under the [GNU General Public License v3.0 or later](magic_fit/LICENSE).
