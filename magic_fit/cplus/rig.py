@@ -457,8 +457,11 @@ def rest_deform(context, armature):
         return None
     data = armature.data
     position = data.pose_position
+    hidden = rig.hide_viewport
     try:
         data.pose_position = 'REST'  # the rig follows the armature's pose, here its rest pose
+        # Hidden, the rig only gets the bones a shown mesh follows evaluated; the others keep old matrices.
+        rig.hide_viewport = False
         context.view_layer.update()
         evaluated = rig.evaluated_get(context.evaluated_depsgraph_get())
         world = np.array(evaluated.matrix_world)
@@ -468,6 +471,7 @@ def rest_deform(context, armature):
                 for bone in rig.data.bones if bone.use_deform}
     finally:
         data.pose_position = position
+        rig.hide_viewport = hidden
         context.view_layer.update()
 
 

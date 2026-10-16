@@ -872,6 +872,33 @@ def test_armature_in_disabled_collection():
     bpy.data.collections.remove(disabled)
 
 
+def test_rest_deform_with_meshes_hidden():
+    reset_scene()
+    scene = fixture.build()
+    armature, body, garment = scene["rig"], scene["body"], scene["garment"]
+    # An edited bone without children that the body doesn't follow (like the genital bones on a body
+    # without them) and the garment does, with the garment hidden before the rig is made.
+    leaves = [name for name, edit in parse(SUPERTHICC).bones.items() if edit.is_edited()
+              and name in body.vertex_groups and name in garment.vertex_groups
+              and not armature.data.bones[name].children]
+    check(bool(leaves), "the template edits a leaf bone the body and garment follow")
+    bone = leaves[0]
+    body.vertex_groups.remove(body.vertex_groups[bone])
+    garment.hide_viewport = True
+    apply(SUPERTHICC)
+    # The rig is hidden too: Blender then only evaluates the bones a visible mesh follows.
+    hidden = rig.rest_deform(bpy.context, armature)
+    check(rig.rig_of(armature).hide_viewport, "the rig is hidden again")
+    garment.hide_viewport = False
+    apply(SUPERTHICC)
+    shown = rig.rest_deform(bpy.context, armature)
+    error = float(np.abs(hidden[bone] - shown[bone]).max())
+    moved = float(np.abs(shown[bone] - np.identity(4)).max())
+    check(moved > 1e-3 and error < 1e-6,
+          "{:s}: the template's rest-pose matrix doesn't depend on which meshes are shown ({:.1e})".format(
+              bone, error))
+
+
 def test_bones_without_rest_pose():
     reset_scene()
     # Every bone at the origin without a parent, the way an armature made from a model's bone list
