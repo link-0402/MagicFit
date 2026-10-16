@@ -177,9 +177,9 @@ def steps():
     check([url for _label, _icon, url in tool.LINKS] == [
         "https://www.xivmodarchive.com/user/124593",
         "https://github.com/link-0402/MagicFit",
-        "https://bsky.app/profile/xiv-luci.bsky.social",
+        "https://discord.gg/w5vzsPXsE7",
         "https://ko-fi.com/luci_xiv",
-    ], "the links go to XIV Mod Archive, GitHub, Bluesky and Ko-fi")
+    ], "the links go to XIV Mod Archive, GitHub, Discord and Ko-fi")
     if SHOTS:
         with bpy.context.temp_override(window=window, area=area):
             bpy.ops.screen.screenshot(filepath=os.path.join(SHOTS, "sidebar_19_links.png"))

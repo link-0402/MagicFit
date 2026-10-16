@@ -646,13 +646,13 @@ def _draw_line(layout):
 LINKS = (
     ("XIV Mod Archive", 'PACKAGE', "https://www.xivmodarchive.com/user/124593"),
     ("GitHub", 'SCRIPT', "https://github.com/link-0402/MagicFit"),
-    ("Bluesky", 'COMMUNITY', "https://bsky.app/profile/xiv-luci.bsky.social"),
+    ("Discord", 'COMMUNITY', "https://discord.gg/w5vzsPXsE7"),
     ("Ko-fi", 'FUND', "https://ko-fi.com/luci_xiv"),
 )
 
 
 class VIEW3D_MT_magic_fit_links(bpy.types.Menu):
-    """Magic Fit on GitHub, and Luci_xiv's mods, Bluesky and Ko-fi"""
+    """Magic Fit on GitHub and Discord, and Luci_xiv's mods and Ko-fi"""
     bl_label = "Links"
 
     def draw(self, context):
