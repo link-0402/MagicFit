@@ -585,6 +585,29 @@ def test_skin_follows_body():
     bpy.data.objects.remove(skin_obj)
 
 
+def test_bind_keeps_offsets():
+    # Points around the body, off it every which way (in the crease under the breasts too): bound to a body that
+    # doesn't change, or only turns and moves, they keep their place on it exactly. Keeping only the distance along
+    # the normal moved those whose offset doesn't run along it.
+    large, _small, quads = resize.body_shapes()
+    tris = np.concatenate([quads[:, [0, 1, 2]], quads[:, [0, 2, 3]]])
+    low, high = large.min(axis=0), large.max(axis=0)
+    inner = np.all((large[:, [0, 2]] > low[[0, 2]] + 0.2 * (high - low)[[0, 2]])
+                   & (large[:, [0, 2]] < high[[0, 2]] - 0.2 * (high - low)[[0, 2]]), axis=1)
+    rng = np.random.default_rng(3)
+    ways = rng.normal(size=(int(inner.sum()), 3))
+    points = large[inner] + 0.003 * ways / np.linalg.norm(ways, axis=1, keepdims=True) * rng.random((len(ways), 1))
+    shift = np.array((1e-6, 0.0, 0.0))
+    still = resizing.ShapeChange(large, large + shift, tris).bind(points)
+    gap = np.abs(still - (points + shift)).max()
+    check(gap < 1e-7, "bind: the body unchanged, points off it every way stay put ({:.1e} m off)".format(gap))
+    angle = 0.3
+    turn = np.array(((np.cos(angle), 0.0, np.sin(angle)), (0.0, 1.0, 0.0), (-np.sin(angle), 0.0, np.cos(angle))))
+    moved = resizing.ShapeChange(large, large @ turn.T + (0.01, 0.02, 0.0), tris).bind(points)
+    gap = np.abs(moved - (points @ turn.T + (0.01, 0.02, 0.0))).max()
+    check(gap < 1e-7, "bind: the body turned, they turn with it ({:.1e} m off)".format(gap))
+
+
 def test_sculpted_skin():
     shape_change, large, small, quads = change()
     tris = np.concatenate([quads[:, [0, 1, 2]], quads[:, [0, 2, 3]]])
