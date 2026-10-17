@@ -72,7 +72,8 @@ class WeightTransferSettings(bpy.types.PropertyGroup):
         description=(
             "Where the body's Customize+ template would push the skin through a mesh that follows the body's "
             "armature, like thick thighs over the edges of a thong's crotch, the mesh takes that skin's "
-            "weights. Needs Customize+ on. The weights then suit that template best"
+            "weights. Needs Customize+ on. The weights then suit that template best. Without it, the mesh "
+            "follows a template with thick thighs and butt"
         ),
         default=False,
     )

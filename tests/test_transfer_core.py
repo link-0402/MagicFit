@@ -511,6 +511,66 @@ class NumericalTests(unittest.TestCase):
         trust = wt.hem_follow_trust(np.full(len(edge), 0.01), pull, wt.CPLUS_TRUST)
         np.testing.assert_allclose(trust, 1)
 
+    def test_template_and_sitting_poses(self):
+        names = ['j_kosi', 'j_asi_a_l', 'j_asi_a_r', 'j_asi_b_l']
+        rest = np.tile(np.eye(4), (4, 1, 1))
+        rest[1, :3, 3], rest[2, :3, 3], rest[3, :3, 3] = (0.1, 0, 0.9), (-0.1, 0, 0.9), (0.1, 0, 0.5)
+        parents = [-1, 0, 0, 1]
+        # The template: thighs thicker across the leg, not longer, standing still.
+        template = wt.template_pose(names, rest, parents)
+        np.testing.assert_allclose((template[1] @ [0.1, 0, 0.5, 1])[:3], [0.1, 0, 0.5], atol=1e-12)
+        np.testing.assert_allclose((template[1] @ [0.2, 0, 0.9, 1])[:3], [0.1 + 0.1 * wt.HEM_THIGH_SCALE, 0, 0.9],
+                                   atol=1e-12)
+        np.testing.assert_allclose(template[0], np.eye(4), atol=1e-12)
+        self.assertIsNone(wt.template_pose(names[:2], rest[:2], parents[:2]))
+        # Sitting: the left hip, the right one and both flexed HEM_FLEX degrees forward (towards -Y).
+        poses = wt.flex_poses(names, rest, parents, (0, -1, 0))
+        self.assertEqual(len(poses), 3)
+        knee = poses[0][3] @ [0.1, 0, 0.5, 1]
+        angle = np.radians(wt.HEM_FLEX)
+        np.testing.assert_allclose(knee[:3], [0.1, -0.4 * np.sin(angle), 0.9 - 0.4 * np.cos(angle)], atol=1e-12)
+        np.testing.assert_allclose(poses[0][2], np.eye(4), atol=1e-12)
+        self.assertFalse(np.allclose(poses[1][2], np.eye(4)))
+        np.testing.assert_allclose(poses[2][1], poses[0][1], atol=1e-12)
+        np.testing.assert_allclose(poses[2][2], poses[1][2], atol=1e-12)
+        self.assertEqual(wt.flex_poses(names[:2], rest[:2], parents[:2], (0, -1, 0)), [])
+
+    def test_sitting_pulls_anywhere_but_less_across_creases(self):
+        # The front of a thigh (bone 0) and a panel 5 mm in front of it, solved onto the hip (bone 1), with no
+        # border nearby: sitting moves the thigh 2 cm out through it.
+        panel, pf = flat_grid(np.linspace(-0.04, 0.04, 9), np.linspace(-0.04, 0.04, 9), z=0.005)
+        points = panel.copy()
+        points[:, 2] = 0
+        point_normals = np.tile([0.0, 0.0, 1.0], (len(panel), 1))
+        distances, cosines = np.full(len(panel), 0.005), np.ones(len(panel))
+        closest = np.tile([1.0, 0.0], (len(panel), 1))
+        solved = np.tile([0.0, 1.0], (len(panel), 1))
+        sit = np.tile(np.eye(4), (2, 1, 1))
+        sit[0, 2, 3] = 0.02
+        merge = wt.find_vertex_merge_map(panel, wt.BRIDGE_WELD)
+        args = (panel, pf, merge, points, point_normals, distances, cosines, closest)
+        pull = wt.flex_follow(*args, solved, [sit])
+        np.testing.assert_allclose(pull, 1)
+        np.testing.assert_array_equal(wt.flex_follow(*args, closest, [sit]), 0)
+        np.testing.assert_array_equal(wt.flex_follow(*args, solved, []), 0)
+        # Where it bridges a crease, only HEM_FLEX_BRIDGE of it.
+        with patch.object(wt, 'crease_bridges', return_value=np.ones(len(panel))):
+            np.testing.assert_allclose(wt.flex_follow(*args, solved, [sit]), wt.HEM_FLEX_BRIDGE)
+
+    def test_template_pulls_hold_rings_of_neighbours(self):
+        # A strip of quads along x: the pull on its first column reaches FOLLOW_RINGS columns, falling off by
+        # FOLLOW_RING_SHARE per ring.
+        strip, sf = flat_grid(np.linspace(0, 0.05, 6), np.linspace(0, 0.01, 2))
+        pull = np.where(strip[:, 0] == 0, 0.9, 0.0)
+        spread = wt.spread_pull(sf, pull)
+        for column in range(6):
+            expected = 0.9 * wt.FOLLOW_RING_SHARE ** column if column <= wt.FOLLOW_RINGS else 0.0
+            np.testing.assert_allclose(spread[np.isclose(strip[:, 0], 0.01 * column)], expected, atol=1e-12)
+        # A larger pull of its own stays.
+        pull[np.isclose(strip[:, 0], 0.02)] = 1.0
+        self.assertEqual(wt.spread_pull(sf, pull)[np.isclose(strip[:, 0], 0.02)].min(), 1.0)
+        np.testing.assert_array_equal(wt.spread_pull(sf, pull, rings=0), pull)
+
     def test_soft_matches_anchor_otherwise_rejected_parts(self):
         v, f, w, matched = split_surface()
         w[4:] = [0.9, 0.1]
@@ -2148,6 +2208,13 @@ class CreaseSmoothingTests(TransferScene, unittest.TestCase):
         batch = follow.call_args.args[0]
         self.assertIn('strides', batch[0])
         self.assertEqual(len(batch[0]['strides']['poses']), 4)
+        self.assertEqual(len(batch[0]['strides']['flex']), 3)
+        # Without Customize+, the skirt follows the default template's skin.
+        np.testing.assert_allclose(batch[0]['cplus'], batch[0]['strides']['template'])
+        names = [g.name for g in self.body.vertex_groups]
+        self.assertAlmostEqual(np.linalg.det(batch[0]['cplus'][names.index('j_asi_a_l')][:3, :3]),
+                               wt.HEM_THIGH_SCALE ** 2, places=6)
+        np.testing.assert_allclose(batch[0]['cplus'][names.index('j_kosi')], np.eye(4), atol=1e-9)
         self.assertTrue(pulls)
         weights = self.read(skirt, ['j_asi_a_l', 'j_asi_a_r', 'j_kosi'])
         np.testing.assert_allclose(weights.sum(axis=1), 1, atol=1e-5)

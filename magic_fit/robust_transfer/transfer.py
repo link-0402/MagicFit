@@ -138,12 +138,16 @@ def stride_source(body, names, vertices, weights, surface_bvh, posed=False):
     rows = [index.get(name) for name in names]
     identity = np.eye(4)
     poses = [np.array([pose[row] if row is not None else identity for row in rows]) for pose in poses]
+    template = weighttransfer.template_pose([bone.name for bone in bones], start, parents)
+    template = np.array([template[row] if row is not None else identity for row in rows])
+    flex = [np.array([pose[row] if row is not None else identity for row in rows])
+            for pose in weighttransfer.flex_poses([bone.name for bone in bones], start, parents, front, down)]
     legs = np.zeros((len(names), 2))
     for side, root in enumerate(weighttransfer.HEM_LEGS):
         for bone in armature.data.bones[root].children_recursive + [armature.data.bones[root]]:
             if bone.name in columns:
                 legs[columns[bone.name], side] = 1
-    return dict(poses=poses, legs=legs, bvh=surface_bvh)
+    return dict(poses=poses, legs=legs, bvh=surface_bvh, template=template, flex=flex)
 
 
 def make_target(obj, depsgraph, settings):
@@ -313,8 +317,10 @@ def solve_targets(targets, settings, fallback=None, partial=False):
 
 def follow_hems(batch, domain, settings, partial):
     """Hem Follow: where a hem lies over a leg, pull its weights towards the leg's as far as the
-    strides of weighttransfer.hem_follow need, and solve again on the same Laplacian. Meshes with a
-    Customize+ template (``target['cplus']``) also follow the skin wherever it would pass through them."""
+    strides of weighttransfer.hem_follow need, and anywhere as far as sitting needs
+    (weighttransfer.flex_follow), and solve again on the same Laplacian. Meshes with a Customize+-like
+    template (``target['cplus']``) also follow the skin wherever it would pass through them, with rings of
+    their neighbours (weighttransfer.spread_pull)."""
     offsets = np.cumsum([0] + [len(t['vertices']) for t in batch])
     pulls = [np.zeros(len(t['vertices'])) for t in batch]
     # Meshes solved together are checked together (their seams aren't hems), each group of them with
@@ -327,18 +333,25 @@ def follow_hems(batch, domain, settings, partial):
         group = [batch[position] for position in members]
         ends = np.cumsum([0] + [len(t['vertices']) for t in group])
         vertices = np.concatenate([t['vertices'] for t in group])
+        triangles = np.concatenate([t['triangles'] + offset for t, offset in zip(group, ends)])
         merge_map = weighttransfer.find_vertex_merge_map(
             vertices, max(weld_distance(settings), weighttransfer.BRIDGE_WELD))
         strides = group[0]['strides']
+        joined = {key: np.concatenate([t[key] for t in group]) for key in (
+            'normals', 'points', 'point_normals', 'distances', 'cosines', 'closest_weights', 'weights', 'leg_share')}
         pull = weighttransfer.hem_follow(
-            vertices, np.concatenate([t['triangles'] + offset for t, offset in zip(group, ends)]), merge_map,
-            *(np.concatenate([t[key] for t in group]) for key in (
+            vertices, triangles, merge_map, *(joined[key] for key in (
                 'normals', 'points', 'point_normals', 'distances', 'closest_weights', 'weights', 'leg_share')),
             strides['poses'], strides['bvh'])
+        pull = np.maximum(pull, weighttransfer.flex_follow(
+            vertices, triangles, merge_map, *(joined[key] for key in (
+                'points', 'point_normals', 'distances', 'cosines', 'closest_weights', 'weights')),
+            strides.get('flex', [])))
         for position, start, end in zip(members, ends, ends[1:]):
             pulls[position] = pull[start:end]
-    # With Customize+ (see cplus_follow), anywhere the template's skin would pass through the mesh.
-    templates = [cplus_follow(target) if 'cplus' in target else np.zeros(len(target['vertices'])) for target in batch]
+    # With a template (see cplus_follow), anywhere its skin would pass through the mesh.
+    templates = [weighttransfer.spread_pull(target['triangles'], cplus_follow(target)) if 'cplus' in target
+                 else np.zeros(len(target['vertices'])) for target in batch]
     if not any(np.any(pull > 1e-3) for pull in pulls + templates):
         return
     priors, confidences = [], []
@@ -377,10 +390,11 @@ def follow_hems(batch, domain, settings, partial):
 
 
 def cplus_follow(target):
-    """How far (0 to 1) to pull each vertex towards its closest-point weights so that the skin its Customize+
-    template moves (``target['cplus']``, deform matrices per weight column) doesn't pass through it: anywhere,
-    also where the skin touches it from outside, like a thigh fold over the edge of a thong's crotch, which
-    the solve otherwise barely trusts (weighttransfer.bridge_confidence)."""
+    """How far (0 to 1) to pull each vertex towards its closest-point weights so that the skin its template
+    moves (``target['cplus']``, deform matrices per weight column: the Customize+ template it's transferred
+    with, or without one weighttransfer.template_pose) doesn't pass through it: anywhere, also where the skin
+    touches it from outside, like a thigh fold over the edge of a thong's crotch, which the solve otherwise
+    barely trusts (weighttransfer.bridge_confidence)."""
     pull = np.zeros(len(target['vertices']))
     rows = np.flatnonzero((target['distances'] <= MAX_DISTANCE) & (target['closest_weights'].sum(axis=1) > 0)
                           & (target['weights'].sum(axis=1) > 0))
