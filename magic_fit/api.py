@@ -421,6 +421,8 @@ def resize_meshes(meshes, sizes, job, labels, show=False, progress=None):
 # tell sizes apart well enough to offer.
 FROM_SHARE = 0.9
 FROM_SAMPLE = 4000
+# A quick reading (a hint after Resize) on at most this many.
+FROM_QUICK_SAMPLE = 1000
 FROM_REACH = 0.02
 # Fewer skin points than this read nothing.
 FROM_LEAST = 50
@@ -510,10 +512,10 @@ class FromReading:
         return now * FROM_RATIO > best and now > best + FROM_MARGIN
 
 
-def _skin_points(meshes, job, source, tris):
+def _skin_points(meshes, source, tris, sample=FROM_SAMPLE):
     """World positions of the skin of ``meshes`` as they fit the From body (``source``, ``tris``): their vertices
     drawn with the game's skin material, and meshes lying on the body like a copy of its skin (see resizing.is_skin),
-    welded and thinned to at most FROM_SAMPLE."""
+    welded and thinned to at most ``sample``."""
     from_print = resizing.fingerprint(source)
     found = []
     for obj in meshes:
@@ -528,8 +530,8 @@ def _skin_points(meshes, job, source, tris):
     points = np.concatenate(found)
     _spots, first = np.unique(np.round(points / 1e-6).astype(np.int64), axis=0, return_index=True)
     points = points[np.sort(first)]
-    if len(points) > FROM_SAMPLE:
-        points = points[np.sort(np.random.default_rng(0).choice(len(points), FROM_SAMPLE, replace=False))]
+    if len(points) > sample:
+        points = points[np.sort(np.random.default_rng(0).choice(len(points), sample, replace=False))]
     return points
 
 
@@ -553,12 +555,13 @@ def _fit(points, co, tris):
     return float(ordered[int(np.ceil(FROM_SHARE * len(ordered))) - 1]), float((distance < FROM_REACH).mean())
 
 
-def read_from_size(meshes, job=None, *, scene=None):
+def read_from_size(meshes, job=None, *, scene=None, quick=False):
     """Read which size of the From body the clothing ``meshes`` was made on, from their skin (see FROM_SHARE): a
     FromReading. ``job`` (Job) is the Auto Resize panel's of ``scene`` (the current one) when None. Sizes are every
     combination of the From body's settings that reshape the body under the skin (see FROM_MOVES; not those the Sizes
     section lists as shared, nor those that barely reshape it); past sizing.MAX_SIZES of them, each setting is tried
-    in turn from the best so far until none fits better. Nothing is changed. Raises ResizeError."""
+    in turn from the best so far until none fits better. ``quick`` (for a hint, like Resize's) always tries them so,
+    on FROM_QUICK_SAMPLE points. Nothing is changed. Raises ResizeError."""
     if job is None:
         job = Job((scene or bpy.context.scene).body_fit_brush)
     body = job.body
@@ -581,7 +584,7 @@ def read_from_size(meshes, job=None, *, scene=None):
                                      if setting.source is not None and setting.kind != 'KEY'})
     now = {setting.name: setting.current for setting in settings if setting.current is not None}
     source = shape({})
-    points = _skin_points(meshes, job, source, tris)
+    points = _skin_points(meshes, source, tris, FROM_QUICK_SAMPLE if quick else FROM_SAMPLE)
     if len(points) < FROM_LEAST:
         return FromReading([], [], [], len(points), settings)
     # The body's vertices under the skin.
@@ -609,8 +612,8 @@ def read_from_size(meshes, job=None, *, scene=None):
         if key not in read:
             read[key] = (values,) + _fit(points, shape(values), tris)
         return read[key]
-    sizes = sizing.combinations(settings, picks, now, limit=sizing.MAX_SIZES + 1)
-    if len(sizes) <= sizing.MAX_SIZES:
+    sizes = [] if quick else sizing.combinations(settings, picks, now, limit=sizing.MAX_SIZES + 1)
+    if not quick and len(sizes) <= sizing.MAX_SIZES:
         for values in sizes:
             fit(values)
     else:
@@ -638,9 +641,8 @@ def set_from_size(body, size, settings=None):
     if settings is None:
         settings, _problems = sizing.body_settings(body)
     by_name = {setting.name: setting for setting in settings}
-    order = {name: index for index, name in enumerate(sizing._Yab.NAMED)}
     failed = []
-    for name in sorted(size.values, key=lambda name: (order.get(name, len(order)), name)):
+    for name in sorted(size.values, key=sizing.switch_order):
         setting, value = by_name.get(name), size.values[name]
         if setting is None or setting.source is None:
             failed.append(name)
@@ -673,6 +675,20 @@ def _blocked(part, names, fixed):
     (``fixed``, see _fixed), or one whose add-on isn't running."""
     return {name for name, owner, path in sizing.setting_sources(part)
             if name in names and ((owner.as_pointer(), path) in fixed or not sizing.can_set(owner, path))}
+
+
+def body_part_test(body, names, changed, fixed=None):
+    """A test of whether a mesh is a body part for a resize from the From ``body`` to sizes of the settings ``names``
+    that change the body's keys ``changed``: its keys follow those sizes (see sizing.follows), but for one following
+    them only through another mesh whose settings can't be switched (the From body's, ``fixed`` when read already,
+    see _fixed), which would stay as it is: that one is clothing."""
+    fixed = _fixed(body) if fixed is None else fixed
+
+    def part(obj):
+        if not names or not sizing.follows(obj, names, changed):
+            return False
+        return sizing.follows(obj, names, changed, through=False) or not _blocked(obj, names, fixed)
+    return part
 
 
 class _StateSwitch:
@@ -710,8 +726,7 @@ class _StateSwitch:
                 if keys.as_pointer() not in chained:
                     chained.add(keys.as_pointer())
                     self.keys.append(keys)
-        order = {name: index for index, name in enumerate(sizing._Yab.NAMED)}
-        self.sources.sort(key=lambda source: (order.get(source[0], len(order)), source[0], source[2]))
+        self.sources.sort(key=lambda source: sizing.switch_order(source[0]) + (source[2],))
 
     def by_hand(self, values, failed=()):
         """The parts whose keys are set, their drivers muted, at a size of ``values`` ({setting name: value}) once
@@ -765,16 +780,13 @@ class SizedMeshes:
             self._set_parts(undo, by_hand)
             bpy.context.view_layer.update()
             yield self
-        finally:
-            # Each step is put back, also when another can't be.
-            failure = None
-            for restore in reversed(undo):
-                try:
-                    restore()
-                except Exception as error:  # noqa: BLE001 - raised once the others are back
-                    failure = failure or error
-            if failure is not None:
-                raise failure
+        except BaseException:
+            # The error raised meanwhile (an export failing) is the one to tell, not one putting things back.
+            _undo(undo)
+            raise
+        failure = _undo(undo)
+        if failure is not None:
+            raise failure
 
     def _show_clothing(self, undo):
         """Show each clothing mesh's key for the size, or the shape it fits the From body in."""
@@ -839,6 +851,18 @@ class SizedMeshes:
                     _set_key(keys, block, value, undo)
                 elif not resizing._driven(keys, block, "value"):
                     _set_slider(keys, block, value, undo)
+
+
+def _undo(undo):
+    """Run the steps of ``undo`` that put things back, last first, each also when another can't be. Returns the first
+    error raised, or None."""
+    failure = None
+    for restore in reversed(undo):
+        try:
+            restore()
+        except Exception as error:  # noqa: BLE001 - raised once the others are back
+            failure = failure or error
+    return failure
 
 
 def _show_objects(objects, undo):
@@ -974,13 +998,7 @@ class Resizer:
         names = {name for size in sizes if size is not None for name in size.values}
         changed = {name for values in body_values for name in values}
         fixed = _fixed(job.body)
-
-        def part(obj):
-            # Whether mesh ``obj`` is a body part, whose keys follow the sizes: but for one following them only
-            # through another part whose settings can't be switched (the From body's), which would stay as it is.
-            if not names or not sizing.follows(obj, names, changed):
-                return False
-            return sizing.follows(obj, names, changed, through=False) or not _blocked(obj, names, fixed)
+        part = body_part_test(job.body, names, changed, fixed)
         with _object_mode():
             # Meshes standing for the devkit's parts are exported as those.
             self.substitutes, notes = {}, []

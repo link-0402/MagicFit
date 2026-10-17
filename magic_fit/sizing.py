@@ -1136,6 +1136,13 @@ def _stored(holder, name, custom):
     return holder[name] if custom else getattr(holder, name)
 
 
+def switch_order(name):
+    """Where setting ``name`` comes when settings are switched one by one, as a sort key: in the order Yet Another
+    Devkit's own callbacks take them (the chest before Lavabod, which has no Masc chest), the others after, by
+    name."""
+    return (_Yab.NAMED.index(name) if name in _Yab.NAMED else len(_Yab.NAMED), name)
+
+
 def can_set(owner, path):
     """Whether the setting at ``path`` of ``owner`` can be set: the path resolves (its add-on is running) to a
     setting (see _kind)."""

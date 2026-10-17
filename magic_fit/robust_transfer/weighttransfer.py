@@ -1080,13 +1080,17 @@ def _layer_pairs(V, F, rows, cols, heights):
 def _has_layers(V, F, heights):
     """Whether any points within twice LINK_CONTACT of their edge lengths lie in two layers (see _layer_pairs),
     so a mesh of one loose part only gets the point cloud (which fails on a few points) when it has layers."""
+    count = len(V)
+    if count < 2:
+        return False
     reach = 2 * LINK_CONTACT * _edge_spacing(V, F)
-    near = cKDTree(V).query_ball_point(V, reach)
-    rows = np.repeat(np.arange(len(V)), [len(found) for found in near])
-    cols = np.fromiter((col for found in near for col in found), dtype=np.int64, count=len(rows))
+    # Among each point's nearest, as many as the point cloud links (more never get a link).
+    k = min(30, count - 1) + 1
+    distances, cols = cKDTree(V).query(V, k=k, distance_upper_bound=float(reach.max()))
+    rows = np.broadcast_to(np.arange(count)[:, np.newaxis], cols.shape)
     # Both ways round: a link reaches as far as the farther-spaced of its two points allows.
-    apart = rows != cols
-    return bool(np.any(_layer_pairs(V, F, rows[apart], cols[apart], heights)))
+    near = (cols < count) & (cols != rows) & (distances <= reach[:, np.newaxis])
+    return bool(np.any(_layer_pairs(V, F, rows[near], cols[near], heights)))
 
 
 def _link_loose_parts(V, F, L, mass, anchors, normals=None, heights=None):

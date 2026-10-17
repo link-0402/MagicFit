@@ -160,18 +160,42 @@ def _corner_weights(corners, spots):
 
 
 def _bounded_least_squares(a, y, low, high, start):
-    """``x`` between ``low`` and ``high`` making ``a @ x`` closest to ``y`` (projected gradient on the normal
-    equations; a few keys, so cheap)."""
+    """``x`` between ``low`` and ``high`` making ``a @ x`` closest to ``y``, exactly: an active set on the normal
+    equations, the keys held at a bound solved around (a few keys, so cheap). Gradient steps crawled where keys move
+    vertices nearly alike (the chest's Squeeze and Squish), and stopped far from it."""
     h = a.T @ a
     g = a.T @ y
-    h = h + RIDGE * max(float(np.trace(h)) / max(len(h), 1), 1e-30) * np.eye(len(h))
-    step = 1.0 / max(float(np.linalg.eigvalsh(h).max()), 1e-30)
-    x = np.clip(start, low, high)
-    for _ in range(20000):
-        after = np.clip(x - step * (h @ x - g), low, high)
-        if np.abs(after - x).max() < 1e-10:
-            return after
-        x = after
+    count = len(h)
+    h = h + RIDGE * max(float(np.trace(h)) / max(count, 1), 1e-30) * np.eye(count)
+    low, high = np.asarray(low, dtype=np.float64), np.asarray(high, dtype=np.float64)
+    x = np.clip(np.asarray(start, dtype=np.float64), low, high)
+    # Keys with no room stay; the others are free until a bound stops them.
+    pinned = low >= high
+    held = pinned.copy()
+    for _ in range(10 * count + 10):
+        free = ~held
+        z = x.copy()
+        if free.any():
+            z[free] = np.linalg.solve(h[np.ix_(free, free)], g[free] - h[np.ix_(free, held)] @ x[held])
+        if np.all((z >= low - 1e-12) & (z <= high + 1e-12)):
+            x = np.clip(z, low, high)
+            # Done unless a key held at a bound would fit better off it.
+            gradient = h @ x - g
+            wrong = held & ~pinned & (((x <= low) & (gradient < -1e-12)) | ((x >= high) & (gradient > 1e-12)))
+            if not wrong.any():
+                return x
+            held[np.argmax(np.where(wrong, np.abs(gradient), -1.0))] = False
+            continue
+        # Toward z as far as the first bound it meets, which holds that key.
+        way = z - x
+        room = np.where(way > 0, (high - x) / np.where(way > 0, way, 1.0),
+                        np.where(way < 0, (low - x) / np.where(way < 0, way, 1.0), np.inf))
+        room[held] = np.inf
+        step = float(np.clip(room.min(), 0.0, 1.0))
+        x = np.clip(x + step * way, low, high)
+        stopped = free & (room <= step + 1e-12)
+        x[stopped] = np.where(way[stopped] > 0, high[stopped], low[stopped])
+        held |= stopped
     return x
 
 

@@ -70,11 +70,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-# Blender names its crash log after the open file: blender.crash.txt without one.
-$crashLogs = Join-Path $env:TEMP '*.crash.txt'
-# Each run's output files of its own, so runs at the same time don't mix them up.
-$outFile = Join-Path $env:TEMP "magic_fit_test_$PID.out"
-$errFile = Join-Path $env:TEMP "magic_fit_test_$PID.err"
+# Each run's temporary folder of its own, given to the tests' Blender as its TEMP, so runs at the same time don't
+# mix up their output files, and another Blender crashing (yours, or another run's) doesn't count as this test's.
+$systemTemp = $env:TEMP
+$runTemp = Join-Path $systemTemp "magic_fit_test_$PID"
+$null = New-Item -ItemType Directory -Force $runTemp
+# Blender writes its crash log there, named after the open file: blender.crash.txt without one.
+$crashLogs = Join-Path $runTemp '*.crash.txt'
+$outFile = Join-Path $runTemp 'test.out'
+$errFile = Join-Path $runTemp 'test.err'
 
 if (-not $BlenderPath) {
     $default = 'C:\Program Files\Blender Foundation\Blender 5.2\blender.exe'
@@ -125,8 +129,13 @@ try {
         # working" dialog. Watch for the log and kill the process so nobody has
         # to click the dialog away; so too for a test that runs too long.
         $started = Get-Date
-        $process = Start-Process -FilePath $BlenderPath -ArgumentList $blenderArgs -NoNewWindow -PassThru `
-            -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+        $env:TEMP = $env:TMP = $runTemp
+        try {
+            $process = Start-Process -FilePath $BlenderPath -ArgumentList $blenderArgs -NoNewWindow -PassThru `
+                -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+        } finally {
+            $env:TEMP = $env:TMP = $systemTemp
+        }
         $null = $process.Handle  # keeps ExitCode readable after WaitForExit(timeout)
         $crashed = $null
         $timedOut = $false
@@ -145,7 +154,12 @@ try {
         if ($exitCode -eq 0) {
             'ok      {0}' -f $t.Name
         } else {
-            $why = if ($crashed) { 'Blender crashed, see ' + $crashed.FullName }
+            if ($crashed) {
+                # Kept where it's found again: the run's folder goes when it ends.
+                $kept = Join-Path $systemTemp "magic_fit_test_$($t.Name).crash.txt"
+                Move-Item -Force $crashed.FullName $kept
+            }
+            $why = if ($crashed) { 'Blender crashed, see ' + $kept }
                    elseif ($timedOut) { "still running after $TimeoutMinutes minutes" } else { "exit $exitCode" }
             'FAILED  {0} ({1})' -f $t.Name, $why
             Get-Content $outFile, $errFile -ErrorAction SilentlyContinue | Select-Object -Last 15 |
@@ -160,5 +174,5 @@ try {
     "All $($tests.Count) tests passed."
 } finally {
     Pop-Location
-    Remove-Item $outFile, $errFile -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $runTemp -ErrorAction SilentlyContinue
 }
