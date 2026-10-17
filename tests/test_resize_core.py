@@ -531,6 +531,21 @@ def test_rigid_parts():
           "plate on the breast: and stays closer to it than without shrinking ({:.1f} mm, {:.1f} mm)".format(
               np.median(off) * 1000, np.median(off_unscaled) * 1000))
 
+    # Two small plates touching on the breast (a piercing's links): they turn and shrink alike, so they stay together.
+    first = resize.offset_sheet(np.linspace(-0.09, -0.08, 3), np.linspace(-0.005, 0.005, 3), 0.002)[0]
+    second = resize.offset_sheet(np.linspace(-0.0798, -0.0698, 3), np.linspace(-0.005, 0.005, 3), 0.002)[0]
+    links = np.concatenate([first, second])
+    labels = np.repeat([0, 1], len(first))
+    moved = shape_change.apply(links, rigid=labels)
+
+    def fit(a, b):
+        ca, cb = a - a.mean(axis=0), b - b.mean(axis=0)
+        u, _s, vt = np.linalg.svd(ca.T @ cb)
+        return vt.T @ u.T, np.sqrt((cb ** 2).sum() / (ca ** 2).sum())
+    (turn_a, scale_a), (turn_b, scale_b) = fit(first, moved[:9]), fit(second, moved[9:])
+    check(np.abs(turn_a - turn_b).max() < 1e-9 and abs(scale_a - scale_b) < 1e-9 and scale_a < 0.99,
+          "touching plates on the breast: they turn and shrink alike (x{:.3f}, x{:.3f})".format(scale_a, scale_b))
+
     co = np.concatenate([before, before + (0.1, 0.0, 0.0), before + (0.0, 0.0, 0.2)])
     edge_list = np.concatenate([edge_list, edge_list + 8, edge_list + 16])
     parts, count = resizing.loose_parts(co, edge_list)
@@ -583,6 +598,29 @@ def test_skin_follows_body():
     check(np.abs(resize.positions(skin_obj, "Medium") - medium_body[::2]).max() < 1e-6,
           "api: its key is the body's shape at the size")
     bpy.data.objects.remove(skin_obj)
+
+
+def test_bind_keeps_offsets():
+    # Points around the body, off it every which way (in the crease under the breasts too): bound to a body that
+    # doesn't change, or only turns and moves, they keep their place on it exactly. Keeping only the distance along
+    # the normal moved those whose offset doesn't run along it.
+    large, _small, quads = resize.body_shapes()
+    tris = np.concatenate([quads[:, [0, 1, 2]], quads[:, [0, 2, 3]]])
+    low, high = large.min(axis=0), large.max(axis=0)
+    inner = np.all((large[:, [0, 2]] > low[[0, 2]] + 0.2 * (high - low)[[0, 2]])
+                   & (large[:, [0, 2]] < high[[0, 2]] - 0.2 * (high - low)[[0, 2]]), axis=1)
+    rng = np.random.default_rng(3)
+    ways = rng.normal(size=(int(inner.sum()), 3))
+    points = large[inner] + 0.003 * ways / np.linalg.norm(ways, axis=1, keepdims=True) * rng.random((len(ways), 1))
+    shift = np.array((1e-6, 0.0, 0.0))
+    still = resizing.ShapeChange(large, large + shift, tris).bind(points)
+    gap = np.abs(still - (points + shift)).max()
+    check(gap < 1e-7, "bind: the body unchanged, points off it every way stay put ({:.1e} m off)".format(gap))
+    angle = 0.3
+    turn = np.array(((np.cos(angle), 0.0, np.sin(angle)), (0.0, 1.0, 0.0), (-np.sin(angle), 0.0, np.cos(angle))))
+    moved = resizing.ShapeChange(large, large @ turn.T + (0.01, 0.02, 0.0), tris).bind(points)
+    gap = np.abs(moved - (points @ turn.T + (0.01, 0.02, 0.0))).max()
+    check(gap < 1e-7, "bind: the body turned, they turn with it ({:.1e} m off)".format(gap))
 
 
 def test_sculpted_skin():
@@ -687,6 +725,33 @@ def test_bridged_shape():
     loose = np.concatenate([large, [(0.0, -0.3, 0.0)]])
     check(np.array_equal(resizing.bridged(loose, tris, resizing.BRIDGE_RADIUS)[-1], loose[-1]),
           "bridged: a vertex of no face stays where it is")
+
+
+def test_bridged_alike_where_still():
+    # The chest, and a finer flat sheet 30 cm behind it (facing back) that doubles in width and height: the chest
+    # doesn't change, so neither does its crease-free shape, though the sheet's longer edges would have smoothed the
+    # lifts in fewer passes.
+    large, _small, quads = resize.body_shapes()
+    sheet, sheet_quads = resize.grid(np.linspace(-0.17, 0.17, 137), np.linspace(-0.14, 0.12, 105),
+                                     lambda x, z: np.full_like(x, 0.3))
+    source = np.concatenate([large, sheet])
+    quads = np.concatenate([quads, sheet_quads[:, ::-1] + len(large)])
+    tris = np.concatenate([quads[:, [0, 1, 2]], quads[:, [0, 2, 3]]])
+    target = source.copy()
+    target[len(large):] = sheet * (2.0, 1.0, 2.0)
+    check(resizing.bridge_passes(source, tris) != resizing.bridge_passes(target, tris),
+          "bridged: the two shapes' own edges would smooth in different passes ({}, {})".format(
+              resizing.bridge_passes(source, tris), resizing.bridge_passes(target, tris)))
+    grown = resizing.ShapeChange(source, target, tris, bridge=resizing.BRIDGE_RADIUS)
+    bridged_from, bridged_to, _levels = grown._bridged
+    chest = slice(0, len(large))
+    lifted = np.linalg.norm(bridged_from[chest] - large, axis=1).max()
+    gap = np.abs((bridged_to - target)[chest] - (bridged_from - source)[chest]).max()
+    # (But for which of two balls equally near a vertex of the regular grid the search tree, built anew, finds.)
+    check(lifted > 0.01 and gap < 1e-4, "bridged: the still chest is lifted alike in both shapes ({:.1e} m apart)".format(
+        gap))
+    alone = np.abs(resizing.bridged(target, tris, resizing.BRIDGE_RADIUS)[chest] - bridged_to[chest]).max()
+    check(alone > 1e-4, "bridged: in the target's own passes it would differ ({:.1f} mm)".format(alone * 1000))
 
 
 def small_bridge():
@@ -837,6 +902,16 @@ def test_keep_close():
     loose = start + 0.01 * normal
     check(np.array_equal(resizing.keep_close(loose, loose + 0.01 * normal, edge_list, body, body, body_tris),
                          loose + 0.01 * normal), "keep close: loose cloth (1 cm off) isn't held to the body")
+    # Cloth 7 mm off, farther than Keep Close holds: sunk 9 mm (2 mm into the body) under one bump, 4 mm (still 3 mm
+    # out) under the other.
+    off = start + 0.005 * normal
+    sunk = off - (0.009 * bump_bag + 0.004 * bump_dent)[:, None] * normal
+    out = resizing.keep_close(off, sunk, edge_list, body, body, body_tris) @ normal
+    print("      cloth 7 mm off: {:.2f} mm off at least where it sank into the body, {:.2f} mm moved where it didn't".format(
+        out[bag].min() * 1000, np.abs(out - sunk @ normal)[dent].max() * 1000))
+    check(out[bag].min() > 0.0, "keep close: cloth farther out that sank into the body comes back out of it "
+          "({:.2f} mm off at least)".format(out[bag].min() * 1000))
+    check(np.abs(out - sunk @ normal)[dent].max() < 0.0005, "keep close: ...not where it sank but stayed out")
 
     # The To body as a mesh of its own (a finer one of the same plane), as when matched by shape.
     other, other_quads = resize.grid(np.linspace(-0.1, 0.1, 61), np.linspace(-0.1, 0.1, 61), lambda X, Z: np.zeros_like(X))
@@ -937,6 +1012,33 @@ def test_keep_covered():
     inside = max(float(np.dot(np.array(near[0]) - point, near[1]))
                  for point, near in ((point, bvh.find_nearest(point.tolist())) for point in chain))
     check(inside < 0.0, "covered: ...and out over it ({:.2f} mm off)".format(-1000 * inside))
+
+
+def test_keep_covered_not_deeper():
+    # Two boxes 2 cm wide, one on the other 0.2 mm above it and 1.5 cm to the side: a crease that closed, where
+    # points pushed out along the normal of one box's face go into the other box.
+    import bmesh
+    from mathutils import Matrix
+    bm = bmesh.new()
+    for x, z in ((0.0, 0.0), (0.015, 0.0202)):
+        bmesh.ops.create_cube(bm, size=0.02, matrix=Matrix.Translation((x, 0.0, z)))
+    bmesh.ops.triangulate(bm, faces=bm.faces[:])
+    co = np.array([v.co[:] for v in bm.verts])
+    tris = np.array([[v.index for v in f.verts] for f in bm.faces])
+    bm.free()
+    body = resizing._surface(co, tris)
+    # Pushed 2 mm up: in the crease (0.1 mm out of both), inside the lower box under the upper one, and inside the lower
+    # box away from it.
+    points = np.array([(0.008, 0.0, 0.0101), (0.008, 0.0, 0.0098), (-0.005, 0.0, 0.009)])
+    up = np.tile((0.0, 0.0, 0.002), (3, 1))
+    kept = resizing._not_deeper(body, points, up, np.ones(3, dtype=bool))
+    before, after = body.nearest(points).distance, body.nearest(points + kept).distance
+    check(np.all(after >= np.minimum(before, 0.0) - resizing.COVER_DEEPER),
+          "covered: a push never takes a point deeper into the body ({} mm before, {} mm after)".format(
+              np.round(before * 1000, 2).tolist(), np.round(after * 1000, 2).tolist()))
+    check(np.all(kept[:2, 2] < 0.001), "covered: ...pushes into the other side are held back ({} mm)".format(
+        np.round(kept[:2, 2] * 1000, 2).tolist()))
+    check(np.allclose(kept[2], up[2]), "covered: ...but a point inside one box still goes up out of it")
 
 
 def test_subdivide_for_sizes():
