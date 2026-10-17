@@ -34,15 +34,15 @@ More help is on the wiki's [Installation and Setup](https://github.com/link-0402
 
 | I want to… | Use | Read |
 | --- | --- | --- |
-| Make clothing move with a character's body | Weight Transfer, Connect Parts | [Weight Transfer](https://github.com/link-0402/MagicFit/wiki/Weight-Transfer) |
-| Fix weights where they look wrong | Weight Brushes | [Weight Brushes](https://github.com/link-0402/MagicFit/wiki/Weight-Brushes) |
-| Make skirts swing and heels stay stiff | Skirt and Heel weights | [Skirt and Heel Weights](https://github.com/link-0402/MagicFit/wiki/Skirt-and-Heel-Weights) |
-| Weight new hair or a custom face | Hair and Face weights | [Hair Weights](https://github.com/link-0402/MagicFit/wiki/Hair-Weights), [Face Weights](https://github.com/link-0402/MagicFit/wiki/Face-Weights) |
-| Push clothing out of the body where it clips | Body Fit, Fit Move | [Body Fit](https://github.com/link-0402/MagicFit/wiki/Body-Fit) |
+| Make clothing move properly with a character's body and minimize clipping | Weight Transfer, Connect Parts | [Weight Transfer](https://github.com/link-0402/MagicFit/wiki/Weight-Transfer) |
+| Fix weights where they still look wrong | Weight Brushes | [Weight Brushes](https://github.com/link-0402/MagicFit/wiki/Weight-Brushes) |
+| Give skirts proper skirt weights and prevent heeled shoes from bending | Skirt and Heel weights | [Skirt and Heel Weights](https://github.com/link-0402/MagicFit/wiki/Skirt-and-Heel-Weights) |
+| Apply weights to hair or a custom face without a direct weight transfer source | Hair and Face weights | [Hair Weights](https://github.com/link-0402/MagicFit/wiki/Hair-Weights), [Face Weights](https://github.com/link-0402/MagicFit/wiki/Face-Weights) |
+| Fit clothing around a body | Body Fit, Fit Move | [Body Fit](https://github.com/link-0402/MagicFit/wiki/Body-Fit) |
 | Move an outfit to another body mod or size | Auto Resize | [Auto Resize](https://github.com/link-0402/MagicFit/wiki/Auto-Resize) |
-| Bring in a model from another game | Line Up | [Line Up](https://github.com/link-0402/MagicFit/wiki/Line-Up) |
+| Adjust an imported model from another game for easy porting | Line Up | [Line Up](https://github.com/link-0402/MagicFit/wiki/Line-Up) |
 | Fix stretched textures, torn seams, messy meshes, bad shading or UVs | Mesh Repair | [Texture Relax and Close Rips](https://github.com/link-0402/MagicFit/wiki/Texture-Relax-and-Close-Rips), [Rebuild Mesh](https://github.com/link-0402/MagicFit/wiki/Rebuild-Mesh) |
-| See how a Customize+ template changes an outfit | Customize+ | [Customize+](https://github.com/link-0402/MagicFit/wiki/Customize-Plus) |
+| See how a weighted model behaves with my Customize+ template applied | Customize+ | [Customize+](https://github.com/link-0402/MagicFit/wiki/Customize-Plus) |
 
 ## Help
 
