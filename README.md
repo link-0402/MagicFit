@@ -1,6 +1,6 @@
 # Magic Fit
 
-Magic Fit is a Blender add-on for Final Fantasy XIV modders. It gets clothing, hair and faces ready for the game: it gives meshes the weights they need to move with a character, fits clothing to a body, resizes outfits between body mods, lines up models from other games and repairs what porting leaves behind.
+Magic Fit is a Blender add-on built for common Final Fantasy XIV modding workflows. It features a purpose built, advanced weight transfer logic to minimize clipping and improve C+ compatibility, generating clean, fitting weights for hairs, faces and skirts. It allows easily resizing outfits, both from another FFXIV base body as well as other bodies (from different games). It allows lining up models from other games for easy fitting and repairs bad mashes and editing errors. Various fitting brushes and tools allow easier editing and sculpting, circumventing common issues and frustrations.
 
 ![The Magic Fit tab in Blender's sidebar](docs/images/sidebar.png)
 
@@ -47,6 +47,7 @@ More help is on the wiki's [Installation and Setup](https://github.com/link-0402
 ## Help
 
 Something not working? Try [Troubleshooting and FAQ](https://github.com/link-0402/MagicFit/wiki/Troubleshooting-and-FAQ). If that doesn't help, or a model from another game doesn't line up, please [open an issue](https://github.com/link-0402/MagicFit/issues).
+You can additionally get support on the [Discord](https://discord.gg/w5vzsPXsE7).
 
 ## Credits
 
