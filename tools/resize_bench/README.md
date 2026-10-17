@@ -22,8 +22,10 @@ blender -b --factory-startup --python tools/resize_bench/dump_garments.py -- ITE
   so far is an Instant Edit export's snapshot: the YAB 4.2 Mannequin, at Medium Rue, with a backless sleeve top,
   its skin and its piercings.
 - `dump_garments.py` reads a list of garments: game models (`.mdl`, every submesh a mesh, skin ones too) and
-  objects of .blend files. They're resized from the size they fit best (picked over the parts of the body the
-  sizes change).
+  objects of .blend files. They're resized from the size they were made on: read from their skin as Magic Fit's
+  Detect From Size reads it (the size 90 % of the skin lies closest to; the body's own size among those fitting
+  alike), or for garments without skin, the size their points fit best over the parts of the body the sizes change.
+  Each result's `from_by` says which.
 
 ## Running
 

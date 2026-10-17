@@ -3114,6 +3114,109 @@ class MAGIC_FIT_OT_match_sliders(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _mm(distance):
+    """A distance api.read_from_size read, to show: those it gave up at, as more."""
+    if distance >= api.FROM_REACH:
+        return "over {:.0f} mm".format(1000.0 * api.FROM_REACH)
+    return "{:.1f} mm".format(1000.0 * distance)
+
+
+def from_size_note(reading, body):
+    """What to tell the user when the size ``body`` (the From body) shows fits the clothing's skin clearly worse than
+    another (an api.FromReading that disagrees), or None."""
+    if not reading.disagrees:
+        return None
+    now = reading.sizes[reading.shows]
+    if reading.size is not None:
+        sizes = reading.size.name
+    else:
+        # Unclear which: the two fitting best.
+        order = sorted(range(len(reading.sizes)), key=lambda index: reading.fits[index])
+        sizes = " or ".join(reading.sizes[index].name for index in order[:2])
+    return ("The clothing's skin fits '{:s}' at {:s} better than as it is, {:s} ({:s} off, was {:s}): Detect From "
+            "Size, or check its settings").format(body.name, sizes, now.name, _mm(reading.fits[reading.best]),
+                                                  _mm(reading.fits[reading.shows]))
+
+
+def check_detect_from_ready(context):
+    """Why Detect From Size can't run right now, or None."""
+    if context.mode not in {'OBJECT', 'EDIT_MESH'}:
+        return "Detect in Object or Edit Mode"
+    body = context.scene.body_fit_brush.resize_from_object
+    if body is None or body.type != 'MESH':
+        return "Pick the From Body"
+    if not sizing.offers_sizes(body):
+        return "'{:s}' has no sizes to pick from".format(body.name)
+    if not resize_targets(context):
+        return "Select the clothing, with its skin"
+    return None
+
+
+class MAGIC_FIT_OT_resize_detect_from(bpy.types.Operator):
+    """Switch the From body to the size the selected clothing was made on (its chest size, Rue, Lavabod...), read
+    from the skin among it: the faces drawn with the game's skin material, or a copy of the body's skin"""
+    bl_idname = "magic_fit.resize_detect_from"
+    bl_label = "Detect From Size"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        problem = check_detect_from_ready(context)
+        if problem is not None:
+            cls.poll_message_set(problem)
+            return False
+        return True
+
+    def execute(self, context):
+        settings = context.scene.body_fit_brush
+        body = settings.resize_from_object
+        edit = context.mode == 'EDIT_MESH'
+        if edit:
+            bpy.ops.object.mode_set(mode='OBJECT')
+        try:
+            reading = api.read_from_size(resize_targets(context), api.Job(settings))
+        except resizing.ResizeError as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
+        finally:
+            if edit:
+                bpy.ops.object.mode_set(mode='EDIT')
+        if reading.verdict == 'NO_SKIN':
+            self.report({'WARNING'}, "No skin among the selected meshes to tell the size by (faces drawn with the "
+                                     "game's skin material, or a copy of the body's skin)")
+            return {'CANCELLED'}
+        best = reading.sizes[reading.best]
+        if reading.verdict == 'NO_READING':
+            self.report({'WARNING'}, "The skin lies on no size of '{:s}' ({:s} off at best, as {:s}): is the clothing "
+                                     "made for this body, and lined up with it?".format(
+                                         body.name, _mm(reading.fits[reading.best]), best.name))
+            return {'CANCELLED'}
+        if reading.verdict == 'UNCLEAR':
+            others = sorted((index for index in range(len(reading.sizes)) if index not in reading.tied),
+                            key=lambda index: reading.fits[index])
+            self.report({'WARNING'}, "The skin fits '{:s}' about as well at {:s} ({:s} off) as at {:s} ({:s}): left as "
+                                     "it is".format(body.name, best.name, _mm(reading.fits[reading.best]),
+                                                    reading.sizes[others[0]].name, _mm(reading.fits[others[0]])))
+            return {'CANCELLED'}
+        size = reading.size
+        fit = _mm(reading.fits[reading.sizes.index(size)])
+        loose = (": still, other settings (sliders, nipples) may differ from the clothing's"
+                 if reading.verdict == 'LOOSE' else "")
+        if size.now:
+            self.report({'INFO'}, "'{:s}' is the size the skin fits best already, {:s} ({:s} off){:s}".format(
+                body.name, size.name, fit, loose))
+            return {'FINISHED'}
+        was = _mm(reading.fits[reading.shows]) if reading.shows is not None else None
+        failed = api.set_from_size(body, size, reading.settings)
+        if failed:
+            self.report({'ERROR'}, "Couldn't switch '{:s}' to {:s}: {:s} can't be set (is the devkit's script "
+                                   "running?)".format(body.name, size.name, ", ".join(failed)))
+            return {'CANCELLED'}
+        self.report({'INFO'}, "Switched '{:s}' to {:s}: the skin lies {:s} off it{:s}{:s}".format(
+            body.name, size.name, fit, ", was {:s}".format(was) if was is not None else "", loose))
+        return {'FINISHED'}
+
+
 class MAGIC_FIT_OT_resize(bpy.types.Operator):
     """Add a shape key to the selected meshes (or those in Edit Mode) that reshapes them from the From body
     to the To body"""
@@ -3163,10 +3266,19 @@ class MAGIC_FIT_OT_resize(bpy.types.Operator):
             bpy.ops.object.mode_set(mode='OBJECT')
         window_manager = context.window_manager
         window_manager.progress_begin(0, 100)
+        from_note = None
         try:
             runs, notes = api.resize_meshes(
                 targets, sizes, job, names, show=len(sizes) == 1,
                 progress=lambda done: window_manager.progress_update(int(100 * done)))
+            # Resized from another size than the clothing was made on, it comes out too big or too small. (Skin lying
+            # off the From body doesn't follow it: its material tells it.)
+            if any(run.made for run in runs) and (any(run.skin for run in runs) or any(
+                    resizing.skin_vertices(obj).any() for obj in targets)):
+                try:
+                    from_note = from_size_note(api.read_from_size(targets, job), body)
+                except resizing.ResizeError:
+                    pass
         except resizing.ResizeError as error:
             self.report({'ERROR'}, str(error))
             return {'CANCELLED'}
@@ -3177,6 +3289,8 @@ class MAGIC_FIT_OT_resize(bpy.types.Operator):
         if all(not run.made and not run.kept for run in runs):
             self.report({'ERROR'}, "The From and To shapes are the same")
             return {'CANCELLED'}
+        if from_note is not None:
+            self.report({'WARNING'}, from_note)
         for run in runs:
             for obj, stuck in run.stuck.items():
                 self.report({'WARNING'}, "'{:s}': driven shape keys still shape it on top of '{:s}': {:s}".format(
@@ -3676,6 +3790,7 @@ classes = (
     MAGIC_FIT_OT_read_game_faces,
     MAGIC_FIT_OT_match_sliders,
     MAGIC_FIT_OT_remove_resized_keys,
+    MAGIC_FIT_OT_resize_detect_from,
     MAGIC_FIT_OT_resize_pick,
     MAGIC_FIT_OT_resize_sizes_read,
     MAGIC_FIT_OT_resize,

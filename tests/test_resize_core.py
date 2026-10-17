@@ -1769,7 +1769,7 @@ def test_resize_collection():
     check([(size.name, size.now) for size in sizes] == [("Large Rue", False), ("Medium Rue", False)],
           "api: the sizes picked ({!s})".format(sizes))
     substituted = api.resize_collection(collection, substitute=True)
-    check(api.VERSION == 3 and [sized.substitutes for sized in substituted] == [{skin: devkit}] * 2
+    check(api.VERSION >= 3 and [sized.substitutes for sized in substituted] == [{skin: devkit}] * 2
           and all(skin not in sized.keys for sized in substituted) and skin.data.shape_keys is None
           and devkit in substituted[1].parts, "api: with substitute, the skin's copy is exported as the devkit's "
                                               "Torso instead, not resized")
@@ -2129,6 +2129,94 @@ def test_match_sliders():
         sliders.sliders(body)))
     bpy.context.scene.ya_devkit_props.mannequin_state.chest_size = "0"
     bpy.context.view_layer.update()
+
+
+def skin_copy(body, values, offset=(0.0, 0.0, 0.0), name="Mod Skin"):
+    """A mod's skin: a copy of ``body``'s at the key values ``values`` (see mod_body), drawn with the game's skin
+    material."""
+    skin = mod_body(body, values, offset=offset, name=name)
+    material = bpy.data.materials.get(resize.SKIN_MATERIAL) or bpy.data.materials.new(resize.SKIN_MATERIAL)
+    skin.data.materials.append(material)
+    return skin
+
+
+def test_from_reading():
+    sizes = [api.Size("A", {"s": 0.0}, now=True), api.Size("B", {"s": 1.0}), api.Size("C", {"s": 2.0})]
+
+    def reading(fits, reached=(1.0, 1.0, 1.0), points=1000):
+        return api.FromReading(sizes, fits, reached, points, [])
+    alike = reading([0.001, 0.00105, 0.004])
+    check(alike.verdict == 'CHOSEN' and alike.tied == [0, 1] and alike.size is sizes[0] and not alike.disagrees,
+          "from reading: the size the body shows stays when another fits as well ({!r})".format(alike))
+    other = reading([0.003, 0.001, 0.0011])
+    check(other.verdict == 'CHOSEN' and other.size is sizes[1] and other.disagrees,
+          "from reading: a size fitting clearly better, and the one shown disagrees ({!r})".format(other))
+    unclear = reading([0.0025, 0.0018, 0.0021])
+    check(unclear.verdict == 'UNCLEAR' and unclear.size is None and unclear.disagrees,
+          "from reading: two sizes fitting about alike tell nothing, but the one shown fits worse than both "
+          "({!r})".format(unclear))
+    note = operators.from_size_note(unclear, bpy.data.objects.new("Some Body", None))
+    check(note is not None and "at B or C better than as it is, A" in note,
+          "from reading: the warning names both ({!s})".format(note))
+    loose = reading([0.006, 0.004, 0.009])
+    check(loose.verdict == 'LOOSE' and loose.size is sizes[1], "from reading: a loose fit still ranks the sizes")
+    check(reading([0.02, 0.012, 0.02]).verdict == 'NO_READING'
+          and reading([0.003, 0.001, 0.003], reached=(1.0, 0.3, 1.0)).verdict == 'NO_READING',
+          "from reading: nothing read from skin far from every size, or mostly out of reach")
+    few = reading([0.003, 0.001, 0.003], points=10)
+    check(few.verdict == 'NO_SKIN' and few.size is None and not few.disagrees, "from reading: too little skin")
+
+
+def test_read_from_size():
+    body, garments = resize.devkit_body()
+    state = bpy.context.scene.ya_devkit_props.mannequin_state
+    settings = reset_settings()
+    settings.resize_from_object = body
+    # Made on Medium Rue; the body shows Large.
+    skin = skin_copy(body, sizing.size_values(body, {"chest_size": 1, "rue": 1}))
+    meshes = list(garments.values()) + [skin]
+    before, settings_before = key_states(body), devkit_state()
+    reading = api.read_from_size(meshes)
+    check(key_states(body) == before and devkit_state() == settings_before, "read: nothing changed")
+    size = reading.size
+    check(reading.verdict == 'CHOSEN' and size is not None and size.values["chest_size"] == 1.0
+          and size.values["rue"] == 1.0 and size.values["leg_size"] == 0.0 and not size.values["lavabod"],
+          "read: the size the skin was made on ({!r}, {!s})".format(reading, size))
+    check(reading.fits[reading.sizes.index(size)] < 1e-4 and reading.disagrees,
+          "read: it fits, and the size the body shows disagrees")
+    note = operators.from_size_note(reading, body)
+    check(note is not None and "Medium" in note and "Rue" in note, "read: the warning names it ({!s})".format(note))
+
+    select_only(meshes)
+    check(operators.check_detect_from_ready(bpy.context) is None, "detect: ready")
+    check(bpy.ops.magic_fit.resize_detect_from() == {'FINISHED'}, "detect: ran")
+    check(state.chest_size == "1" and state.rue and state.leg_size == "0" and not state.lavabod,
+          "detect: the From body switched to Medium Rue ({!s})".format(devkit_state()))
+    bpy.context.view_layer.update()
+    again = api.read_from_size(meshes)
+    check(again.size is not None and again.size.now and not again.disagrees
+          and operators.from_size_note(again, body) is None, "detect: then it agrees ({!r})".format(again))
+    check(bpy.ops.magic_fit.resize_detect_from() == {'FINISHED'}
+          and state.chest_size == "1" and state.rue, "detect: again, it stays")
+
+    select_only(list(garments.values()))
+    check(api.read_from_size(list(garments.values())).verdict == 'NO_SKIN'
+          and bpy.ops.magic_fit.resize_detect_from() == {'CANCELLED'}, "detect: clothing without skin tells nothing")
+    away = skin_copy(body, {}, offset=(0.0, -0.05, 0.0), name="Away Skin")
+    check(api.read_from_size([away]).verdict == 'NO_READING', "detect: skin off the body tells nothing")
+    settings.resize_from_object = None
+    check(operators.check_detect_from_ready(bpy.context) == "Pick the From Body", "detect: needs the From body")
+    for prop in ("chest_size", "leg_size", "rue", "buff", "lavabod", "alt_hips"):
+        state.property_unset(prop)
+    bpy.context.view_layer.update()
+
+    # Resized from Large, which the skin disagrees with: warned of, resized all the same.
+    settings.resize_from_object = body
+    settings.resize_use_sizes = True
+    bpy.ops.magic_fit.resize_pick(setting="chest_size", option=2)
+    select_only(meshes)
+    check(bpy.ops.magic_fit.resize() == {'FINISHED'} and skin.data.shape_keys.key_blocks.get("Small") is not None,
+          "resize: from a size the skin disagrees with, still resized")
 
 
 def test_remove_resized_keys():
