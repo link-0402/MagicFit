@@ -3248,8 +3248,8 @@ class MAGIC_FIT_OT_resize(bpy.types.Operator):
             except resizing.ResizeError as error:
                 self.report({'ERROR'}, str(error))
                 return {'CANCELLED'}
-            setting_names = {setting.name for setting in picks.settings}
-            following = [obj for obj in targets if sizing.follows(obj, setting_names, changed)]
+            part = api.body_part_test(body, {setting.name for setting in picks.settings}, changed)
+            following = [obj for obj in targets if part(obj)]
             targets = [obj for obj in targets if obj not in following]
             if following:
                 self.report({'WARNING'}, "Left out {:s}: {:s} shape keys follow the sizes".format(
@@ -3276,8 +3276,8 @@ class MAGIC_FIT_OT_resize(bpy.types.Operator):
             if any(run.made for run in runs) and (any(run.skin for run in runs) or any(
                     resizing.skin_vertices(obj).any() for obj in targets)):
                 try:
-                    from_note = from_size_note(api.read_from_size(targets, job), body)
-                except resizing.ResizeError:
+                    from_note = from_size_note(api.read_from_size(targets, job, quick=True), body)
+                except Exception:  # noqa: BLE001 - only a hint: the keys are made already
                     pass
         except resizing.ResizeError as error:
             self.report({'ERROR'}, str(error))
@@ -3390,8 +3390,8 @@ class MAGIC_FIT_OT_resize_subdivide(bpy.types.Operator):
                 # Meshes whose keys follow the sizes themselves (a devkit's body parts) aren't resized, nor cut.
                 changed = {name for size in sizes if size is not None
                            for name in sizing.size_values(job.sized, size.values)}
-                names = {setting.name for setting in picks.settings}
-                targets = [obj for obj in targets if not sizing.follows(obj, names, changed)]
+                part = api.body_part_test(body, {setting.name for setting in picks.settings}, changed)
+                targets = [obj for obj in targets if not part(obj)]
             cut = added = meshes = 0
             skin = []
             for obj in targets:

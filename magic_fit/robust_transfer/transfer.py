@@ -368,8 +368,10 @@ def follow_hems(batch, domain, settings, partial):
             solved /= np.maximum(solved.sum(axis=1, keepdims=True), np.finfo(np.float64).tiny)
             prior[pulled] = (1 - pull[pulled, None]) * solved + pull[pulled, None] * prior[pulled]
         priors.append(prior)
+        # Trusted only where pulled: not in the Inpaint Mask, nor past MAX_DISTANCE.
+        hem = np.where(pulled, hem, 0.0)
         trust = weighttransfer.hem_follow_trust(target_confidence(target), hem)
-        template[pull <= 1e-3] = 0
+        template[~pulled] = 0
         confidences.append(weighttransfer.hem_follow_trust(trust, template, weighttransfer.CPLUS_TRUST))
     confidence = np.concatenate(confidences)
     domain = weighttransfer.reweight_domain(
