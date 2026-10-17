@@ -87,6 +87,11 @@ KEEP_FADE = 0.9
 KEEP_PASSES = 80
 # Rounds of measuring and correcting (each measures the distances anew).
 KEEP_ROUNDS = 8
+# Clothing farther off the source shape, up to this, is brought back to its old distance only where it ended up inside
+# the target shape (and never pulled in): cloth 4-10 mm under a breast that grows, next to the underbust crease, moved
+# less than the breast's underside (the move averages it with the ribs) and sank into it, where Keep Covered can't push
+# it out through the crease that closed.
+KEEP_SUNK_DISTANCE = 0.01
 
 # Keep Covered: last, clothing that came apart from the body is pushed back out over it. The clothing over a vertex of
 # the body is the first triangle its line out meets within this distance...
@@ -107,6 +112,8 @@ COVER_SPREAD = 0.02
 COVER_RINGS = 16
 # A push that would turn triangles over is halved at their corners up to this many times, then left out.
 COVER_HALVINGS = 4
+# So is a push that would take a point more than this deeper into the body than it is (see `_not_deeper`).
+COVER_DEEPER = 0.0001
 # A rigid part moves whole, along the sum of its points' pushes, as far as its points need: those pushed at least this
 # much the way it moves (the cosine). Moving it gets the others out only slowly: a link in a cleavage closing over it,
 # pushed out by both breasts, was left a small push up or down, and went that way several times as far as it was
@@ -425,24 +432,47 @@ def _shares(groups, octave):
                 yield level, which[active], share[active]
 
 
-def bridged(co, tris, radius):
+def _welded(co, tris):
+    """``co`` with the vertices at the same spot (split seams) as one: (welded index per vertex, their count, welded
+    edges, welded positions)."""
+    from .fitting import _weld
+    weld, count, pairs = _weld(co, tris)
+    members = np.maximum(np.bincount(weld, minlength=count), 1).astype(np.float64)
+    welded = np.stack([np.bincount(weld, weights=co[:, k], minlength=count) for k in range(3)], 1) / members[:, None]
+    return weld, count, pairs, welded
+
+
+def bridge_passes(co, tris):
+    """How many passes `bridged` smooths the lifts of the body shape ``co`` (triangles ``tris``) in: enough to spread
+    them across BRIDGE_SMOOTHING, by its median edge."""
+    tris = np.asarray(tris, dtype=np.int64).reshape(-1, 3)
+    _weld, _count, pairs, welded = _welded(np.asarray(co, dtype=np.float64), tris)
+    return _passes(pairs, welded)
+
+
+def _passes(pairs, welded):
+    if not len(pairs):
+        return 0
+    edge = float(np.median(np.linalg.norm(welded[pairs[:, 0]] - welded[pairs[:, 1]], axis=1)))
+    return min(BRIDGE_PASSES, int(math.ceil(2.0 * (BRIDGE_SMOOTHING / edge) ** 2))) if edge > 0.0 else 0
+
+
+def bridged(co, tris, radius, passes=None):
     """The body shape ``co`` (triangles ``tris``) with its creases filled: each vertex that a ball of
     ``radius`` rolled over the outside of the body can't reach is lifted onto the closest ball.
 
     There is a ball at every vertex, touching it along the vertex normal; it fits where no other part of
     the body comes closer to its center. The lifts are smoothed over the body, so they change gradually
-    between vertices. Returns positions for the same vertices; those of no face stay where they are.
+    between vertices, in ``passes`` (by default, `bridge_passes` of this shape: two shapes of a body being
+    resized take the source's, or the shape the change leaves alone would be bridged anew). Returns positions
+    for the same vertices; those of no face stay where they are.
     """
     from mathutils.kdtree import KDTree
-
-    from .fitting import _weld
 
     co = np.asarray(co, dtype=np.float64)
     tris = np.asarray(tris, dtype=np.int64).reshape(-1, 3)
     # Vertices at the same spot (split seams) are one, so lifts flow across seams.
-    weld, count, pairs = _weld(co, tris)
-    members = np.maximum(np.bincount(weld, minlength=count), 1).astype(np.float64)
-    welded = np.stack([np.bincount(weld, weights=co[:, k], minlength=count) for k in range(3)], 1) / members[:, None]
+    weld, count, pairs, welded = _welded(co, tris)
     corners = weld[tris]
     a, b, c = (welded[corners[:, k]] for k in range(3))
     face = np.cross(b - a, c - a)
@@ -475,8 +505,8 @@ def bridged(co, tris, radius):
     lift[faced] = np.where(reached[:, None], 0.0, (ball - welded[faced]) * (1.0 - radius / np.maximum(distance, 1e-12))[:, None])
     if len(pairs):
         first, second = pairs[:, 0], pairs[:, 1]
-        edge = float(np.median(np.linalg.norm(welded[first] - welded[second], axis=1)))
-        passes = min(BRIDGE_PASSES, int(math.ceil(2.0 * (BRIDGE_SMOOTHING / edge) ** 2))) if edge > 0.0 else 0
+        if passes is None:
+            passes = _passes(pairs, welded)
         # Each edge both ways, and the lifts by axis (rows), for quick sums over neighbours.
         into, out_of = np.concatenate((first, second)), np.concatenate((second, first))
         degree = np.maximum(np.bincount(into, minlength=count), 1)
@@ -543,8 +573,10 @@ class _FromShape:
         self.levels = _Levels(source[self.used], self.radius)
         self.tree_tris = tris.tolist()
         self.bridged = None
+        # Both shapes' lifts are smoothed alike, in as many passes as the source's take (see `bridged`).
+        self.bridge_passes = bridge_passes(source, tris) if bridge > 0.0 else 0
         if bridge > 0.0:
-            bridged_from = bridged(source, tris, bridge)
+            bridged_from = bridged(source, tris, bridge, self.bridge_passes)
             self.bridged = (bridged_from, _vertex_areas(bridged_from, tris)[self.used],
                             _Levels(bridged_from[self.used], self.radius))
         self._surface = self._bridged_surface = None
@@ -602,7 +634,9 @@ class ShapeChange:
         self._bridged = None
         if self.bridge > 0.0:
             bridged_from, _area, levels = self._from.bridged
-            bridged_to = bridged(self.target, self.tris, self.bridge)
+            # Smoothed in the source's passes: in the target's own (from its median edge, which every size
+            # changes) the crease-free shapes differed by millimetres where the body doesn't change.
+            bridged_to = bridged(self.target, self.tris, self.bridge, self._from.bridge_passes)
             self._bridged = (bridged_from, bridged_to, levels)
             moves = np.maximum(moves, np.linalg.norm(bridged_to - bridged_from, axis=1)[self._used])
             # Where both shapes of a vertex are unlifted the two moves agree; they differ only within reach
@@ -777,9 +811,15 @@ class ShapeChange:
                 part_share = np.bincount(part, weights=near) / np.bincount(part)
                 on_body[members] = (group_share[owner] >= RIGID_ON_BODY_SHARE) & small[owner]
                 linked = (part_share[part] >= RIGID_ON_BODY_SHARE) & chained
+            together = None
             if on_body.any():
                 result[on_body] = self.bind(start[on_body])
-            keep_rigid(start, result, rigid, on_body=on_body)
+                # The parts of a small group on the body turn and grow or shrink alike: fitted one by one to the skin
+                # under them, the links of a navel piercing (a millimetre or so across) turned over.
+                together = rigid.copy()
+                grouped = on_body[members]
+                together[members[grouped]] = int(rigid.max()) + 1 + owner[grouped]
+            keep_rigid(start, result, rigid, on_body=on_body, together=together)
             if chained is not None and linked.any():
                 # Links of a chain lying on the body move along, without turning or growing, as far as they fall short
                 # of following it, and the other links take that move, fading away from them along the chain. Bound
@@ -854,11 +894,15 @@ class ShapeChange:
 
     def bind(self, points):
         """Where ``points`` lying on the source shape (skin) go with the target shape: each keeps its spot
-        on its closest triangle of the source and its (small) distance from it along the normal there.
+        on its closest triangle of the source and its (small) offset from it, turned as the surface there
+        turns: along the normal and the triangle's sides.
 
         That is exact for a copy of the body's skin, which the smooth move only approximates: it averages
-        the body's move around each point, and Keep Close leaves tight clothing some slack. A point past
-        an open edge of the body keeps its offset from the edge.
+        the body's move around each point, and Keep Close leaves tight clothing some slack. Keeping only
+        the distance along the normal moved the points whose offset doesn't run along it (in a crease, or
+        where the smooth normal leans off the triangle's), by up to a millimetre or so even where the body
+        didn't change, and turned the small rigid parts bound by them (a navel piercing's links) apart. A
+        point past an open edge of the body keeps its offset from the edge.
         """
         points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
         if not len(points) or self.largest <= 0.0:
@@ -866,10 +910,12 @@ class ShapeChange:
         source = self._from.surface(self.source, self.tris)
         near = _shared(self._shared, ("bound", self._key, _digest(points)), lambda: source.nearest(points))
         target = _surface(self.target, self.tris, like=source)
-        normal = np.einsum("ij,ijk->ik", near.bary, target.normals[near.corners])
-        normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-12)
         location = np.einsum("ij,ijk->ik", near.bary, target.co[near.corners])
-        offset = np.where(near.beyond[:, None], points - near.location, near.distance[:, None] * normal)
+        offset = points - near.location
+        # The offset in the source's frame at the spot, put back in the target's.
+        local = np.einsum("nij,nj->ni", _frames(near.bary, near.corners, source.co, source.normals), offset)
+        turned = np.einsum("nji,nj->ni", _frames(near.bary, near.corners, target.co, target.normals), local)
+        offset = np.where(near.beyond[:, None], offset, turned)
         return np.where(near.found[:, None], location + offset, points)
 
 
@@ -1005,6 +1051,33 @@ def _surface(co, tris, like=None):
     return BodySurface(co, tris, BVHTree.FromPolygons(co.tolist(), tris.tolist(), all_triangles=True), like)
 
 
+def _frames(bary, corners, co, normals):
+    """Orthonormal frames (n x 3 x 3, the rows: the smooth normal, then two tangents) at spots ``bary`` of triangles
+    ``corners`` of a surface (its positions ``co`` and unit ``normals``): the first tangent along the triangle's first
+    side, taken off the normal. The same spots of the same surface give the same frames."""
+    a, b, c = (co[corners[:, k]] for k in range(3))
+    normal = np.einsum("ij,ijk->ik", bary, normals[corners])
+    length = np.linalg.norm(normal, axis=1, keepdims=True)
+    # Smooth normals cancelling out (a fold): the triangle's own.
+    face = np.cross(b - a, c - a)
+    normal = np.where(length > 1e-12, normal, face)
+    normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-30)
+    frames = np.zeros((len(bary), 3, 3))
+    frames[:, 0] = normal
+    tangent = np.zeros_like(normal)
+    left = np.ones(len(bary), dtype=bool)
+    # The first side, else the second, else any axis, whichever stands off the normal.
+    for side in (b - a, c - a, np.eye(3)[np.argmin(np.abs(normal), axis=1)]):
+        side = side - np.einsum("ij,ij->i", side, normal)[:, None] * normal
+        size = np.linalg.norm(side, axis=1)
+        take = left & (size > 1e-9 * np.maximum(np.linalg.norm(b - a, axis=1), 1e-30))
+        tangent[take] = side[take] / size[take, None]
+        left &= ~take
+    frames[:, 1] = tangent
+    frames[:, 2] = np.cross(normal, tangent)
+    return frames
+
+
 class _KeepClose:
     """What Keep Close measures of clothing on the source shape, the same whatever the target shape (see
     `keep_close` for the arguments)."""
@@ -1036,10 +1109,14 @@ class _KeepClose:
             self.on_skin = on.found & ~on.beyond & (np.abs(on.distance) < body_gap)
             self.height = np.where(self.on_skin, on.distance, self.height)
             self.close = (self.close & ~self.on_skin) | (self.on_skin & (np.abs(self.height) < KEEP_CLOSE_DISTANCE))
+        # Points farther out, kept out of the body only (see KEEP_SUNK_DISTANCE).
+        self.sunk = (near.found & ~near.beyond & ~self.on_skin & ~self.close & (self.height >= KEEP_CLOSE_DISTANCE)
+                     & (self.height < KEEP_SUNK_DISTANCE))
         if anchors is not None:
             free = np.ones(count, dtype=bool)
             np.logical_and.at(free, self.weld, np.asarray(anchors, dtype=bool))
             self.close &= free
+            self.sunk &= free
         pairs = np.sort(self.weld[np.asarray(edges, dtype=np.int64).reshape(-1, 2)], axis=1)
         pairs = np.unique(pairs[pairs[:, 0] != pairs[:, 1]], axis=0)
         # Each edge both ways, for sums over each point's neighbours.
@@ -1056,9 +1133,10 @@ def keep_close(start, moved, edges, source, target, tris, anchors=None, progress
     for its ``target`` shape (the body's triangles ``tris``), ``edges`` pairs of points joined by an
     edge. Points closer than KEEP_CLOSE_DISTANCE to the source shape (and in ``anchors``, when given)
     that ended up more than PULL_SLACK farther from the target shape, or PUSH_SLACK closer, are moved
-    back along the body's normal by the difference beyond that. The corrections are spread over the
-    edges, so the rest of the clothing comes along smoothly and it doesn't crease; points at the same
-    spot always move alike. Returns the new positions.
+    back along the body's normal by the difference beyond that. Points farther out, up to
+    KEEP_SUNK_DISTANCE, are moved back only while they're inside the target shape. The corrections are
+    spread over the edges, so the rest of the clothing comes along smoothly and it doesn't crease; points
+    at the same spot always move alike. Returns the new positions.
 
     With ``target_tris``, ``target`` is another mesh (the To body a body of other vertices was matched
     to by shape), and with ``known`` (per vertex of ``source``), only points over source triangles most
@@ -1077,7 +1155,7 @@ def keep_close(start, moved, edges, source, target, tris, anchors=None, progress
         start, edges, source, tris, anchors, None if skin is None else (skin[0], skin[2]))
     count, into, out_of, degree = kept.count, kept.into, kept.out_of, kept.degree
     points = np.asarray(moved, dtype=np.float64)[kept.first]
-    height, close = kept.height, kept.close
+    height, close = kept.height, kept.close | kept.sunk
     if known is not None:
         welded = np.zeros(kept.source_count, dtype=bool)
         welded[kept.source_weld] = np.asarray(known, dtype=bool)
@@ -1096,6 +1174,8 @@ def keep_close(start, moved, edges, source, target, tris, anchors=None, progress
     on_skin = kept.on_skin[which] if skin_surface is not None else np.zeros(len(which), dtype=bool)
     push_slack = np.where(on_skin, SKIN_PUSH_SLACK, PUSH_SLACK)
     pull_slack = np.where(on_skin, SKIN_PULL_SLACK, PULL_SLACK)
+    sunk = kept.sunk[which]
+    pull_slack = np.where(sunk, np.inf, pull_slack)
     settled = False
     for done in range(KEEP_ROUNDS if len(which) else 0):
         if not settled:
@@ -1107,6 +1187,8 @@ def keep_close(start, moved, edges, source, target, tris, anchors=None, progress
             ok = near.found & ~near.beyond
             need = np.where(ok, height[which] - near.distance, 0.0)
             need = np.where(need > 0.0, np.maximum(need - push_slack, 0.0), np.minimum(need + pull_slack, 0.0))
+            # Clothing farther out only where it's inside the body.
+            need = np.where(sunk & (near.distance >= 0.0), 0.0, need)
             # Nothing to correct: nor will there be in the rounds left.
             settled = not need.any()
         if not settled:
@@ -1114,7 +1196,8 @@ def keep_close(start, moved, edges, source, target, tris, anchors=None, progress
             own = np.zeros((3, count))
             own[:, which] = (need[:, None] * near.normal).T
             held = np.zeros(count, dtype=bool)
-            held[which[ok]] = True
+            # (Clothing farther out only while it needs it: held at its spot, it would hold the clothing around back.)
+            held[which[ok & (~sunk | (need != 0.0))]] = True
             keep = np.where(held, KEEP_SHARE, 0.0) * own
             scale = np.where(held, 1.0 - KEEP_SHARE, KEEP_FADE) / degree
             spread = own
@@ -1201,8 +1284,8 @@ def keep_covered(found, moved, body, rigid=None, chain=None):
     COVER_SPREAD so it comes along smoothly; rigid parts (``rigid``, a label per point, -1 for none) move whole, as far
     as their point that needs it most (of those pushed about their way, see COVER_RIGID_FACING), and fixed points
     (skin) never move. The links of a chain (``chain``: for each point its link, from 0, -1 for none; touching pairs of links;
-    how many links) move along with each other, see COVER_CHAIN_STIFFNESS. Only ever pushes out. Returns the new
-    positions.
+    how many links) move along with each other, see COVER_CHAIN_STIFFNESS. Only ever pushes out, and never deeper into
+    the body (see `_not_deeper`). Returns the new positions.
     """
     from .fitting import _barycentric
     weld, first, count, tris = found.weld, found.first, found.count, found.tris
@@ -1299,8 +1382,31 @@ def keep_covered(found, moved, body, rigid=None, chain=None):
             loose &= np.einsum("ij,ij->i", own, push) > 1e-12
             if loose.any():
                 step += _spread_pushes(found, own, loose, still | (group >= 0), now)
+        step = _not_deeper(body, now, step, group < 0)
         total += _unflipped(tris, found.normals, now, step)
     return np.asarray(moved, dtype=np.float64) + total[weld]
+
+
+def _not_deeper(body, points, step, which):
+    """``step`` (a push of ``points``), less where it would take points (of ``which``, a mask) deeper into the ``body``
+    (a BodySurface) than they are: such points move half as far, up to COVER_HALVINGS times, then not at all. In a
+    crease that closed, the body's normal on one side points into the other: pushed out along it, clothing in the
+    crease went into the other side."""
+    moving = np.flatnonzero(which & (np.einsum("ij,ij->i", step, step) > 1e-14))
+    if not len(moving):
+        return step
+    near = body.nearest(points[moving])
+    floor = np.where(near.found & ~near.beyond, np.minimum(near.distance, 0.0), -np.inf) - COVER_DEEPER
+    scale = np.ones(len(moving))
+    for halving in range(COVER_HALVINGS + 1):
+        near = body.nearest(points[moving] + step[moving] * scale[:, None])
+        deeper = near.found & ~near.beyond & (near.distance < floor) & (scale > 0.0)
+        if not deeper.any():
+            break
+        scale[deeper] = scale[deeper] * 0.5 if halving < COVER_HALVINGS else 0.0
+    result = step.copy()
+    result[moving] *= scale[:, None]
+    return result
 
 
 def _unflipped(tris, normals, points, step):
@@ -1367,14 +1473,17 @@ def _spread_pushes(found, push, pushed, still, points):
     return result
 
 
-def keep_rigid(before, after, groups, on_body=None):
+def keep_rigid(before, after, groups, on_body=None, together=None):
     """Move each group of points (label >= 0 in ``groups``) from ``before`` the rigid way (rotation and
     translation) that comes closest to where they are in ``after``, in place.
 
     With ``on_body`` (a mask per point: those lying on the body), each group also scales by the share of its points
     on the body, uniformly, as much as the space it is in grows or shrinks (the least-squares scale). A chain link,
     a ring or a band on the body grows with it, so a chain doesn't come apart between its links, and a pendant
-    hanging off it keeps its size."""
+    hanging off it keeps its size.
+
+    Groups with the same label in ``together`` (per point) turn and scale alike, each about its own center, which still
+    goes where its points do."""
     members = np.flatnonzero(groups >= 0)
     if not len(members):
         return
@@ -1385,9 +1494,13 @@ def keep_rigid(before, after, groups, on_body=None):
     center_after = np.stack([np.bincount(owner, weights=after[members, k]) for k in range(3)], 1) / count
     p = before[members] - center_before[owner]
     q = after[members] - center_after[owner]
-    # Kabsch: the rotation that best turns p into q, per group.
-    covariance = np.zeros((len(count), 3, 3))
-    np.add.at(covariance, owner, p[:, :, None] * q[:, None, :])
+    alike = owner
+    if together is not None:
+        alike = np.unique(np.asarray(together)[members], return_inverse=True)[1].reshape(-1)
+    size = int(alike.max()) + 1
+    # Kabsch: the rotation that best turns p into q, per group (or groups turning alike).
+    covariance = np.zeros((size, 3, 3))
+    np.add.at(covariance, alike, p[:, :, None] * q[:, None, :])
     u, _s, vt = np.linalg.svd(covariance)
     turn = np.transpose(vt, (0, 2, 1)) @ np.transpose(u, (0, 2, 1))
     mirror = np.linalg.det(turn) < 0.0
@@ -1396,14 +1509,14 @@ def keep_rigid(before, after, groups, on_body=None):
         flip[:, 2] = -1.0
         v = np.transpose(vt[mirror], (0, 2, 1)) * flip[:, None, :]
         turn[mirror] = v @ np.transpose(u[mirror], (0, 2, 1))
-    turned = np.einsum("nij,nj->ni", turn[owner], p)
+    turned = np.einsum("nij,nj->ni", turn[alike], p)
     if on_body is not None:
-        spread = np.bincount(owner, weights=np.einsum("ij,ij->i", turned, turned), minlength=len(count))
-        scale = np.bincount(owner, weights=np.einsum("ij,ij->i", turned, q), minlength=len(count))
+        spread = np.bincount(alike, weights=np.einsum("ij,ij->i", turned, turned), minlength=size)
+        scale = np.bincount(alike, weights=np.einsum("ij,ij->i", turned, q), minlength=size)
         scale = np.where(spread > 1e-18, scale / np.maximum(spread, 1e-30), 1.0)
-        share = np.bincount(owner, weights=np.asarray(on_body, dtype=np.float64)[members], minlength=len(count))
-        scale = 1.0 + (share / count[:, 0]) * (scale - 1.0)
-        turned *= scale[owner, None]
+        share = np.bincount(alike, weights=np.asarray(on_body, dtype=np.float64)[members], minlength=size)
+        scale = 1.0 + (share / np.bincount(alike, minlength=size)) * (scale - 1.0)
+        turned *= scale[alike, None]
     after[members] = center_after[owner] + turned
 
 
