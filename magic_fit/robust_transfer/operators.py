@@ -201,7 +201,8 @@ def match_objects(context, settings, body, objects, cplus=None):
     which of them are deform bones and which are transferred.
 
     ``cplus`` (`cplus_deform`): the meshes following the armature also follow the skin where this
-    Customize+ template would push it into them (see transfer.follow_hems)."""
+    Customize+ template would push it into them (see transfer.follow_hems); without it, where a template
+    like the ones players use would (weighttransfer.template_pose)."""
     transfer, weighttransfer = engine()
     bound = _bound(body, objects)
     loose = [obj for obj in objects if obj not in bound]
@@ -227,6 +228,9 @@ def match_objects(context, settings, body, objects, cplus=None):
             digits = transfer.digit_columns(names) & np.array(included, dtype=bool)
             matrices = (np.array([template.get(name, np.eye(4)) for name in names])
                         if template is not None else None)
+            if matrices is None and meshes is bound and strides is not None:
+                # Without Customize+, a template like the ones players use (weighttransfer.template_pose).
+                matrices = strides['template']
             for obj in meshes:
                 target = transfer.make_target(obj, depsgraph, settings)
                 target['deform_armature'] = transfer.deform_armature(obj, fallback)

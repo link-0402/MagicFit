@@ -616,6 +616,30 @@ HEM_TRUST = 0.95
 # their closest-point weights outright: at HEM_TRUST the smoothing gave a thong's crotch edges 0.29 of a
 # thigh whose skin had 0.5, and they still clipped 2.4 mm.
 CPLUS_TRUST = 1.0
+# Without Customize+, meshes follow the skin of a template like the ones players use (template_pose) the same way:
+# the strides' thicker thighs and larger butt, and breasts TEMPLATE_BUST_SCALE times as large, standing. With
+# FOLLOW_RINGS and HEM_FLEX, on 28 bottoms over the Idle, Movement, Sit, Dance and Split frames, it took the
+# clipping into the skin under the mesh at the hips and crotch down by 15-26 % without Customize+ and 42-46 %
+# with two templates, at the thighs by 39-72 %; on 24 tops under the bust (breasts 1.3: 1.0 left the under-bust
+# overhang clipping) by 24-43 %. Standing without Customize+ the crotch clips 12 % more (the midline, see
+# HEM_FLEX_BRIDGE), and stretches up to 29 % more; animated, bottoms stretch no more than before, tops' crotch
+# 13 % more (half of what With Customize+ added).
+TEMPLATE_BUST = ('j_mune_l', 'j_mune_r', 'iv_c_mune_l', 'iv_c_mune_r')
+TEMPLATE_BUST_SCALE = 1.3
+# A vertex the template pulls holds FOLLOW_RINGS rings of its neighbours along the mesh too, each ring pulled
+# FOLLOW_RING_SHARE times as far towards its own closest-point weights as the one inside it (spread_pull). Pinned
+# alone, a vertex dragged its neighbours to its weights: across the crotch, a strip pinned to one thigh's wall gave
+# the midline 0.4 of that thigh where the skin under it has 0.1, pushing it into the other thigh under the
+# template (5-8 mm), and its steps stretched the cloth (crotch stretching 133 % of Robust Weight Transfer's with
+# Customize+, 112 % with the rings). Soft rings (trusted 0.95-0.99) lost most of that; 2 rings did a little worse.
+FOLLOW_RINGS = 3
+FOLLOW_RING_SHARE = 0.7
+# Sitting: each hip and both flexed HEM_FLEX degrees forward are checked on every matched vertex, like the hems
+# in the strides (follow_needed): over the front of the thighs and hips, inpainted weights 0.1 off the skin's
+# let the thigh through by 5-11 mm. Where the mesh bridges a crease (crease_bridges), only HEM_FLEX_BRIDGE of that
+# pull counts: the crotch midline's skin weights clip standing with a thigh forward, where the blend didn't.
+HEM_FLEX = 100.0
+HEM_FLEX_BRIDGE = 0.5
 
 
 def _rotation(axis, degrees):
@@ -623,6 +647,37 @@ def _rotation(axis, degrees):
     k = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
     angle = np.radians(degrees)
     return np.eye(3) + np.sin(angle) * k + (1 - np.cos(angle)) * k @ k
+
+
+def _stride_scales(index, rest):
+    """{bone index: local scale factors} of the strides' Customize+-like shape (HEM_THIGH_SCALE, HEM_BUTT_SCALE)
+    for a skeleton with bone ``index`` by name and ``rest`` matrices."""
+    scales = {index[name]: (HEM_BUTT_SCALE,) * 3 for name in HEM_BUTT if name in index}
+    for thigh, knee in zip(HEM_LEGS, HEM_KNEES):
+        if thigh not in index:
+            continue
+        # Thicker across the leg: whichever of the thigh's axes runs along it (towards the knee, or the
+        # bone itself without one) keeps its length.
+        bone = index[thigh]
+        along = (rest[index[knee]][:3, 3] - rest[bone][:3, 3]) if knee in index else rest[bone][:3, 1]
+        factors = np.full(3, HEM_THIGH_SCALE)
+        factors[int(np.argmax(np.abs(rest[bone][:3, :3].T @ along)))] = 1.0
+        scales[bone] = tuple(factors)
+    return scales
+
+
+def template_pose(names, rest, parents):
+    """Deform matrices of a Customize+-like template for a skeleton (bone ``names``, ``rest`` matrices or a
+    pose, ``parents``): the strides' thicker thighs and larger butt (_stride_scales), and TEMPLATE_BUST_SCALE
+    times as large breasts, standing. None without both thighs (HEM_LEGS)."""
+    rest = np.asarray(rest, dtype=np.float64)
+    index = {name: i for i, name in enumerate(names)}
+    if not all(name in index for name in HEM_LEGS):
+        return None
+    scales = _stride_scales(index, rest)
+    if TEMPLATE_BUST_SCALE != 1.0:
+        scales.update({index[name]: (TEMPLATE_BUST_SCALE,) * 3 for name in TEMPLATE_BUST if name in index})
+    return forward_kinematics(rest, parents, None, scales)
 
 
 def stride_poses(names, rest, parents, front, down=(0.0, 0.0, -1.0)):
@@ -638,15 +693,7 @@ def stride_poses(names, rest, parents, front, down=(0.0, 0.0, -1.0)):
     down = np.asarray(down, dtype=np.float64)
     # Turning the leg down towards the front, about the character's left-right axis.
     axis = np.cross(down, front)
-    scales = {index[name]: (HEM_BUTT_SCALE,) * 3 for name in HEM_BUTT if name in index}
-    for thigh, knee in zip(HEM_LEGS, HEM_KNEES):
-        # Thicker across the leg: whichever of the thigh's axes runs along it (towards the knee, or the
-        # bone itself without one) keeps its length.
-        bone = index[thigh]
-        along = (rest[index[knee]][:3, 3] - rest[bone][:3, 3]) if knee in index else rest[bone][:3, 1]
-        factors = np.full(3, HEM_THIGH_SCALE)
-        factors[int(np.argmax(np.abs(rest[bone][:3, :3].T @ along)))] = 1.0
-        scales[bone] = tuple(factors)
+    scales = _stride_scales(index, rest)
     poses = []
     for scaled in (None, scales):
         for forward, back in ((left, right), (right, left)):
@@ -654,6 +701,20 @@ def stride_poses(names, rest, parents, front, down=(0.0, 0.0, -1.0)):
                          for bone, degrees in ((forward, HEM_STRIDE[0]), (back, -HEM_STRIDE[1]))}
             poses.append(forward_kinematics(rest, parents, rotations, scaled))
     return poses
+
+
+def flex_poses(names, rest, parents, front, down=(0.0, 0.0, -1.0)):
+    """Deform matrices of sitting for a skeleton (as stride_poses): each hip, and both, flexed HEM_FLEX
+    degrees forward. Empty without both thighs (HEM_LEGS)."""
+    rest = np.asarray(rest, dtype=np.float64)
+    index = {name: i for i, name in enumerate(names)}
+    if not all(name in index for name in HEM_LEGS):
+        return []
+    legs = [index[name] for name in HEM_LEGS]
+    axis = np.cross(np.asarray(down, dtype=np.float64), np.asarray(front, dtype=np.float64))
+    return [forward_kinematics(rest, parents, {bone: _rotation(rest[bone][:3, :3].T @ axis, HEM_FLEX)
+                                               for bone in bones})
+            for bones in ((legs[0],), (legs[1],), tuple(legs))]
 
 
 def _skin(points, weights, matrices):
@@ -738,6 +799,42 @@ def follow_needed(vertices, points, point_normals, matched, solved, poses):
         fraction[short] = np.clip((margin[short] - gap[short]) / (keep[short] - gap[short]), 0, 1)
         needed = np.maximum(needed, fraction)
     return np.clip(needed * HEM_BOOST, 0, 1)
+
+
+def flex_follow(vertices, triangles, merge_map, points, point_normals, distances, cosines, matched, solved,
+                poses):
+    """follow_needed for sitting (``poses``, see flex_poses) on every vertex with closest-point weights
+    ``matched`` and ``solved`` weights, as much where the mesh bridges a crease as HEM_FLEX_BRIDGE allows
+    (crease_bridges, with ``points``, ``distances``, ``cosines`` and ``merge_map`` as for it)."""
+    pull = np.zeros(len(vertices))
+    rows = np.flatnonzero((np.asarray(matched).sum(axis=1) > 0) & (np.asarray(solved).sum(axis=1) > 0))
+    if not len(rows) or not poses:
+        return pull
+    pull[rows] = follow_needed(vertices[rows], points[rows], point_normals[rows], matched[rows], solved[rows],
+                               poses)
+    if np.any(pull > 0):
+        bridge = crease_bridges(vertices, triangles, points, distances, cosines, merge_map)
+        pull *= 1 - (1 - HEM_FLEX_BRIDGE) * bridge
+    return pull
+
+
+def spread_pull(triangles, pull, rings=None, share=None):
+    """``pull`` passed on along the ``triangles``' edges to ``rings`` (FOLLOW_RINGS) rings of neighbours, each
+    ring getting ``share`` (FOLLOW_RING_SHARE) of the pull of the one inside it; each vertex keeps the largest
+    pull it gets."""
+    rings = FOLLOW_RINGS if rings is None else rings
+    share = FOLLOW_RING_SHARE if share is None else share
+    F = np.asarray(triangles, dtype=np.int64).reshape(-1, 3)
+    out = np.asarray(pull, dtype=np.float64).copy()
+    if not len(F):
+        return out
+    edges = np.vstack((F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]))
+    a, b = np.concatenate((edges[:, 0], edges[:, 1])), np.concatenate((edges[:, 1], edges[:, 0]))
+    for _ring in range(int(rings)):
+        reached = np.zeros_like(out)
+        np.maximum.at(reached, a, out[b] * share)
+        out = np.maximum(out, reached)
+    return out
 
 
 def hem_follow_trust(confidence, pull, trust=None):
