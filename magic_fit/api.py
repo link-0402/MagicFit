@@ -57,6 +57,13 @@ export in its place; `shown` shows the parts and puts them in the size:
 
 Without it, those copies are resized like clothing, as before.
 
+Which size of the From body a model was made on (VERSION 4 on), read from its skin (see FROM_SHARE), to switch the
+From body to before resizing, or to pick which of a mod's options to import:
+
+    reading = api.read_from_size(collection_meshes)
+    if reading.size is not None and not reading.size.now:
+        api.set_from_size(body, reading.size)
+
 Errors meant for the user raise ResizeError.
 """
 
@@ -70,11 +77,12 @@ from . import bodyparts, properties, resizing, sizing
 from .resizing import ResizeError
 
 # Raised when what this module offers changes; other add-ons check they know it. 2 added Resizer, 3 its
-# ``substitute`` (and resize_collection's) and SizedMeshes.substitutes, and shown() switching the devkit's settings.
-VERSION = 3
+# ``substitute`` (and resize_collection's) and SizedMeshes.substitutes, and shown() switching the devkit's settings,
+# 4 read_from_size and set_from_size.
+VERSION = 4
 
-__all__ = ("VERSION", "ResizeError", "Resizer", "Size", "SizedMeshes", "body_sizes", "picked_sizes",
-           "resize_collection")
+__all__ = ("VERSION", "FromReading", "ResizeError", "Resizer", "Size", "SizedMeshes", "body_sizes", "picked_sizes",
+           "read_from_size", "resize_collection", "set_from_size")
 
 
 class Size:
@@ -401,6 +409,253 @@ def resize_meshes(meshes, sizes, job, labels, show=False, progress=None):
         runs.append(run)
         notes.extend(size_notes)
     return runs, notes
+
+
+# -----------------------------------------------------------------------------
+# Which size clothing was made on
+
+# The size a mod was made on is read from its skin: how far 90 % of the skin's points (FROM_SHARE, thinned to at most
+# FROM_SAMPLE, welded) lie from each size of the From body, distances past FROM_REACH counting as that far. The 90th
+# percentile, as the median is about the same at every size (the back and the arms don't change), and the distance to
+# the surface, not to its vertices (that reads their spacing). Clothing alone (a loose sweater fits every chest) can't
+# tell sizes apart well enough to offer.
+FROM_SHARE = 0.9
+FROM_SAMPLE = 4000
+FROM_REACH = 0.02
+# Fewer skin points than this read nothing.
+FROM_LEAST = 50
+# Nothing is read when the best size is this far off, or when fewer than FROM_REACHED of the points lie within
+# FROM_REACH of it: the skin isn't made for this body (or it isn't lined up).
+FROM_NONE = 0.01
+FROM_REACHED = 0.5
+# Sizes within FROM_TIE of the best are told apart by nothing under the skin (Large and Large Rue under a top's
+# chest): the one the body shows stays, if it's among them.
+FROM_TIE = 0.0002
+# The best is unclear when it's more than FROM_RATIO of the nearest size outside those.
+FROM_RATIO = 0.85
+# The best is loose when farther off than this, as a mod's skin often is (sliders, nipples: other settings than the
+# sizes'), which doesn't stop it ranking the sizes.
+FROM_LOOSE = 0.003
+# The size the body shows is said to disagree when the best fits within FROM_RATIO of its distance and FROM_MARGIN
+# closer than it.
+FROM_MARGIN = 0.0005
+# Settings moving the body under the skin by less than this are kept as they are.
+FROM_MOVES = 0.001
+
+
+class FromReading:
+    """What read_from_size read of which size of the From body the clothing's skin was made on.
+
+    ``sizes`` are the sizes compared (Size; the one the body shows is ``now``, its index ``shows``, None when it isn't
+    among them), ``fits`` how far off each is (meters: FROM_SHARE of the skin's points lie that close), ``reached``
+    the share of the points within FROM_REACH of each, ``points`` how many skin points were read, ``best`` the index of
+    the size fitting best and ``tied`` those within FROM_TIE of it. ``verdict``: 'NO_SKIN' (too few skin points),
+    'NO_READING' (no size fits: see FROM_NONE), 'UNCLEAR' (another size fits about as well, see FROM_RATIO), 'LOOSE'
+    (the best is farther off than FROM_LOOSE: other settings may differ) or 'CHOSEN'.
+    """
+
+    def __init__(self, sizes, fits, reached, points, settings):
+        self.sizes, self.points, self.settings = sizes, points, settings
+        self.fits, self.reached = np.asarray(fits, dtype=np.float64), np.asarray(reached, dtype=np.float64)
+        self.shows = next((index for index, size in enumerate(sizes) if size.now), None)
+        self.best = self.tied = None
+        if points < FROM_LEAST or not len(sizes):
+            self.verdict = 'NO_SKIN'
+            return
+        self.best = int(np.argmin(self.fits))
+        best = self.fits[self.best]
+        self.tied = [int(index) for index in np.flatnonzero(self.fits <= best + FROM_TIE)]
+        others = np.delete(self.fits, self.tied)
+        if best >= FROM_NONE or self.reached[self.best] < FROM_REACHED:
+            self.verdict = 'NO_READING'
+        elif len(others) and best > FROM_RATIO * others.min():
+            self.verdict = 'UNCLEAR'
+        elif best > FROM_LOOSE:
+            self.verdict = 'LOOSE'
+        else:
+            self.verdict = 'CHOSEN'
+
+    def __repr__(self):
+        best = "" if self.best is None else ", best {!r} {:.2f} mm".format(self.sizes[self.best].name,
+                                                                         1000.0 * self.fits[self.best])
+        return "FromReading({:s}, {:d} points{:s})".format(self.verdict, self.points, best)
+
+    @property
+    def read(self):
+        """Whether the skin tells which size it's made on (CHOSEN or LOOSE)."""
+        return self.verdict in ('CHOSEN', 'LOOSE')
+
+    @property
+    def size(self):
+        """The size the skin was made on (Size), or None when it doesn't tell: the one the body shows when it fits
+        as well as the best (see FROM_TIE), else of those, the one changing the fewest settings from it."""
+        if not self.read:
+            return None
+        if self.shows in self.tied:
+            return self.sizes[self.shows]
+        now = self.sizes[self.shows].values if self.shows is not None else {}
+
+        def changes(index):
+            values = self.sizes[index].values
+            return sum(values.get(name) != value for name, value in now.items()), self.fits[index]
+        return self.sizes[min(self.tied, key=changes)]
+
+    @property
+    def disagrees(self):
+        """Whether the size the body shows (the From size) fits the skin clearly worse than the best (see
+        FROM_RATIO and FROM_MARGIN)."""
+        if self.verdict in ('NO_SKIN', 'NO_READING') or self.shows is None or self.shows in self.tied:
+            return False
+        now, best = self.fits[self.shows], self.fits[self.best]
+        return now * FROM_RATIO > best and now > best + FROM_MARGIN
+
+
+def _skin_points(meshes, job, source, tris):
+    """World positions of the skin of ``meshes`` as they fit the From body (``source``, ``tris``): their vertices
+    drawn with the game's skin material, and meshes lying on the body like a copy of its skin (see resizing.is_skin),
+    welded and thinned to at most FROM_SAMPLE."""
+    from_print = resizing.fingerprint(source)
+    found = []
+    for obj in meshes:
+        shape, _mix = resizing.from_shape(obj, from_print)
+        marked = resizing.skin_vertices(obj)
+        if not marked.all() and resizing.is_skin(shape, source, tris):
+            marked[:] = True
+        if marked.any():
+            found.append(shape[marked])
+    if not found:
+        return np.zeros((0, 3))
+    points = np.concatenate(found)
+    _spots, first = np.unique(np.round(points / 1e-6).astype(np.int64), axis=0, return_index=True)
+    points = points[np.sort(first)]
+    if len(points) > FROM_SAMPLE:
+        points = points[np.sort(np.random.default_rng(0).choice(len(points), FROM_SAMPLE, replace=False))]
+    return points
+
+
+def _fit(points, co, tris):
+    """How far off the body (``co``, ``tris``) ``points`` are (see FROM_SHARE): (that distance, the share within
+    FROM_REACH)."""
+    from mathutils.bvhtree import BVHTree
+    low, high = points.min(axis=0) - FROM_REACH, points.max(axis=0) + FROM_REACH
+    inside = ((co >= low) & (co <= high)).all(axis=1)
+    near = tris[inside[tris].any(axis=1)]
+    if not len(near):
+        return FROM_REACH, 0.0
+    used, local = np.unique(near, return_inverse=True)
+    find = BVHTree.FromPolygons(co[used].tolist(), local.reshape(-1, 3).tolist(), all_triangles=True).find_nearest
+    distance = np.full(len(points), FROM_REACH)
+    for k, point in enumerate(points.tolist()):
+        hit = find(point, FROM_REACH)
+        if hit[0] is not None:
+            distance[k] = min(hit[3], FROM_REACH)
+    ordered = np.sort(distance)
+    return float(ordered[int(np.ceil(FROM_SHARE * len(ordered))) - 1]), float((distance < FROM_REACH).mean())
+
+
+def read_from_size(meshes, job=None, *, scene=None):
+    """Read which size of the From body the clothing ``meshes`` was made on, from their skin (see FROM_SHARE): a
+    FromReading. ``job`` (Job) is the Auto Resize panel's of ``scene`` (the current one) when None. Sizes are every
+    combination of the From body's settings that reshape the body under the skin (see FROM_MOVES; not those the Sizes
+    section lists as shared, nor those that barely reshape it); past sizing.MAX_SIZES of them, each setting is tried
+    in turn from the best so far until none fits better. Nothing is changed. Raises ResizeError."""
+    if job is None:
+        job = Job((scene or bpy.context.scene).body_fit_brush)
+    body = job.body
+    if body is None or body.type != 'MESH':
+        raise ResizeError("Pick the From Body")
+    groups = {}
+    shape_of = {}
+    tris = resizing._tris(body.data).astype(np.int64)
+
+    def shape(values):
+        key = tuple(sorted(values.items()))
+        if key not in shape_of:
+            keys = dict(sizing.size_values(body, values))
+            keys.update(job.source_values())
+            shape_of[key] = resizing._transform(resizing.rest_shape(body, keys, groups), body.matrix_world)
+        return shape_of[key]
+
+    settings, _problems = sizing.body_settings(body)
+    shared = sizing.shared_settings({setting.name: setting.source[1] for setting in settings
+                                     if setting.source is not None and setting.kind != 'KEY'})
+    now = {setting.name: setting.current for setting in settings if setting.current is not None}
+    source = shape({})
+    points = _skin_points(meshes, job, source, tris)
+    if len(points) < FROM_LEAST:
+        return FromReading([], [], [], len(points), settings)
+    # The body's vertices under the skin.
+    from mathutils.kdtree import KDTree
+    tree = KDTree(len(source))
+    for index, co in enumerate(source.tolist()):
+        tree.insert(co, index)
+    tree.balance()
+    under = np.unique([tree.find(point)[1] for point in points.tolist()])
+    candidates = []
+    for setting in settings:
+        if setting.more or setting.name in shared or setting.name not in now:
+            continue
+        values = [option.value for option in setting.options]
+        moves = max((np.linalg.norm(shape({setting.name: value})[under] - source[under], axis=1).max()
+                     for value in values if value != now[setting.name]), default=0.0)
+        if moves >= FROM_MOVES:
+            candidates.append(setting)
+    picks = {setting.name: {option.value for option in setting.options} for setting in candidates}
+    read = {}
+
+    def fit(values):
+        values = sizing.apply_rules(settings, values, now)
+        key = tuple(sorted(values.items()))
+        if key not in read:
+            read[key] = (values,) + _fit(points, shape(values), tris)
+        return read[key]
+    sizes = sizing.combinations(settings, picks, now, limit=sizing.MAX_SIZES + 1)
+    if len(sizes) <= sizing.MAX_SIZES:
+        for values in sizes:
+            fit(values)
+    else:
+        best = fit(dict(now))
+        for _round in range(len(candidates)):
+            start = best
+            for setting in candidates:
+                for option in setting.options:
+                    tried = fit(dict(best[0], **{setting.name: option.value}))
+                    if tried[1] < best[1]:
+                        best = tried
+            if best is start:
+                break
+    found = list(read.values())
+    # Named by what they change, the one the body shows by all it is.
+    named = [Size(sizing.size_label(settings, values, now) or sizing.state_label(settings, values) or BASE_NAME,
+                  values, sizing.is_now(values, now)) for values, _fit_of, _reached in found]
+    return FromReading(named, [fit_of for _values, fit_of, _reached in found],
+                       [reached for _values, _fit_of, reached in found], len(points), settings)
+
+
+def set_from_size(body, size, settings=None):
+    """Switch the settings of the From ``body`` to ``size`` (Size), as by hand: its add-on's callbacks run. Returns
+    the names of those that couldn't be set."""
+    if settings is None:
+        settings, _problems = sizing.body_settings(body)
+    by_name = {setting.name: setting for setting in settings}
+    order = {name: index for index, name in enumerate(sizing._Yab.NAMED)}
+    failed = []
+    for name in sorted(size.values, key=lambda name: (order.get(name, len(order)), name)):
+        setting, value = by_name.get(name), size.values[name]
+        if setting is None or setting.source is None:
+            failed.append(name)
+        elif setting.kind == 'KEY':
+            keys, key_name = setting.source
+            block = keys.key_blocks.get(key_name)
+            if block is None:
+                failed.append(name)
+            elif block.value != value:
+                block.value = value
+        elif not sizing.set_setting(*setting.source, value):
+            failed.append(name)
+    bpy.context.view_layer.update()
+    shown = sizing.current_values(settings)
+    return [name for name in size.values if name not in failed and shown.get(name) != size.values[name]] + failed
 
 
 # -----------------------------------------------------------------------------

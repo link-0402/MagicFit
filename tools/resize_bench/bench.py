@@ -33,7 +33,19 @@ import numpy as np  # noqa: E402
 import common  # noqa: E402
 import metrics  # noqa: E402
 
-# Picking a garment's From size: points within this of a size's body count, a sample of at most this many.
+# Picking a garment's From size by its skin (as Magic Fit's api.read_from_size does, a copy kept here so every
+# checkout is measured from the same size): the 90th percentile of the distances of a sample of at most SKIN_SAMPLE
+# skin points to each size's surface, capped at SKIN_REACH; sizes within SKIN_TIE of the best fit alike. Garments with
+# fewer than SKIN_MIN skin points are picked by their cloth.
+SKIN_SAMPLE = 4000
+SKIN_REACH = 0.02
+SKIN_TIE = 0.0002
+SKIN_MIN = 50
+# Skin lying on no size reads nothing (made for another body): the best this far off, or fewer than this share of it
+# within reach.
+SKIN_NONE = 0.01
+SKIN_REACHED = 0.5
+# Picking it by the cloth: points within this of a size's body count, a sample of at most this many.
 FIT_REACH = 0.03
 FIT_SAMPLE = 3000
 # ...over body vertices the sizes move more than this apart, if at least this many.
@@ -110,7 +122,40 @@ class Body:
         return out
 
 
-def pick_from(body, points):
+def pick_from(body, records):
+    """The size the garment (its mesh records) was made on: read from its skin (see SKIN_SAMPLE), else (no skin, or
+    skin lying on no size, see SKIN_NONE) from all its points (see pick_by_cloth). Returns (index, {name: (P90 mm,
+    share within reach) by skin, or as pick_by_cloth}, "skin" or "cloth")."""
+    skin = [r["verts"] for r in records if metrics.is_skin_mesh(r) and len(r["verts"])]
+    points = np.concatenate(skin) if skin else np.zeros((0, 3))
+    _u, first = np.unique(np.round(points / 1e-6).astype(np.int64), axis=0, return_index=True)
+    points = points[np.sort(first)]
+    if len(points) >= SKIN_MIN:
+        if len(points) > SKIN_SAMPLE:
+            points = points[np.sort(np.random.default_rng(0).choice(len(points), SKIN_SAMPLE, replace=False))]
+        scores, reached, fits = np.zeros(len(body.names)), np.zeros(len(body.names)), {}
+        for s, name in enumerate(body.names):
+            h, _f, _b, _beyond, found = body.surface(s).nearest(points)
+            distance = np.where(found, np.minimum(np.abs(h), SKIN_REACH), SKIN_REACH)
+            ordered = np.sort(distance)
+            scores[s] = ordered[int(np.ceil(0.9 * len(ordered))) - 1]
+            reached[s] = (distance < SKIN_REACH).mean()
+            fits[name] = (round(float(scores[s]) * 1000, 2), round(float(reached[s]), 3))
+        best = int(np.argmin(scores))
+        if scores[best] < SKIN_NONE and reached[best] >= SKIN_REACHED:
+            tied = np.flatnonzero(scores <= scores[best] + SKIN_TIE)
+            if len(tied) > 1:
+                # Sizes the skin can't tell apart (the chest under trousers' skin): as the cloth picks among them, so
+                # garments keep their size from before the skin was read where it tells nothing new.
+                cloth, _fits = pick_by_cloth(body, np.concatenate([r["verts"] for r in records]))
+                now = body.names.index(body.meta["now"])
+                best = cloth if cloth in tied else now if now in tied else best
+            return best, fits, "skin"
+    s, fits = pick_by_cloth(body, np.concatenate([r["verts"] for r in records]))
+    return s, fits, "cloth"
+
+
+def pick_by_cloth(body, points):
     """The size whose body ``points`` fit best: the smallest median distance of the points near it, with the share
     of points more than 1 mm inside weighing in. Only points over the parts of the body the sizes change count
     (else a loose sweater fits every chest alike); the size the body showed when none are. Returns (index,
@@ -164,14 +209,15 @@ def run_garment(path, body, options, magic_fit):
     settings = body.meta["settings"]
     started = time.perf_counter()
     points = np.concatenate([r["verts"] for r in records])
-    fits = None
+    fits = by = None
     if meta["from_size"] == "auto":
-        s, fits = pick_from(body, points)
+        s, fits, by = pick_from(body, records)
     else:
         s = body.names.index(meta["from_size"])
     targets = [t for t in range(len(body.names)) if t != s] if options.targets == "all" else body.near(s)
     back = {"none": set(), "all": set(targets), "near": set(body.near(s))}[options.round_trip]
-    result = {"tag": tag, "source": meta["source"], "from": body.names[s], "fits": fits, "settings": settings,
+    result = {"tag": tag, "source": meta["source"], "from": body.names[s], "from_by": by, "fits": fits,
+              "settings": settings,
               "meshes": [r["name"] for r in records], "vertices": int(len(points)), "targets": {}}
     collection = bpy.data.collections.new("bench")
     bpy.context.scene.collection.children.link(collection)

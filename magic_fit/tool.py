@@ -32,6 +32,7 @@ from .operators import (
     MAGIC_FIT_OT_pick_face,
     MAGIC_FIT_OT_pick_hair_skeleton,
     MAGIC_FIT_OT_resize,
+    MAGIC_FIT_OT_resize_detect_from,
     MAGIC_FIT_OT_resize_pick,
     MAGIC_FIT_OT_resize_sizes_read,
     MAGIC_FIT_OT_resize_subdivide,
@@ -1303,9 +1304,11 @@ class VIEW3D_PT_resize_sidebar(tabs.TabPanel, bpy.types.Panel):
         settings = context.scene.body_fit_brush
         body = settings.resize_from_object
         col = layout.column()
-        row = col.row()
+        row = col.row(align=True)
         row.alert = body is None
         row.prop(settings, "resize_from_object")
+        # The From body switched to the size the clothing's skin was made on.
+        row.operator(MAGIC_FIT_OT_resize_detect_from.bl_idname, text="", icon='VIEWZOOM')
         col.prop(settings, "resize_to_object")
         row = col.row()
         row.active = settings.resize_to_object not in (None, body)
