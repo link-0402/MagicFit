@@ -37,6 +37,11 @@ from .operators import (
     MAGIC_FIT_OT_resize_sizes_read,
     MAGIC_FIT_OT_resize_subdivide,
     MAGIC_FIT_OT_skirt_weights,
+    MAGIC_FIT_OT_squish,
+    MAGIC_FIT_OT_squish_apply,
+    MAGIC_FIT_OT_squish_preset,
+    MAGIC_FIT_OT_squish_remove,
+    MAGIC_FIT_OT_squish_setup,
     MAGIC_FIT_OT_texture_relax,
     MAGIC_FIT_OT_use_tool,
     check_connect_ready,
@@ -49,6 +54,7 @@ from .operators import (
     check_ready,
     check_relax_ready,
     check_resize_ready,
+    check_squish_ready,
     check_whole_mesh_ready,
     fit_notes,
     found_face,
@@ -65,6 +71,7 @@ WEIGHT_TOOL_IDNAME = "magic_fit.tool"
 FIT_TOOL_IDNAME = "magic_fit.body_fit_tool"
 RELAX_TOOL_IDNAME = "magic_fit.texture_relax_tool"
 MOVE_TOOL_IDNAME = "magic_fit.fit_move_tool"
+SQUISH_TOOL_IDNAME = "magic_fit.squish_tool"
 # Toolbar icons are geometry files; an absolute path without the ".dat" extension is accepted.
 ICONS_DIR = os.path.join(os.path.dirname(__file__), "icons")
 
@@ -566,6 +573,97 @@ class VIEW3D_PT_texture_relax_options(bpy.types.Panel):
 
 
 # -----------------------------------------------------------------------------
+# Squish settings
+
+def _squish_sections(settings):
+    def falloff(layout):
+        layout.prop(settings, "falloff", text="Curve")
+
+    def stroke(layout):
+        layout.prop(settings, "spacing")
+
+    def edges(layout):
+        layout.prop(settings, "max_gap")
+        layout.prop(settings, "seam_distance")
+        layout.prop(settings, "use_selected_only")
+        row = layout.row(align=True, heading="Fade at Hidden")
+        row.prop(settings, "use_fade", text="")
+        sub = row.row(align=True)
+        sub.active = settings.use_fade
+        sub.prop(settings, "fade_distance", text="")
+
+    return (
+        ("squish_brush_falloff", "Falloff", falloff),
+        ("squish_brush_stroke", "Stroke", stroke),
+        ("squish_brush_edges", "Clothing and Edges", edges),
+    )
+
+
+def _draw_squish_shape(layout, settings):
+    row = layout.row(align=True)
+    for preset, text in (('CHEST', "Chest"), ('THIGHS', "Thighs")):
+        row.operator(MAGIC_FIT_OT_squish_preset.bl_idname, text=text).preset = preset
+    layout.prop(settings, "press")
+    layout.prop(settings, "bulge")
+    layout.prop(settings, "bulge_width")
+
+
+def _draw_squish_setup(layout, settings):
+    layout.prop(settings, "body")
+    row = layout.row()
+    row.scale_y = 1.2
+    row.operator(MAGIC_FIT_OT_squish_setup.bl_idname, icon='SHAPEKEY_DATA')
+
+
+def _draw_squish_keys(layout):
+    row = layout.row(align=True)
+    row.operator(MAGIC_FIT_OT_squish_apply.bl_idname, icon='CHECKMARK')
+    row.operator(MAGIC_FIT_OT_squish_remove.bl_idname, icon='TRASH')
+
+
+def _draw_squish_settings(context, layout):
+    settings = context.scene.squish_brush
+    header = context.region.type in {'TOOL_HEADER', 'HEADER'}
+    if header:
+        layout.prop(settings, "bulge")
+        _draw_brush(layout, settings)
+        layout.popover(VIEW3D_PT_squish_options.__name__, text="Options")
+        return
+    col = layout.column()
+    _draw_squish_setup(col, settings)
+    problem = check_squish_ready(context)
+    if problem is not None:
+        col.box().label(text=problem, icon='ERROR')
+    col.separator()
+    _draw_brush(col, settings)
+    col.separator()
+    _draw_squish_shape(col, settings)
+    _draw_sections(layout, _squish_sections(settings))
+    layout.separator()
+    _draw_squish_keys(layout)
+
+
+class VIEW3D_PT_squish_options(bpy.types.Panel):
+    """Settings of the Squish brush"""
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'HEADER'
+    bl_label = "Squish Options"
+    bl_ui_units_x = 15
+
+    def draw(self, context):
+        settings = context.scene.squish_brush
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.label(text="Shape")
+        _draw_squish_shape(layout.column(), settings)
+        layout.separator()
+        _draw_popover(layout, _squish_sections(settings))
+        layout.separator()
+        _draw_squish_keys(layout)
+
+
+# -----------------------------------------------------------------------------
 # Sidebar (N panel): the Magic Fit tab, there whatever the mode. Tabs along its top sort its panels by
 # tool. A brush's panel has a button that starts painting, and all the brush's settings while it's active.
 
@@ -701,8 +799,9 @@ class VIEW3D_PT_magic_fit_tabs(bpy.types.Panel):
             prop, items = tabs.SUBTABS[tab]
             _draw_line(col)
             _draw_tabs(context, col, workspace, prop, items)
-            # Of the Body Fit tools, Fit Move needs no body. Mesh Repair's tools never do.
-            shown = needed = tab == 'FIT' and getattr(workspace, prop) != 'MOVE'
+            # Of the Body Fit tools, Fit Move needs no body, and Squish has its own (the skin under the clothing,
+            # not a devkit body). Mesh Repair's tools never do.
+            shown = needed = tab == 'FIT' and getattr(workspace, prop) not in {'MOVE', 'SQUISH'}
         else:
             # Auto Resize has bodies of its own.
             shown = needed = tab == 'LINE_UP'
@@ -1072,6 +1171,28 @@ class VIEW3D_PT_fit_move_sidebar(tabs.TabPanel, bpy.types.Panel):
         col = layout.column()
         col.label(text="Moves the selection without reaching across gaps")
         _draw_use_button(col, 'MOVE', "Fit Move", "fit_move")
+
+
+class VIEW3D_PT_squish_sidebar(tabs.TabPanel, bpy.types.Panel):
+    """Squish the skin along the edges of tight clothing"""
+    bl_label = "Squish"
+    bl_order = 1
+    tab = 'FIT'
+    subtabs = {'SQUISH'}
+
+    def draw(self, context):
+        layout = _panel_layout(self.layout)
+        if _tool_is_active(context, 'EDIT_MESH', SQUISH_TOOL_IDNAME):
+            _draw_squish_settings(context, layout)
+            return
+        col = layout.column()
+        col.label(text="Presses in the skin under tight clothing,")
+        col.label(text="and bulges it out over the clothing's edge")
+        col.separator()
+        _draw_squish_setup(col, context.scene.squish_brush)
+        _draw_use_button(col, 'SQUISH', "Squish", "squish")
+        layout.separator()
+        _draw_squish_keys(layout)
 
 
 class VIEW3D_PT_clipping_sidebar(tabs.TabPanel, bpy.types.Panel):
@@ -1632,12 +1753,45 @@ class FitMoveTool(bpy.types.WorkSpaceTool):
         _draw_move_settings(context, layout)
 
 
+class SquishTool(bpy.types.WorkSpaceTool):
+    bl_space_type = 'VIEW_3D'
+    bl_context_mode = 'EDIT_MESH'
+    bl_idname = SQUISH_TOOL_IDNAME
+    bl_label = "Squish"
+    bl_description = (
+        "Squish the skin along the edge of the clothing: the fabric presses in\n"
+        "and the skin bulges out over it (Ctrl: take it out again)"
+    )
+    bl_icon = os.path.join(ICONS_DIR, "squish")
+    bl_cursor = 'PAINT_CROSS'
+    bl_widget = None
+    bl_keymap = (
+        (MAGIC_FIT_OT_squish.bl_idname, {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
+        (MAGIC_FIT_OT_squish.bl_idname, {"type": 'LEFTMOUSE', "value": 'PRESS', "ctrl": True},
+         {"properties": [("invert", True)]}),
+        *_brush_keymap("scene.squish_brush"),
+    )
+
+    @staticmethod
+    def draw_settings(context, layout, _tool):
+        _draw_squish_settings(context, layout)
+
+    @staticmethod
+    def draw_cursor(context, _tool, xy):
+        settings = getattr(context.scene, "squish_brush", None)
+        if settings is not None and _tool_is_active(context, 'EDIT_MESH', SQUISH_TOOL_IDNAME):
+            _draw_brush_cursor(
+                xy, settings.radius, check_squish_ready(context), context.preferences.system.ui_scale,
+            )
+
+
 # The tabs first. The other sidebar panels are sorted by their bl_order, then by registration; the
 # Weight Transfer, Customize+ and Mesh Rebuild, Normals and UV panels are registered with their modules.
 classes = (
     VIEW3D_PT_magic_fit_options,
     VIEW3D_PT_body_fit_options,
     VIEW3D_PT_texture_relax_options,
+    VIEW3D_PT_squish_options,
     VIEW3D_MT_magic_fit_links,
     VIEW3D_PT_magic_fit_tabs,
     VIEW3D_PT_connect_parts_sidebar,
@@ -1655,6 +1809,7 @@ classes = (
     VIEW3D_PT_body_fit_sidebar,
     VIEW3D_PT_fit_move_sidebar,
     VIEW3D_PT_clipping_sidebar,
+    VIEW3D_PT_squish_sidebar,
     VIEW3D_PT_resize_sidebar,
     VIEW3D_PT_line_up_sidebar,
     VIEW3D_PT_texture_relax_sidebar,
@@ -1669,9 +1824,11 @@ def register():
     bpy.utils.register_tool(BodyFitTool, separator=True)
     bpy.utils.register_tool(TextureRelaxTool, after={FIT_TOOL_IDNAME})
     bpy.utils.register_tool(FitMoveTool, after={RELAX_TOOL_IDNAME})
+    bpy.utils.register_tool(SquishTool, after={MOVE_TOOL_IDNAME})
 
 
 def unregister():
+    bpy.utils.unregister_tool(SquishTool)
     bpy.utils.unregister_tool(FitMoveTool)
     bpy.utils.unregister_tool(TextureRelaxTool)
     bpy.utils.unregister_tool(BodyFitTool)

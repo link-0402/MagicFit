@@ -15,9 +15,10 @@ from mathutils.bvhtree import BVHTree
 from mathutils.geometry import intersect_line_line, intersect_line_plane
 
 from . import (api, connecting, facedata, facing, fitting, goals, hairing, hairlineup, heeling, lineup, mending, moving,
-               painting, refining, relaxing, resizing, sizing, skirting, sliders, smoothing, straighten, tabs)
+               painting, refining, relaxing, resizing, sizing, skirting, sliders, smoothing, squishing, straighten,
+               tabs)
 from .cplus import rig as cplus_rig
-from .properties import COMING_MODES, sync_sizes
+from .properties import COMING_MODES, SQUISH_PRESETS, sync_sizes
 
 # Cap on dabs per mouse event, so a fast flick can't stall the viewport.
 MAX_DABS_PER_EVENT = 64
@@ -726,6 +727,69 @@ def check_relax_ready(context):
     return None
 
 
+# The shape key the Squish brush works in, on the body and the clothing.
+SQUISH_KEY = "Squish"
+SETUP_HINT = "click Set Up Squish"
+
+
+def squish_problem(obj):
+    """Why the Squish brush can't work on ``obj`` (the body or clothing), or None when it can: it must be a mesh
+    with no shape keys but Basis and Squish, and no modifier changing its shape in Edit Mode but an Armature."""
+    if obj.type != 'MESH':
+        return "'{:s}' isn't a mesh".format(obj.name)
+    keys = obj.data.shape_keys
+    if keys is not None:
+        for key in keys.key_blocks:
+            if key != keys.reference_key and key.name != SQUISH_KEY:
+                return "'{:s}' has the shape key '{:s}': Squish works on meshes with no shape keys but Basis and " \
+                       "Squish".format(obj.name, key.name)
+    for mod in obj.modifiers:
+        if mod.show_viewport and mod.show_in_editmode and mod.type != 'ARMATURE':
+            return "'{:s}': the modifier '{:s}' changes its shape in Edit Mode. Apply it, or turn it off in Edit " \
+                   "Mode".format(obj.name, mod.name)
+    return None
+
+
+def squish_objects(context, body):
+    """The body and the clothing the Squish buttons work on: the meshes in Edit Mode, else the selected ones; each
+    mesh data once, the body first."""
+    objects = edited_meshes(context) if context.mode == 'EDIT_MESH' else context.selected_objects
+    result = [body]
+    seen = {body.data.as_pointer()}
+    for obj in objects:
+        if obj.type == 'MESH' and obj.data.as_pointer() not in seen:
+            seen.add(obj.data.as_pointer())
+            result.append(obj)
+    return result
+
+
+def check_squish_ready(context):
+    """Return why the Squish brush can't squish right now, or None when it can."""
+    obj = context.object
+    if obj is None or obj.type != 'MESH' or obj.mode != 'EDIT':
+        return "Edit the clothing and the body to squish"
+    body = context.scene.squish_brush.body
+    if body is None:
+        return "Pick the body to squish"
+    if body.type != 'MESH':
+        return "The body must be a mesh"
+    if body.mode != 'EDIT' or not edited_meshes(context, body):
+        return "Edit the body and the clothing together: " + SETUP_HINT
+    # In Edit Mode, the BMesh holds the faces as they are now.
+    if not bmesh.from_edit_mesh(body.data).faces:
+        return "The body mesh has no faces"
+    for mesh in [body, *edited_meshes(context, body)]:
+        problem = squish_problem(mesh)
+        if problem is not None:
+            return problem
+        keys = mesh.data.shape_keys
+        if keys is None or SQUISH_KEY not in keys.key_blocks:
+            return "'{:s}' has no Squish key: {:s}".format(mesh.name, SETUP_HINT)
+        if mesh.active_shape_key is None or mesh.active_shape_key.name != SQUISH_KEY:
+            return "'{:s}': the Squish key isn't the active one: {:s}".format(mesh.name, SETUP_HINT)
+    return None
+
+
 def posed_armature(obj):
     """Name of an armature that bends ``obj`` out of its rest pose, or None."""
     rest = np.identity(4)
@@ -1161,6 +1225,23 @@ class _EditedPart:
             return self.start[indices] + delta @ self.inverse.T
         return self.start[indices] + np.einsum("nij,nj->ni", self.inverse[indices], delta)
 
+    def basis_displayed(self):
+        """Where the part's Basis shape key (its edit positions without keys) is displayed (world space): moved
+        from ``origin`` as the edit positions are, from ``start`` to the Basis."""
+        keys = self.mesh.shape_keys
+        if keys is None:
+            return self.origin.copy()
+        basis = np.empty(self.count * 3, dtype=np.float32)
+        keys.reference_key.data.foreach_get("co", basis)
+        delta = basis.reshape(-1, 3).astype(np.float64) - self.start
+        if self.inverse.ndim == 2:
+            return self.origin + delta @ np.linalg.inv(self.inverse).T
+        # Vertices that can't be moved (frozen, their inverse all zero) stay where they are shown.
+        follow = np.zeros_like(self.inverse)
+        free = np.abs(np.linalg.det(self.inverse)) > 1e-12
+        follow[free] = np.linalg.inv(self.inverse[free])
+        return self.origin + np.einsum("nij,nj->ni", follow, delta)
+
 
 def _deformed_in_edit_mode(obj):
     """Whether ``obj`` may be displayed in Edit Mode away from its edit positions: with other shape keys
@@ -1323,9 +1404,10 @@ def _read_uvs(obj, tri_loops):
     return uv.astype(np.float64).reshape(-1, 2)[tri_loops]
 
 
-def read_edited_meshes(context, body, *, selected_only=False, uvs=False):
+def read_edited_meshes(context, body, *, selected_only=False, uvs=False, include_body=False):
     """Read every mesh in Edit Mode (but ``body``) for a stroke over all of them at once: their
     vertices are put together in one set of arrays, and so are their faces for the brush to follow.
+    With ``include_body``, the body is read too, first (``parts[0]``).
 
     The meshes are read as displayed, which in Edit Mode can differ from the edit positions (shape
     keys shown with Shape Key Edit Mode, a posed Armature shown in Edit Mode), see `follow_displayed`.
@@ -1334,7 +1416,10 @@ def read_edited_meshes(context, body, *, selected_only=False, uvs=False):
     result.parts = []
     movables, all_edges, all_tris, visible, all_uvs = [], [], [], [], []
     first = 0
-    for obj in edited_meshes(context, body):
+    objects = edited_meshes(context, body)
+    if include_body:
+        objects.insert(0, body)
+    for obj in objects:
         # Edit mode keeps its changes in a BMesh: copy them to the mesh to read flags and faces in bulk.
         obj.update_from_editmode()
         mesh = obj.data
@@ -1545,6 +1630,47 @@ class MAGIC_FIT_OT_body_fit(_EditMeshStroke, bpy.types.Operator):
             smooth=settings.auto_smooth if settings.use_auto_smooth else 0.0,
             weld_distance=settings.seam_distance,
             fade_distance=settings.fade_distance if settings.use_fade else 0.0,
+        )
+        return self._begin(context, event, edited, settings)
+
+
+class MAGIC_FIT_OT_squish(_EditMeshStroke, bpy.types.Operator):
+    """Squish the skin along the edge of the clothing: the fabric presses in, and the skin bulges out over its edge"""
+    bl_idname = "magic_fit.squish"
+    bl_label = "Squish Stroke"
+    bl_options = {'UNDO', 'BLOCKING'}
+
+    invert: BoolProperty(
+        name="Invert",
+        description="Take the squish out again, back to Basis",
+        options={'SKIP_SAVE'},
+    )
+
+    def invoke(self, context, event):
+        problem = check_squish_ready(context)
+        if problem is not None:
+            self.report({'WARNING'}, problem)
+            return {'CANCELLED'}
+        settings = context.scene.squish_brush
+        edited = read_edited_meshes(context, settings.body, selected_only=settings.use_selected_only,
+                                    include_body=True)
+        n = edited.parts[0].count
+        basis = np.concatenate([part.basis_displayed() for part in edited.parts])
+        # The body's triangles and edges come first: its vertices do.
+        body_tris = edited.tris[:, 0] < n
+        body_edges = edited.edges[:, 0] < n
+        self.stroke = squishing.SquishStroke(
+            edited.co[:n], basis[:n], edited.tris[body_tris], edited.movable[:n],
+            edited.co[n:], basis[n:], edited.tris[~body_tris] - n, edited.movable[n:],
+            press=settings.press,
+            bulge=settings.bulge,
+            width=settings.bulge_width,
+            max_gap=settings.max_gap,
+            body_edges=edited.edges[body_edges],
+            cloth_edges=edited.edges[~body_edges] - n,
+            weld_distance=settings.seam_distance,
+            fade_distance=settings.fade_distance if settings.use_fade else 0.0,
+            invert=self.invert,
         )
         return self._begin(context, event, edited, settings)
 
@@ -3725,6 +3851,7 @@ class MAGIC_FIT_OT_use_tool(bpy.types.Operator):
             ('FIT', "Body Fit", "Edit Mode brush that fits the mesh around the body"),
             ('RELAX', "Texture Relax", "Edit Mode brush that slides vertices until the texture is even again"),
             ('MOVE', "Fit Move", "Edit Mode tool that moves the selection without reaching across gaps"),
+            ('SQUISH', "Squish", "Edit Mode brush that squishes the skin along the edges of tight clothing"),
         ),
     )
 
@@ -3734,6 +3861,7 @@ class MAGIC_FIT_OT_use_tool(bpy.types.Operator):
         'FIT': ('EDIT', "magic_fit.body_fit_tool", 'FIT', 'FIT'),
         'RELAX': ('EDIT', "magic_fit.texture_relax_tool", 'REPAIR', 'RELAX'),
         'MOVE': ('EDIT', "magic_fit.fit_move_tool", 'FIT', 'MOVE'),
+        'SQUISH': ('EDIT', "magic_fit.squish_tool", 'FIT', 'SQUISH'),
     }
 
     @classmethod
@@ -3744,6 +3872,8 @@ class MAGIC_FIT_OT_use_tool(bpy.types.Operator):
             return "Switch to Edit Mode and pick the Texture Relax brush"
         if properties.tool == 'MOVE':
             return "Switch to Edit Mode and pick the Fit Move tool"
+        if properties.tool == 'SQUISH':
+            return "Switch to Edit Mode and pick the Squish brush"
         return "Switch to Weight Paint mode and pick the Weight Brushes"
 
     @classmethod
@@ -3768,11 +3898,180 @@ class MAGIC_FIT_OT_use_tool(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class _SquishKeys:
+    """Shared by the Squish buttons: the body and the clothing they work on, in Object Mode."""
+
+    @classmethod
+    def poll(cls, context):
+        if context.mode not in {'OBJECT', 'EDIT_MESH'}:
+            return False
+        if context.scene.squish_brush.body is None:
+            cls.poll_message_set("Pick the body to squish")
+            return False
+        return True
+
+    def objects(self, context):
+        body = context.scene.squish_brush.body
+        if body.type != 'MESH':
+            self.report({'WARNING'}, "The body must be a mesh")
+            return None
+        return squish_objects(context, body)
+
+
+class MAGIC_FIT_OT_squish_preset(bpy.types.Operator):
+    """Set Press, Bulge and Bulge Width to look like squish made by hand"""
+    bl_idname = "magic_fit.squish_preset"
+    bl_label = "Squish Preset"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    preset: EnumProperty(
+        name="Preset",
+        items=(
+            ('CHEST', "Chest", "A tight top: a high, wide bulge over its edge"),
+            ('THIGHS', "Thighs", "Tights, garters or shorts: a low, narrow bulge over their edge"),
+        ),
+    )
+
+    @classmethod
+    def description(cls, _context, properties):
+        if properties.preset == 'THIGHS':
+            return "Squish like tights, garters or shorts on the thighs: a low, narrow bulge over their edge"
+        return "Squish like a tight top on the chest: a high, wide bulge over its edge"
+
+    def execute(self, context):
+        settings = context.scene.squish_brush
+        settings.press, settings.bulge, settings.bulge_width = SQUISH_PRESETS[self.preset]
+        return {'FINISHED'}
+
+
+class MAGIC_FIT_OT_squish_setup(_SquishKeys, bpy.types.Operator):
+    """Give the body and the selected clothing a Squish shape key, make it the active one, and edit them together"""
+    bl_idname = "magic_fit.squish_setup"
+    bl_label = "Set Up Squish"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        objects = self.objects(context)
+        if objects is None:
+            return {'CANCELLED'}
+        if len(objects) < 2:
+            self.report({'WARNING'}, "Select the clothing to squish along with the body")
+            return {'CANCELLED'}
+        for obj in objects:
+            problem = squish_problem(obj)
+            if problem is None and not obj.visible_get(view_layer=context.view_layer):
+                # Edit Mode leaves out what isn't shown, and strokes would then ask for Set Up again and again.
+                problem = "'{:s}' is hidden: show it first".format(obj.name)
+            if problem is not None:
+                self.report({'WARNING'}, problem)
+                return {'CANCELLED'}
+        active = context.object if context.object in objects[1:] else objects[1]
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        for obj in objects:
+            if obj.data.shape_keys is None:
+                obj.shape_key_add(name="Basis", from_mix=False)
+            blocks = obj.data.shape_keys.key_blocks
+            if SQUISH_KEY not in blocks:
+                obj.shape_key_add(name=SQUISH_KEY, from_mix=False)
+            # Shown in full: at less, or muted, the strokes would show in Edit Mode only, not in Object Mode nor
+            # once applied.
+            blocks[SQUISH_KEY].value = 1.0
+            blocks[SQUISH_KEY].mute = False
+            obj.active_shape_key_index = blocks.find(SQUISH_KEY)
+        for obj in context.view_layer.objects:
+            obj.select_set(obj in objects)
+        context.view_layer.objects.active = active
+        try:
+            bpy.ops.object.mode_set(mode='EDIT')
+        except RuntimeError as error:
+            self.report({'WARNING'}, "Couldn't edit them together: {}".format(error))
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
+class _SquishKeyChange(_SquishKeys):
+    """Shared by Apply and Remove Squish."""
+
+    def change(self, context, apply):
+        """Delete the Squish keys of the body and the clothing, merging them into Basis first with ``apply``."""
+        objects = self.objects(context)
+        if objects is None:
+            return {'CANCELLED'}
+        objects = [obj for obj in objects if obj.data.shape_keys is not None and
+                   SQUISH_KEY in obj.data.shape_keys.key_blocks]
+        if not objects:
+            self.report({'WARNING'}, "No Squish key on the body or the clothing")
+            return {'CANCELLED'}
+        editing = context.mode == 'EDIT_MESH'
+        if editing:
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except RuntimeError as error:
+                self.report({'WARNING'}, "Couldn't leave Edit Mode: {}".format(error))
+                return {'CANCELLED'}
+        for obj in objects:
+            keys = obj.data.shape_keys
+            squish = keys.key_blocks[SQUISH_KEY]
+            if apply and squish != keys.reference_key:
+                count = len(obj.data.vertices)
+                basis = np.empty(count * 3, dtype=np.float32)
+                keys.reference_key.data.foreach_get("co", basis)
+                squished = np.empty(count * 3, dtype=np.float32)
+                squish.data.foreach_get("co", squished)
+                value = 0.0 if squish.mute else squish.value
+                merged = (basis + value * (squished - basis)).astype(np.float32)
+                keys.reference_key.data.foreach_set("co", merged)
+                obj.data.vertices.foreach_set("co", merged)
+                obj.data.update()
+            obj.shape_key_remove(squish)
+            keys = obj.data.shape_keys
+            if keys is not None and len(keys.key_blocks) == 1:
+                # Basis alone, as Set Up left a mesh that had no shape keys: the mesh goes without, as it was.
+                count = len(obj.data.vertices)
+                basis = np.empty(count * 3, dtype=np.float32)
+                keys.reference_key.data.foreach_get("co", basis)
+                obj.shape_key_clear()
+                obj.data.vertices.foreach_set("co", basis)
+                obj.data.update()
+        if editing:
+            try:
+                bpy.ops.object.mode_set(mode='EDIT')
+            except RuntimeError as error:
+                self.report({'WARNING'}, "Done, but couldn't edit them again: {}".format(error))
+        return {'FINISHED'}
+
+
+class MAGIC_FIT_OT_squish_apply(_SquishKeyChange, bpy.types.Operator):
+    """Merge the Squish key into Basis on the body and the clothing, as shown, and delete it. Do this before exporting"""
+    bl_idname = "magic_fit.squish_apply"
+    bl_label = "Apply Squish"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        return self.change(context, apply=True)
+
+
+class MAGIC_FIT_OT_squish_remove(_SquishKeyChange, bpy.types.Operator):
+    """Delete the Squish key on the body and the clothing, dropping the squish"""
+    bl_idname = "magic_fit.squish_remove"
+    bl_label = "Remove Squish"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        return self.change(context, apply=False)
+
+
 classes = (
     MAGIC_FIT_OT_paint,
     MAGIC_FIT_OT_body_fit,
     MAGIC_FIT_OT_texture_relax,
     MAGIC_FIT_OT_fit_move,
+    MAGIC_FIT_OT_squish,
+    MAGIC_FIT_OT_squish_preset,
+    MAGIC_FIT_OT_squish_setup,
+    MAGIC_FIT_OT_squish_apply,
+    MAGIC_FIT_OT_squish_remove,
     MAGIC_FIT_OT_find_rips,
     MAGIC_FIT_OT_close_rips,
     MAGIC_FIT_OT_skirt_weights,

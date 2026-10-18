@@ -1249,6 +1249,143 @@ class FitMoveSettings(bpy.types.PropertyGroup):
     )
 
 
+# Press, Bulge and Bulge Width that look like hand-made squish (measured on Cultist's Rue Medium tops and
+# Watermelon Crushers legs), per preset of the Squish brush.
+SQUISH_PRESETS = {
+    'CHEST': (0.003, 0.009, 0.07),
+    'THIGHS': (0.0015, 0.003, 0.05),
+}
+
+
+class SquishBrushSettings(bpy.types.PropertyGroup):
+    body: PointerProperty(
+        name="Body",
+        description=(
+            "The skin the clothing squishes: the skin parts of the model, or a body with no shape keys but Basis "
+            "and Squish and no modifiers changing its shape in Edit Mode"
+        ),
+        type=bpy.types.Object,
+        poll=_poll_mesh,
+    )
+
+    radius: IntProperty(
+        name="Radius",
+        description="Radius of the brush in pixels (F)",
+        subtype='PIXEL',
+        default=60,
+        min=1,
+        max=5000,
+        soft_max=500,
+    )
+    strength: FloatProperty(
+        name="Strength",
+        description="How much of the squish each dab makes (Shift F)",
+        subtype='FACTOR',
+        default=0.5,
+        min=0.0,
+        max=1.0,
+    )
+    use_pressure_radius: BoolProperty(
+        name="Radius Pressure",
+        description="Scale the radius with tablet pressure",
+        default=False,
+    )
+    use_pressure_strength: BoolProperty(
+        name="Strength Pressure",
+        description="Scale the strength with tablet pressure",
+        default=True,
+    )
+    falloff: EnumProperty(
+        name="Falloff",
+        description="How the strength fades from the brush center to its edge",
+        items=FALLOFF_ITEMS,
+        default='SMOOTH',
+    )
+    spacing: IntProperty(
+        name="Spacing",
+        description="Distance between brush dabs, as a percentage of the radius",
+        subtype='PERCENTAGE',
+        default=15,
+        min=1,
+        max=100,
+    )
+
+    # The Chest preset (see SQUISH_PRESETS).
+    press: FloatProperty(
+        name="Press",
+        description="How far the fabric presses in the skin it covers",
+        subtype='DISTANCE',
+        default=0.003,
+        min=0.0,
+        soft_max=0.02,
+        precision=4,
+    )
+    bulge: FloatProperty(
+        name="Bulge",
+        description="How far the skin bulges out where it spills over the edge of the fabric",
+        subtype='DISTANCE',
+        default=0.009,
+        min=0.0,
+        soft_max=0.03,
+        precision=4,
+    )
+    bulge_width: FloatProperty(
+        name="Bulge Width",
+        description=(
+            "How far past the edge of the fabric the bulge reaches. It starts a third as far under the fabric, is half "
+            "way up at the edge and peaks a third of the way out; the press reaches twice as far under the fabric"
+        ),
+        subtype='DISTANCE',
+        default=0.07,
+        min=0.005,
+        soft_max=0.15,
+    )
+    max_gap: FloatProperty(
+        name="Max Gap",
+        description=(
+            "How far clothing may float over the skin and still cover it. Clothing farther out is dragged along "
+            "less and less, and not at all at twice this"
+        ),
+        subtype='DISTANCE',
+        default=0.03,
+        min=0.001,
+        soft_max=0.1,
+    )
+    seam_distance: FloatProperty(
+        name="Seam Distance",
+        description=(
+            "Vertices closer together than this always move together, even across parts and objects, so seams "
+            "stay closed"
+        ),
+        subtype='DISTANCE',
+        default=0.0001,
+        min=0.0,
+        soft_max=0.001,
+        precision=5,
+    )
+    use_selected_only: BoolProperty(
+        name="Selected Only",
+        description="Only move selected vertices (hidden vertices are never moved)",
+        default=False,
+    )
+    use_fade: BoolProperty(
+        name="Fade at Hidden",
+        description=(
+            "Keep vertices next to hidden (or, with Selected Only, unselected) ones in place and ease the squish in "
+            "from there, so the squished part stays joined to them"
+        ),
+        default=False,
+    )
+    fade_distance: FloatProperty(
+        name="Fade Distance",
+        description="How far from hidden vertices, along the mesh, the brush reaches full strength again",
+        subtype='DISTANCE',
+        default=0.02,
+        min=0.0001,
+        soft_max=0.1,
+    )
+
+
 class CloseRipsSettings(bpy.types.PropertyGroup):
     max_gap: FloatProperty(
         name="Max Gap",
@@ -1333,6 +1470,7 @@ classes = (
     BodyFitBrushSettings,
     TextureRelaxBrushSettings,
     FitMoveSettings,
+    SquishBrushSettings,
     CloseRipsSettings,
     ClippingSettings,
 )
@@ -1345,6 +1483,7 @@ def register():
     bpy.types.Scene.body_fit_brush = PointerProperty(type=BodyFitBrushSettings)
     bpy.types.Scene.texture_relax_brush = PointerProperty(type=TextureRelaxBrushSettings)
     bpy.types.Scene.fit_move = PointerProperty(type=FitMoveSettings)
+    bpy.types.Scene.squish_brush = PointerProperty(type=SquishBrushSettings)
     bpy.types.Scene.close_rips = PointerProperty(type=CloseRipsSettings)
     bpy.types.Scene.magic_fit_clipping = PointerProperty(type=ClippingSettings)
     bpy.types.Object.magic_fit_hair = PointerProperty(type=HairWeightsState)
@@ -1354,6 +1493,7 @@ def unregister():
     del bpy.types.Object.magic_fit_hair
     del bpy.types.Scene.magic_fit_clipping
     del bpy.types.Scene.close_rips
+    del bpy.types.Scene.squish_brush
     del bpy.types.Scene.fit_move
     del bpy.types.Scene.texture_relax_brush
     del bpy.types.Scene.body_fit_brush

@@ -37,6 +37,7 @@ FIT_TABS = (
     ('FIT', "Fit", "Sculpt meshes around the body with the Body Fit brush", 0),
     ('MOVE', "Move", "Move the selection with proportional editing that keeps to the mesh", 1),
     ('CLIPPING', "Clipping", "Show where the edited meshes clip into the body", 2),
+    ('SQUISH', "Squish", "Squish the skin along the edges of tight clothing", 3),
 )
 REPAIR_TABS = (
     ('RELAX', "Texture Relax", "Fix stretched or squashed textures with the Texture Relax brush", 0),
