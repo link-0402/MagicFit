@@ -41,6 +41,7 @@ EXPECTED = (
     ('FIT', 'FIT', ["Body Fit"]),
     ('FIT', 'MOVE', ["Fit Move"]),
     ('FIT', 'CLIPPING', ["Clipping"]),
+    ('FIT', 'SQUISH', ["Squish"]),
     ('RESIZE', None, ["Auto Resize"]),
     ('LINE_UP', None, ["Line Up"]),
     ('REPAIR', 'RELAX', ["Texture Relax"]),

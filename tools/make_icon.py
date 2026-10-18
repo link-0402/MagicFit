@@ -98,6 +98,42 @@ def fit_move():
     return tris
 
 
+def squish():
+    # Skin seen from the side (below), pressed in a little under a band of fabric (above, left) and bulging out
+    # over its edge: the band's edge rides half way up the bulge, which peaks a little past it and eases back, as
+    # the Squish brush's profile does (`squishing.profile`, in Bulge Widths of ``width``).
+    edge, bottom, segments = 112.0, 24.0, 48
+    rest, press, bulge, width = 104.0, 12.0, 42.0, 116.0
+
+    def smoothstep(t):
+        t = min(max(t, 0.0), 1.0)
+        return t * t * (3.0 - 2.0 * t)
+
+    def skin(x):
+        s = (x - edge) / width
+        y = rest
+        if s < 0.0:
+            y -= press * smoothstep(-s / 0.4)
+        if s <= 0.3:
+            y += bulge * smoothstep((s + 0.3) / 0.6)
+        else:
+            y += bulge * (1.0 - smoothstep((s - 0.3) / 0.7))
+        return y
+
+    def strip(x0, x1, low, high, color):
+        tris = []
+        for i in range(segments):
+            a = x0 + (x1 - x0) * i / segments
+            b = x0 + (x1 - x0) * (i + 1) / segments
+            tris += [(((a, low(a)), (b, low(b)), (b, high(b))), color), (((a, low(a)), (b, high(b)), (a, high(a))), color)]
+        return tris
+
+    return (
+        strip(20.0, 236.0, lambda x: bottom, skin, MID) +
+        strip(20.0, edge, lambda x: skin(x) + 10.0, lambda x: skin(x) + 44.0, LIGHT)
+    )
+
+
 def write(path, tris):
     coords = bytearray()
     colors = bytearray()
@@ -112,7 +148,7 @@ def write(path, tris):
 
 if __name__ == "__main__":
     for name, shapes in (("weight_brushes", weight_brushes), ("body_fit", body_fit), ("texture_relax", texture_relax),
-                         ("fit_move", fit_move)):
+                         ("fit_move", fit_move), ("squish", squish)):
         path = os.path.join(ICONS, name + ".dat")
         write(path, shapes())
         print("wrote", path)

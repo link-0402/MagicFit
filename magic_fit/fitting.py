@@ -487,13 +487,14 @@ def _rows_of(order, start, keys):
     return order[np.repeat(first - np.cumsum(lengths) + lengths, lengths) + np.arange(total)]
 
 
-def _mesh_distance(co, edges, sources, limit, tris=None):
+def _mesh_distance(co, edges, sources, limit, tris=None, start=None):
     """Shortest distance along ``edges`` (index pairs into ``co``) from the nearest of the ``sources``
     (a mask), for vertices up to ``limit`` away (inf for the others), and which source that is (-1).
     With ``tris``, distances also cross the triangles in straight lines, like Blender's Connected Only:
-    along edges alone, they'd come out up to about 15 % too long between them."""
+    along edges alone, they'd come out up to about 15 % too long between them. ``start`` holds the
+    sources' own distances (from something between the vertices), 0 without it."""
     count = len(co)
-    distance = np.where(sources, 0.0, np.inf)
+    distance = np.where(sources, 0.0 if start is None else start, np.inf)
     nearest = np.where(sources, np.arange(count), -1)
     if not len(edges):
         return distance, nearest
