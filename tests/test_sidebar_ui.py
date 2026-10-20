@@ -38,6 +38,7 @@ EXPECTED = (
     ('WEIGHTS', 'HEELS', ["Heel Weights", "Heel Brush"]),
     ('WEIGHTS', 'HAIR', ["Hair Weights", "Hair Brush"]),
     ('WEIGHTS', 'FACE', ["Face Weights", "Face Repairs", "Test Poses", "Face Brush"]),
+    ('WEIGHTS', 'EARRING', ["Earring Weights", "Earring Brush"]),
     ('FIT', 'FIT', ["Body Fit"]),
     ('FIT', 'MOVE', ["Fit Move"]),
     ('FIT', 'CLIPPING', ["Clipping"]),
@@ -234,6 +235,11 @@ def steps():
         problem = operators.check_ready(bpy.context, settings)
     check(settings.mode == 'FACE' and problem is not None and "Face Weights" in problem,
           "sub-tab: Face asks for Face Weights before the brush paints a mesh without them ({!r})".format(problem))
+    settings.weights_tab = 'EARRING'
+    with bpy.context.temp_override(window=window, area=area):
+        problem = operators.check_ready(bpy.context, settings)
+    check(settings.mode == 'EARRING' and problem is not None and "Earring Weights" in problem,
+          "sub-tab: Earrings asks for Earring Weights before the brush paints a mesh without them ({!r})".format(problem))
     settings.weights_tab = 'GENERAL'
     settings.mode = 'COPY'
 

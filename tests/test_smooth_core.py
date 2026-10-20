@@ -709,8 +709,8 @@ def test_registered():
     settings = bpy.context.scene.magic_fit
     modes = [item.identifier for item in settings.bl_rna.properties["mode"].enum_items]
     general = [item.identifier for item in settings.bl_rna.properties["general_mode"].enum_items]
-    check(modes[-1] == 'SMOOTH' and general == ['COPY', 'STRAIGHTEN', 'SMOOTH'],
-          "modes: Smooth comes last, after Face (files store their positions)")
+    check(modes[-2:] == ['SMOOTH', 'EARRING'] and general == ['COPY', 'STRAIGHTEN', 'SMOOTH'],
+          "modes: Smooth comes after Face, Earring after it (files store their positions)")
     settings.mode = 'COPY'
     settings.mode = 'SMOOTH'
     check(settings.weights_tab == 'GENERAL' and settings.general_mode == 'SMOOTH',

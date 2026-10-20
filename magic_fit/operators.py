@@ -14,7 +14,7 @@ from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 from mathutils.geometry import intersect_line_line, intersect_line_plane
 
-from . import (api, connecting, facedata, facing, fitting, goals, hairing, hairlineup, heeling, lineup, mending, moving,
+from . import (api, connecting, earring, facedata, facing, fitting, goals, hairing, hairlineup, heeling, lineup, mending, moving,
                painting, refining, relaxing, resizing, sizing, skirting, sliders, smoothing, squishing, straighten,
                tabs)
 from .cplus import rig as cplus_rig
@@ -47,6 +47,8 @@ def check_ready(context, settings):
         return check_face_ready(obj, settings)
     if settings.mode == 'SMOOTH':
         return check_smooth_ready(obj, settings)
+    if settings.mode == 'EARRING':
+        return check_earring_ready(obj, settings)
     target = settings.target
     if target is None:
         return "Pick a target mesh to copy weights from"
@@ -194,6 +196,56 @@ def check_hair_ready(obj, settings):
             return "Vertex group '{:s}' is locked".format(group.name)
         if group.name not in painting.deform_bone_names(obj):
             return "'{:s}' is not a deforming bone of '{:s}'".format(group.name, armature.name)
+    return None
+
+
+def check_earring_ready(obj, settings):
+    """Why the Earring brush can't paint ``obj``, or None when it can."""
+    modifier = straighten.deforming_armature(obj)
+    if modifier is None:
+        return "Give the earrings Earring Weights first: the brush needs their armature with the earring bones"
+    if _hair_reference() is None:
+        return "The hair reference data (hair_reference.npz) is missing: reinstall the add-on"
+    armature = modifier.object
+    if earring.missing_bones(armature, settings.earring_bones, settings.earring_brush_bone):
+        return "Armature '{:s}' lacks the earring bones: give the earrings Earring Weights".format(armature.name)
+    if settings.group_mode == 'ACTIVE':
+        group = obj.vertex_groups.active
+        if group is None:
+            return "No active vertex group"
+        if group.lock_weight:
+            return "Vertex group '{:s}' is locked".format(group.name)
+        if group.name not in painting.deform_bone_names(obj):
+            return "'{:s}' is not a deforming bone of '{:s}'".format(group.name, armature.name)
+    return None
+
+
+def earring_targets(context):
+    """The meshes the Earring Weights button works on: the active one and the selected ones; each mesh data
+    once."""
+    return face_targets(context)
+
+
+def check_earring_weights_ready(context):
+    """Why the Earring Weights button can't be used right now, or None when it can."""
+    if context.mode not in {'OBJECT', 'PAINT_WEIGHT'}:
+        return "Give earring weights in Object or Weight Paint mode"
+    targets = earring_targets(context)
+    if not targets:
+        return "Select the earring meshes"
+    for target in targets:
+        if target.library is not None or target.data.library is not None:
+            return "'{:s}' is linked from another file".format(target.name)
+    if _hair_reference() is None:
+        return "The hair reference data (hair_reference.npz) is missing: reinstall the add-on"
+    armatures = {armature for armature in map(hairing.weighted_armature, targets) if armature is not None}
+    if len(armatures) > 1:
+        return "The earring meshes are deformed by different armatures"
+    for armature in armatures:
+        if armature.library is not None or armature.data.library is not None:
+            return "Armature '{:s}' is linked from another file".format(armature.name)
+    if context.scene.magic_fit.group_mode == 'ACTIVE':
+        return "Earring Weights gives all bone weights: set Groups to All Groups (Current Group is for the brush)"
     return None
 
 
@@ -1046,6 +1098,12 @@ class MAGIC_FIT_OT_paint(_BrushStroke, bpy.types.Operator):
             try:
                 self.stroke = smoothing.build_stroke(context, obj, settings)
             except smoothing.SmoothError as error:
+                self.report({'WARNING'}, str(error))
+                return {'CANCELLED'}
+        elif settings.mode == 'EARRING':
+            try:
+                self.stroke = earring.build_stroke(context, obj, settings)
+            except earring.EarringError as error:
                 self.report({'WARNING'}, str(error))
                 return {'CANCELLED'}
         else:
@@ -2542,6 +2600,100 @@ _PART_WORDS = (
     (facing.PART_EXTRA, "part where the game's face has one", "parts where the game's face has some"),
     (facing.PART_RIGID, "part moving as one piece with what it's on", "parts moving as one piece with what they're on"),
 )
+
+
+class MAGIC_FIT_OT_earring_weights(bpy.types.Operator):
+    """Replace the earrings' weights so they swing from the earlobes. Adds the earring bones to their armature"""
+    bl_idname = "magic_fit.earring_weights"
+    bl_label = "Earring Weights"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        problem = check_earring_weights_ready(context)
+        if problem is not None:
+            cls.poll_message_set(problem)
+            return False
+        return True
+
+    def execute(self, context):
+        settings = context.scene.magic_fit
+        targets = earring_targets(context)
+        key = settings.earring_race
+        count = settings.earring_bones
+        label = earring.race_label(key)
+        rig = earring.EarringRig.for_race(key)
+        armature = next((found for found in map(hairing.weighted_armature, targets) if found is not None), None)
+        rig = rig.moved(hairing.armature_offset(armature, rig))
+        rests = straighten.rest_geometry(context, targets, ('INDEXED',) * len(targets))
+        new = armature is None
+        if new:
+            collection = targets[0].users_collection[0] if targets[0].users_collection else context.scene.collection
+            armature = hairing.new_armature(context, "Earring Skeleton", collection)
+        try:
+            # All of them, even when fewer are used: a later run with more lines up with these.
+            added = hairing.ensure_bones(context, armature, rig, [bone.name for bone in rig.bones])
+        except RuntimeError as error:
+            self.report({'ERROR'}, "Couldn't add the earring bones to '{:s}': {:s}".format(armature.name, str(error)))
+            if new:
+                # Cancelling leaves no undo step to take it away.
+                data = armature.data
+                bpy.data.objects.remove(armature)
+                bpy.data.armatures.remove(data)
+            return {'CANCELLED'}
+        for obj in targets:
+            if straighten.deforming_armature(obj) is None:
+                hairing.add_armature_modifier(obj, armature)
+        params = earring.stroke_params(settings)
+        # The meshes are one pair of earrings: their length, and the joints between their pieces, are found
+        # across all of them.
+        use_joints = settings.earring_use_joints
+        parts = earring.object_parts(rests) if use_joints else None
+        split = earring.earring_weights(np.concatenate([rig.local(rest.co) for rest in rests]), rig.lobes, count,
+                                        parts, use_joints)
+        starts = np.cumsum([0] + [len(rest.co) for rest in rests]).tolist()
+        changed = 0
+        removed = []
+        left = right = far = 0
+        for obj, rest, start in zip(targets, rests, starts):
+            rows = slice(start, start + len(rest.co))
+            # The earring weights replace the old ones; locked groups keep theirs, and the groups left empty
+            # are taken off.
+            stroke = hairing.HairStroke(obj, rest.co, rest.tris, rig, replace=True,
+                                        weights=(split.names, split.weights[rows]), **params)
+            masked = context.mode == 'PAINT_WEIGHT' and obj == context.object
+            verts = _unhidden_vertices(obj.data, masked)
+            stroke.apply(verts, np.ones(len(verts)))
+            emptied = goals.remove_empty_groups(obj)
+            removed += [name for name in emptied if name not in removed]
+            if stroke.modified or emptied:
+                changed += 1
+                obj.data.update()
+            side = split.left[rows][verts]
+            left += int(side.sum())
+            right += int((~side).sum())
+            far += int(split.far[rows][verts].sum())
+        if new:
+            self.report({'INFO'}, "Made armature '{:s}' with the head and earring bones".format(armature.name))
+        elif added:
+            self.report({'INFO'}, "Added {:d} bone(s) to '{:s}': {:s}".format(len(added), armature.name, ", ".join(added)))
+        if removed:
+            self.report({'INFO'}, "Took off the old weights of {:s}".format(
+                ", ".join(removed[:8]) + (" and {:d} more".format(len(removed) - 8) if len(removed) > 8 else "")))
+        what = "{:s}, {:d} bone{:s} per side: {:d} vertices left, {:d} right".format(
+            label, count, "" if count == 1 else "s", left, right)
+        if count > 1:
+            for name, length, joints, vertices in zip(("Left", "Right"), split.lengths, split.joints, (left, right)):
+                if vertices:
+                    self.report({'INFO'}, "{:s} earring: {:.1f} cm long, {:s}".format(
+                        name, length * 100.0, "bends at {:d} joint(s) between its pieces".format(joints) if joints
+                        else "its bones share the length evenly"))
+        self.report({'INFO'}, "Gave {:d} mesh(es) earring weights for {:s}".format(changed, what) if changed else
+                    "Nothing changed: the earrings have these weights already ({:s})".format(what))
+        if far:
+            self.report({'WARNING'}, "{:d} vertices hang more than {:.0f} cm to the side of both earlobes: line the "
+                                     "earrings up on a {:s} head".format(far, earring.FAR * 100.0, label))
+        return {'FINISHED'}
 
 
 def remember_face(settings, race, number):
@@ -4079,6 +4231,7 @@ classes = (
     MAGIC_FIT_OT_connect_parts,
     MAGIC_FIT_OT_hair_weights,
     MAGIC_FIT_OT_pick_hair_skeleton,
+    MAGIC_FIT_OT_earring_weights,
     MAGIC_FIT_OT_face_weights,
     MAGIC_FIT_OT_face_repair,
     MAGIC_FIT_OT_face_meshes_from_selection,

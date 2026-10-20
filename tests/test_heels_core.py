@@ -312,8 +312,8 @@ def test_registered():
     check(hasattr(bpy.ops.magic_fit, "heel_weights"), "the Heel Weights operator is registered")
     settings = bpy.context.scene.magic_fit
     items = [item.identifier for item in settings.bl_rna.properties["mode"].enum_items]
-    check(items == ['COPY', 'STRAIGHTEN', 'SKIRT', 'HEELS', 'HAIR', 'FACE', 'SMOOTH'],
-          "Heels keeps its place, Hair, Face and Smooth come after it (files store their positions)")
+    check(items == ['COPY', 'STRAIGHTEN', 'SKIRT', 'HEELS', 'HAIR', 'FACE', 'SMOOTH', 'EARRING'],
+          "Heels keeps its place, Hair, Face, Smooth and Earring come after it (files store their positions)")
 
 
 def main():

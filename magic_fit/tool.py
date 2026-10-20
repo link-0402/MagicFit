@@ -14,6 +14,7 @@ from .operators import (
     MAGIC_FIT_OT_body_fit,
     MAGIC_FIT_OT_connect_parts,
     MAGIC_FIT_OT_detect_face,
+    MAGIC_FIT_OT_earring_weights,
     MAGIC_FIT_OT_face_meshes_clear,
     MAGIC_FIT_OT_face_meshes_from_selection,
     MAGIC_FIT_OT_face_pose,
@@ -45,6 +46,7 @@ from .operators import (
     MAGIC_FIT_OT_texture_relax,
     MAGIC_FIT_OT_use_tool,
     check_connect_ready,
+    check_earring_weights_ready,
     check_face_pose_ready,
     check_face_tools_ready,
     check_fit_ready,
@@ -195,6 +197,10 @@ def _weight_sections(context, settings, where):
     def smooth(layout):
         _draw_smooth_main(layout, settings)
 
+    def earrings(layout):
+        _draw_earring_bone(layout, settings)
+        _draw_earring_main(layout, settings)
+
     sections = [
         ("magic_fit_falloff", "Falloff", falloff),
         ("magic_fit_stroke", "Stroke", stroke),
@@ -215,6 +221,8 @@ def _weight_sections(context, settings, where):
             sections.append(("magic_fit_face", "Face", face))
         elif settings.mode == 'SMOOTH':
             sections.append(("magic_fit_smooth", "Smooth", smooth))
+        elif settings.mode == 'EARRING':
+            sections.append(("magic_fit_earring", "Earring", earrings))
     return sections
 
 
@@ -277,6 +285,23 @@ def _draw_hair_more(layout, settings):
     if settings.hair_race in hairing.EAR_RACES:
         layout.prop(settings, "hair_ears")
     layout.prop(settings, "hair_max_groups")
+
+
+def _draw_earring_main(layout, settings):
+    """The Earring settings: the race, which decides where the earlobes are, how many bones each earring uses
+    and whether they change at its joints."""
+    layout.prop(settings, "earring_race")
+    layout.prop(settings, "earring_bones")
+    row = layout.row()
+    row.active = settings.earring_bones > 1
+    row.prop(settings, "earring_use_joints")
+
+
+def _draw_earring_bone(layout, settings):
+    """The bone the Earring brush paints: Auto, or one picked by hand."""
+    col = layout.column(align=True)
+    col.label(text="Bone")
+    _draw_choice(col, settings, "earring_brush_bone")
 
 
 def _draw_game_face(layout, settings):
@@ -362,13 +387,16 @@ def _draw_mode_main(layout, settings):
         _draw_face_main(layout, settings)
     elif settings.mode == 'SMOOTH':
         _draw_smooth_main(layout, settings)
+    elif settings.mode == 'EARRING':
+        _draw_earring_bone(layout, settings)
+        _draw_earring_main(layout, settings)
 
 
 def _draw_weight_choices(layout, settings):
     """Mode, target and groups: what the brush does."""
     _draw_choice(layout, settings, "mode")
-    # Heels, Hair, Face and Smooth need no body
-    if settings.mode not in {'HEELS', 'HAIR', 'FACE', 'SMOOTH', *COMING_MODES}:
+    # Heels, Hair, Face, Smooth and Earring need no body
+    if settings.mode not in {'HEELS', 'HAIR', 'FACE', 'SMOOTH', 'EARRING', *COMING_MODES}:
         row = layout.row()
         row.alert = settings.target is None and not (settings.mode == 'SKIRT' and settings.skirt_skin_weight <= 0.0)
         row.prop(settings, "target", text="Target" if settings.mode == 'COPY' else "Body")
@@ -1062,6 +1090,44 @@ class VIEW3D_PT_hair_brush_sidebar(_WeightBrushPanel, bpy.types.Panel):
     bl_order = 2
     subtabs = {'HAIR'}
     button = "Paint Hair Weights"
+
+
+class VIEW3D_PT_earring_weights_sidebar(tabs.TabPanel, bpy.types.Panel):
+    """Make dangly earrings swing from the earlobes, with the earring bones of the Earring Bones mod"""
+    bl_label = "Earring Weights"
+    bl_order = 1
+    subtabs = {'EARRING'}
+
+    def draw(self, context):
+        layout = _panel_layout(self.layout)
+        settings = context.scene.magic_fit
+        col = layout.column()
+        _draw_earring_main(col, settings)
+        if settings.group_mode == 'ACTIVE':
+            # Earring Weights needs All Groups, and no other panel on this tab has the choice.
+            _draw_choice(col, settings, "group_mode")
+        problem = check_earring_weights_ready(context)
+        if problem is not None:
+            col.box().label(text=problem, icon='ERROR')
+        col.separator()
+        row = col.row()
+        row.scale_y = 1.4
+        row.operator(MAGIC_FIT_OT_earring_weights.bl_idname, icon='BONE_DATA')
+        hint = col.column(align=True)
+        hint.label(text="In game, they swing only with", icon='INFO')
+        hint.label(text="the Earring Bones mod on", icon='BLANK1')
+
+
+class VIEW3D_PT_earring_brush_sidebar(_WeightBrushPanel, bpy.types.Panel):
+    """Paint earring weights with the brush, with the Earring Weights settings"""
+    bl_label = "Earring Brush"
+    bl_order = 2
+    subtabs = {'EARRING'}
+    button = "Paint Earring Weights"
+
+    @staticmethod
+    def draw_mode(layout, settings):
+        _draw_earring_bone(layout, settings)
 
 
 class VIEW3D_PT_face_weights_sidebar(tabs.TabPanel, bpy.types.Panel):
@@ -1806,6 +1872,8 @@ classes = (
     VIEW3D_PT_face_repair_sidebar,
     VIEW3D_PT_face_pose_sidebar,
     VIEW3D_PT_face_brush_sidebar,
+    VIEW3D_PT_earring_weights_sidebar,
+    VIEW3D_PT_earring_brush_sidebar,
     VIEW3D_PT_body_fit_sidebar,
     VIEW3D_PT_fit_move_sidebar,
     VIEW3D_PT_clipping_sidebar,
