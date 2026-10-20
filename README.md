@@ -1,6 +1,8 @@
 # Magic Fit
 
-Magic Fit is a Blender add-on built for common Final Fantasy XIV modding workflows. It features a purpose built, advanced weight transfer logic to minimize clipping and improve C+ compatibility, generating clean, fitting weights for hairs, faces and skirts. It allows easily resizing outfits, both from another FFXIV base body as well as other bodies (from different games). It allows lining up models from other games for easy fitting and repairs bad mashes and editing errors. Various fitting brushes and tools allow easier editing and sculpting, circumventing common issues and frustrations.
+Magic Fit is a Blender add-on built for common Final Fantasy XIV modding workflows. It features a purpose built, advanced weight transfer logic to minimize clipping and improve C+ compatibility. Besides transferring from a source, it supports generating clean, fitting weights for hairs, faces and skirts. 
+The Line Up Tool allows easily lining up models from other games for fitting, while Resize lets you easily fit outfits to a target bod, both from another FFXIV base body as well as other bodies (from different games). Various fitting brushes and miscellaneous tools help with easier model editing and sculpting, circumventing common issues and frustrations.
+Finally, a mesh repair mode can rebuilt bad geometry, build cleaner UVs (and easily transfer textures to it, close holes in the mesh and repair grid structures when textures become warped as a result of editing.
 
 ![The Magic Fit tab in Blender's sidebar](docs/images/sidebar.png)
 
@@ -15,7 +17,7 @@ Magic Fit is a Blender add-on built for common Final Fantasy XIV modding workflo
 
 ## Installation
 
-Add this repository to Blender once. You then install Magic Fit from Blender and get updates automatically.
+Add this repository to Blender once and install it, you'll then get future updates automatically.
 
 1. In Blender, open **Edit → Preferences → Get Extensions**.
 2. Click **Repositories**, click **+**, and choose **Add Remote Repository**.
@@ -30,7 +32,7 @@ Add this repository to Blender once. You then install Magic Fit from Blender and
 
 More help is on the wiki's [Installation and Setup](https://github.com/link-0402/MagicFit/wiki/Installation-and-Setup) page.
 
-## What do you want to do?
+## Guide
 
 | I want to… | Use | Read |
 | --- | --- | --- |
