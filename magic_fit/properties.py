@@ -12,6 +12,8 @@ from bpy.props import (
     StringProperty,
 )
 
+from . import earring
+
 
 def _poll_mesh(_self, obj):
     # The active mesh is offered too: the body is often the one last clicked, and hiding it made the
@@ -65,8 +67,9 @@ WEIGHTS_TABS = (
     ('FACE', "Face",
      "Give a custom face the weights of the game face it replaces: lids that blink, a mouth that moves, "
      "and lashes and piercings that follow", 4),
+    ('EARRING', "Earrings", "Make dangly earrings swing from the earlobes, with the Earring Bones mod's bones", 5),
 )
-_WEIGHTS_TAB_OF_MODE = {'SKIRT': 1, 'HEELS': 2, 'HAIR': 3, 'FACE': 4}
+_WEIGHTS_TAB_OF_MODE = {'SKIRT': 1, 'HEELS': 2, 'HAIR': 3, 'FACE': 4, 'EARRING': 5}
 # Modes that are sub-tabs already but not brushes yet.
 COMING_MODES = {}
 # The races hair can be for (Hair: their hair skeletons and head shapes, see hairing.py).
@@ -92,6 +95,8 @@ HAIR_RACES = (
 )
 # The races faces can be for (Face: the game's faces, face skeletons and face animations, see facing.py).
 FACE_RACES = tuple((code, name, "Faces of {:s}s ({:s})".format(name, code)) for code, name, _description in HAIR_RACES)
+# The races with earring bones (Earrings: where their earlobes are, see earring.py).
+EARRING_RACES = tuple(earring.race_items())
 
 
 def _mode_changed(self, _context):
@@ -211,6 +216,8 @@ class MagicFitSettings(bpy.types.PropertyGroup):
              "Paint toward the weights of the game face it replaces, as Face Weights works them out"),
             ('SMOOTH', "Smooth",
              "Smooth all bone weights at once, even across gaps between parts that touch. Doesn't need a body"),
+            ('EARRING', "Earring",
+             "Paint earring weights: the earring hangs from the earlobe and bends down the earring bones"),
         ),
         default='COPY',
         update=_mode_changed,
@@ -702,6 +709,41 @@ class MagicFitSettings(bpy.types.PropertyGroup):
         type=bpy.types.Object,
         poll=_poll_mesh,
         update=_adder("face_others", "face_add_other"),
+    )
+    earring_race: EnumProperty(
+        name="Race",
+        description="The race the earrings are for. This decides where the earlobes are",
+        items=EARRING_RACES,
+    )
+    earring_bones: IntProperty(
+        name="Bones per Side",
+        description=(
+            "How many earring bones each earring hangs from. 1: it swings as one stiff piece. More: it also bends, "
+            "the bones sharing its length"
+        ),
+        default=4,
+        min=1,
+        max=4,
+    )
+    earring_use_joints: BoolProperty(
+        name="Split at Joints",
+        description=(
+            "For earrings made of separate pieces (hook, rings, beads, pendant): each piece moves whole, and the "
+            "earring bends only where they meet. Off, or for earrings in one piece: the bones share the length evenly"
+        ),
+        default=True,
+    )
+    earring_brush_bone: EnumProperty(
+        name="Bone",
+        description="Which earring bone the brush paints",
+        items=(
+            ('AUTO', "Auto", "Paint toward the weights Earring Weights gives"),
+            ('A', "A", "Paint the top bone, at the earlobe (of the side painted)"),
+            ('B', "B", "Paint the second bone (of the side painted)"),
+            ('C', "C", "Paint the third bone (of the side painted)"),
+            ('D', "D", "Paint the lowest bone (of the side painted)"),
+        ),
+        default='AUTO',
     )
     smooth_reach: FloatProperty(
         name="Reach",

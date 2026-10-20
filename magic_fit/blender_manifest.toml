@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "magic_fit"
-version = "1.1.4"
+version = "1.1.5"
 name = "Magic Fit"
 tagline = "Transfer weights, fit, resize, line up and repair meshes"
 maintainer = "Luci_xiv"
