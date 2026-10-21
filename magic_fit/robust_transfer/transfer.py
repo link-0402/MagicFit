@@ -6,7 +6,8 @@
 # L/R group balancing. 2026-10: normals are compared as each loose part
 # faces the body (weighttransfer.facing_cosines), Crease Smoothing is the
 # only matching (no Max Distance, normal angles, Inpaint Mode or smoothing
-# settings), and fingers and toes are handled on their own (digit_columns).
+# settings), and fingers and toes are handled on their own (digit_columns). Matches between two walls of a
+# crease take both walls' weights (weighttransfer.between_walls).
 import numpy as np
 from mathutils.bvhtree import BVHTree
 from scipy import sparse
@@ -210,6 +211,19 @@ def match_target(target, source_vertices, source_triangles, source_normals,
     masked = inpaint_mask(target['obj']) if not settings.apply_to_selected else None
     digit_share = (weighttransfer.digit_share(match.weights, digits) if digits is not None
                    else np.zeros(len(match.weights)))
+    # In a crease, the middle takes both walls' weights, and so does all of a part spanning it edge-on, so a
+    # part wedged in it (a thong in the butt cleft) doesn't follow whichever wall it happened to match or
+    # reach with an edge. Not between fingers and toes: a glove finger keeps its own.
+    spans = weighttransfer.crease_bridges(
+        target['vertices'], target['triangles'], match.points, match.distances, cosines,
+        weighttransfer.find_vertex_merge_map(target['vertices'], weld_distance(settings)))
+    walls, _share = weighttransfer.between_walls(
+        target['vertices'], match.points, match.distances, match.normals, match.weights, source_vertices,
+        source_triangles, source_weights, surface_bvh, MAX_DISTANCE, spans,
+        spans * weighttransfer.edge_on(target['normals'], match.normals))
+    keep = digit_share >= weighttransfer.DIGIT_SHARE[0]
+    walls[keep] = match.weights[keep]
+    match.weights = walls
     # Over fingers and toes, Combined doesn't link parts whose outsides face each other, like the plates on
     # two fingers of a glove.
     outward = weighttransfer.outward_normals(target['vertices'], target['triangles'], target['normals'],

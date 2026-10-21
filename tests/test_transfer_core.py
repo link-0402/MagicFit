@@ -154,6 +154,33 @@ class NumericalTests(unittest.TestCase):
         np.testing.assert_allclose(match.points, [[0.2, 0.2, 0]] * 2, atol=1e-6)
         np.testing.assert_allclose(match.normals, [[0, 0, 1]] * 2, atol=1e-6)
 
+    def test_the_middle_of_a_crease_takes_both_walls(self):
+        # Two walls 14 mm apart facing each other across x == 0, the one at -x weighted to the first bone.
+        wall, wf = flat_grid(np.linspace(-0.05, 0.05, 11), np.linspace(-0.05, 0.05, 11))
+        left = wall[:, [2, 0, 1]] + [-0.007, 0, 0]
+        source = np.vstack([left, left * [-1, 1, 1]])
+        faces = np.vstack([wf, wf[:, ::-1] + len(wall)])
+        weights = np.repeat(np.eye(2), len(wall), axis=0)
+        normals = np.repeat([[1.0, 0, 0], [-1.0, 0, 0]], len(wall), axis=0)
+        bvh = wt.build_surface_bvh(source, faces)
+        xs = np.array([0.0, 0.0008, -0.0025, -0.004, -0.0065, -0.0095])
+        targets = np.column_stack([xs, np.zeros(len(xs)), np.zeros(len(xs))])
+        match = wt.match_closest_surface(source, faces, normals, targets, weights, bvh)
+        blended, share = wt.between_walls(targets, match.points, match.distances, match.normals, match.weights,
+                                          source, faces, weights, bvh)
+        # In the middle, and a little off it (the other wall less than WALL_EVEN times as far), both alike.
+        np.testing.assert_allclose(blended[:2], 0.5, atol=1e-6)
+        # Farther off, more of the closer wall; next to it (the other one over WALL_ACROSS times as far)
+        # only that one, and behind it, where nothing faces it across, too.
+        self.assertTrue(0.5 < blended[2, 0] < 1)
+        np.testing.assert_allclose(blended[3:], match.weights[3:], atol=1e-6)
+        np.testing.assert_allclose(blended[3:, 0], 1, atol=1e-6)
+        np.testing.assert_allclose(share, [0.5, 0.5, share[2], 0, 0, 0], atol=1e-6)
+        # Out of reach, untouched.
+        far, _share = wt.between_walls(targets, match.points, match.distances, match.normals, match.weights,
+                                       source, faces, weights, bvh, reach=0.001)
+        np.testing.assert_allclose(far[:2], match.weights[:2])
+
     def test_parts_face_the_body_as_a_whole(self):
         v, f = flat_grid(np.linspace(0, 0.1, 6), np.linspace(0, 0.1, 6), 0.001)
         near = np.full(len(v), 0.001)
@@ -252,14 +279,18 @@ class NumericalTests(unittest.TestCase):
         undefined = wt.bridge_confidence(v, f, distances, np.full(len(v), np.nan), points)
         np.testing.assert_allclose(undefined[index], wt.BRIDGE_FLOOR)
 
-        # Touching the skin (within SKIN_TOUCH), it lies on it even where it bridges: the normals don't
-        # matter. Floating up to twice that, the trust fades out.
+        # Touching the skin (within SKIN_TOUCH), it lies on it even where it bridges, its normals up to
+        # SKIN_TOUCH_FULL_ANGLE off. Meeting the skin edge-on, like a strip wedged in a crease meets its walls,
+        # it doesn't. Floating up to twice that, the trust fades out.
         def at(gap, angle):
             gaps, torn = bridged(v, gap)
             return wt.bridge_confidence(v, f, gaps, np.full(len(v), np.cos(np.radians(angle))), torn)[index]
         self.assertGreater(at(0.0, 0), 0.9)
-        for angle in (25, 40, 80):
+        for angle in (25, 40, wt.SKIN_TOUCH_FULL_ANGLE):
             self.assertAlmostEqual(at(wt.SKIN_TOUCH, angle), at(0.0, 0))
+        self.assertTrue(at(0.0, wt.SKIN_TOUCH_FULL_ANGLE) > at(0.0, 60) > wt.BRIDGE_FLOOR)
+        for angle in (wt.SKIN_TOUCH_ZERO_ANGLE, 85):
+            self.assertAlmostEqual(at(0.0, angle), wt.BRIDGE_FLOOR)
         fading = [at(gap, 40) for gap in (wt.SKIN_TOUCH, 1.5 * wt.SKIN_TOUCH, 2 * wt.SKIN_TOUCH)]
         self.assertTrue(fading[0] > fading[1] > fading[2])
         self.assertAlmostEqual(fading[2], wt.BRIDGE_FLOOR)
@@ -1947,6 +1978,45 @@ class CreaseSmoothingTests(TransferScene, unittest.TestCase):
         self.assertLess(gaps['transferred'], gaps['copied'] / 2)
         self.assertTrue(any(z < 0 for z in normals['copied']))
         self.assertTrue(all(z > 0 for z in normals['transferred']))
+
+    def test_strip_wedged_in_a_cleft_takes_both_sides(self):
+        """A flat strip deep in a narrow cleft between steep walls (80 degrees, a butt cleft), 1.5 mm off its
+        middle, so that one edge touches its wall. Both walls meet it nearly edge-on."""
+        data = bpy.data.armatures.new('CleftRig')
+        rig = bpy.data.objects.new('CleftRig', data)
+        bpy.context.collection.objects.link(rig)
+        bpy.context.view_layer.objects.active = rig
+        bpy.ops.object.mode_set(mode='EDIT')
+        for name, x in (('L', -0.3), ('R', 0.3)):
+            bone = data.edit_bones.new(name)
+            bone.head, bone.tail = (x, 0, 0.03), (x, 0, 0.13)
+        bpy.ops.object.mode_set(mode='OBJECT')
+        gx, gy = np.meshgrid(np.linspace(-0.02, 0.02, 41), np.linspace(-0.1, 0.1, 11), indexing='ij')
+        index = np.arange(gx.size).reshape(gx.shape)
+        quads = np.column_stack([index[:-1, :-1].ravel(), index[1:, :-1].ravel(), index[1:, 1:].ravel(),
+                                 index[:-1, 1:].ravel()])
+        steep = np.tan(np.radians(80))
+        source = self.mesh('Source', np.column_stack([gx.ravel(), gy.ravel(), steep * np.abs(gx.ravel())]), quads,
+                           rig=False)
+        source.modifiers.new('Armature', 'ARMATURE').object = rig
+        side = np.sign(gx.ravel())
+        self.weights(source, ['L', 'R'], np.column_stack([np.where(side < 0, 1, np.where(side > 0, 0, .5)),
+                                                          np.where(side > 0, 1, np.where(side < 0, 0, .5))]))
+        self.body = source
+        # The cleft is 14 mm wide where the strip lies; the strip is 11 mm wide.
+        height = 0.007 * steep
+        sx, sy = np.meshgrid(np.linspace(-0.004, 0.007, 12), np.linspace(-0.05, 0.05, 11), indexing='ij')
+        index = np.arange(sx.size).reshape(sx.shape)
+        strip = self.mesh('Strip', np.column_stack([sx.ravel(), sy.ravel(), np.full(sx.size, height)]),
+                          np.column_stack([index[:-1, :-1].ravel(), index[1:, :-1].ravel(), index[1:, 1:].ravel(),
+                                           index[:-1, 1:].ravel()]), rig=False)
+        strip.modifiers.new('Armature', 'ARMATURE').object = rig
+        self.select(strip)
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        weights = self.read(strip, ['L', 'R'])
+        np.testing.assert_allclose(weights.sum(axis=1), 1, atol=1e-5)
+        # It moves with both sides alike instead of drifting after the wall one edge touches.
+        self.assertLess(abs(weights[:, 0].mean() - weights[:, 1].mean()), 0.1)
 
     def test_bridge_blends_but_what_lies_on_the_body_follows_it(self):
         rig, gusset, x = self.crease_scene(gusset=True)

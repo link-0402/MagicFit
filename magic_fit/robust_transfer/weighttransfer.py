@@ -33,7 +33,9 @@
 # Combined doesn't link parts whose outsides face each other (LINK_FACING), and within SKIN_TOUCH next to
 # bridges too. The standalone add-on's normal angle limits, smoothing and group-limit passes are gone. A vertex
 # no face or link reaches keeps its own match in the solve (_solve_constrained). Combined also links layers of
-# one loose part stacked over the same skin, like a hem turned in (_layer_pairs).
+# one loose part stacked over the same skin, like a hem turned in (_layer_pairs). Where the target lies between
+# two walls of a crease, its middle (and all of it where it spans the crease edge-on) takes both walls' weights
+# (between_walls), and next to bridges only skin it lies along counts as touched (SKIN_TOUCH_FULL_ANGLE).
 #
 # ---- Original MIT License Notice Follows ----
 #
@@ -222,6 +224,84 @@ def match_closest_surface(source_verts, source_triangles, source_normals, target
     return SurfaceMatch(weights, np.sqrt(sqrD), C, unit_normals)
 
 
+# Between walls: where the target lies in a crease between two walls of the source (a thong in the butt cleft, a
+# flap between the thighs), which wall is closest is a toss-up for the vertices in the middle, and the one
+# copying the wall it happened to match drew the whole part to that side. Where the part spans the crease
+# (crease_bridges), a vertex meeting the source again straight across from its closest point, facing it,
+# within WALL_ACROSS times as far, blends both walls' weights: from none at WALL_ACROSS times as far to half
+# from WALL_EVEN times as far on, so a part only a little off the middle of the crease takes both sides alike.
+# Where it also meets its walls edge-on (its normals SKIN_TOUCH_ZERO_ANGLE or more off theirs, not from
+# SKIN_TOUCH_FULL_ANGLE down), it takes both alike wherever it lies across: a strip filling a cleft reaches one
+# wall with an edge, and its vertices there drew it to that side again. Blending wherever another wall was
+# near stretched the thighs 28 % more on 58 garments (a trouser leg with the other thigh across); a glove
+# finger keeps its own too.
+WALL_ACROSS = 3.0
+WALL_EVEN = 1.5
+
+
+def edge_on(normals, point_normals):
+    """How much (0 to 1) the target meets the source edge-on at each vertex: its ``normals`` SKIN_TOUCH_ZERO_ANGLE
+    or more off the source's at its match (``point_normals``), either way round, fading out by
+    SKIN_TOUCH_FULL_ANGLE. 0 where either normal is undefined."""
+    _unit, cosines = _normal_cosines(normals, point_normals)
+    full, zero = np.cos(np.radians(SKIN_TOUCH_FULL_ANGLE)), np.cos(np.radians(SKIN_TOUCH_ZERO_ANGLE))
+    return np.where(np.isnan(cosines), 0.0, _smoothstep((full - np.abs(np.nan_to_num(cosines))) / (full - zero)))
+
+
+def between_walls(vertices, points, distances, point_normals, weights, source_vertices, source_triangles,
+                  source_weights, surface_bvh, reach=np.inf, spans=None, even=None):
+    """``weights`` (closest-point weights at ``points``, ``distances`` away, source normals ``point_normals``
+    there) blended with the source's weights where each vertex meets the source again straight across from its
+    closest point (see WALL_ACROSS), as much as it ``spans`` a crease (0 to 1 per vertex, see crease_bridges;
+    everywhere without it); unchanged elsewhere and farther than ``reach``. ``even`` (0 to 1 per vertex): how
+    far it takes both walls alike wherever it lies across. Returns the blended weights and how far each vertex
+    took the other wall's (0 to 0.5)."""
+    from mathutils import Vector
+    V = np.asarray(vertices, dtype=np.float64)
+    P = np.asarray(points, dtype=np.float64)
+    distances = np.asarray(distances, dtype=np.float64)
+    out = np.array(weights, dtype=np.float64, copy=True)
+    share = np.zeros(len(V))
+    across = V - P
+    tiny = distances <= 1e-5
+    across[tiny] = np.asarray(point_normals, dtype=np.float64)[tiny]
+    length = np.linalg.norm(across, axis=1)
+    rows = np.flatnonzero((distances <= reach) & (length > np.finfo(np.float32).eps))
+    if not len(rows):
+        return out, share
+    across[rows] /= length[rows, np.newaxis]
+    spans = np.ones(len(V)) if spans is None else np.asarray(spans, dtype=np.float64)
+    even = np.zeros(len(V)) if even is None else np.asarray(even, dtype=np.float64)
+    rows = rows[(spans[rows] > 0) | (even[rows] > 0)]
+    start, middle = 1.0 / (1.0 + WALL_ACROSS), 1.0 / (1.0 + WALL_EVEN)
+    hits, triangles, hit_points = [], [], []
+    for row in rows:
+        d = max(distances[row], 1e-5)
+        # Spanning a crease, the other wall is as far as the crease is wide: within its zone (see BRIDGE_ZONE).
+        location, normal, index, far = surface_bvh.ray_cast(
+            Vector(V[row] + across[row] * 1e-6), Vector(across[row]),
+            max(WALL_ACROSS * d, 2 * BRIDGE_ZONE if even[row] > 0 else 0.0))
+        if location is None or index is None or np.dot(np.asarray(normal), across[row]) >= 0:
+            continue
+        t = d / (d + far)
+        s = 0.5 * max(float(_smoothstep(np.array((t - start) / max(middle - start, 1e-9)))) * spans[row],
+                      even[row])
+        if s > 0:
+            hits.append((row, s))
+            triangles.append(index)
+            hit_points.append(location)
+    if not hits:
+        return out, share
+    rows, shares = (np.array(column) for column in zip(*hits))
+    F = np.asarray(source_triangles, dtype=np.int64)
+    I = np.asarray(triangles, dtype=np.int64)
+    B = _barycentric_coordinates(np.asarray(hit_points, dtype=np.float64), np.asarray(source_vertices)[F[I]])
+    other = interpolate_attribute_from_bary(np.asarray(source_weights), B, I, F)
+    out[rows] = (1 - shares[:, np.newaxis]) * out[rows] + shares[:, np.newaxis] * other
+    share[rows] = shares
+    return out, share
+
+
 # Flipped normals are allowed per loose part of the target, not per vertex: a part whose normals mostly face
 # away from the source's under it (a back-face layer, a part built inside out) is turned around as a whole.
 # Its vertices within PART_VOTE_REACH of the source vote, by area and how squarely their normals meet the
@@ -319,6 +399,12 @@ BRIDGE_ZONE = 0.015
 # whatever its normals. Trusting only matching normals there let the skin through under clothing that follows its
 # curves loosely (seams, plates, low-poly shapes).
 SKIN_TOUCH = BRIDGE_TEAR_HEIGHT / 2
+# Lying on it means along it: that trust fades out where the normals of target and source differ by the first to
+# the second angle (degrees). A strip wedged in a crease (a thong in the butt cleft) meets its walls edge-on, its
+# normals nearly square to theirs on both sides; counted from 90 degrees, the few vertices just under it on one
+# side were trusted and the whole strip followed that leg.
+SKIN_TOUCH_FULL_ANGLE = 45.0
+SKIN_TOUCH_ZERO_ANGLE = 75.0
 # Near a bridge, where the normals of target and source differ by more than the first angle (degrees, each
 # part of the target turned the way it faces, see facing_cosines), the target lifts off the source, like the
 # flanks of a crease; beyond the second its match is only trusted as much as BRIDGE_FLOOR.
@@ -443,7 +529,9 @@ def bridge_confidence(vertices, triangles, distances, cosines, points=None, soft
     bridges, and over fingers and toes (``digits``: each match's share of weights on their bones, see
     digit_share and DIGIT_BONE), a vertex within SKIN_REACH is trusted like one touching the skin, however its
     normals turn, unless the skin faces its outside; near bridges, so is one within SKIN_TOUCH (fading out by
-    twice that), since it lies on the skin instead of floating over the crease. Within BRIDGE_BORDER_RADIUS of
+    twice that) whose normals are up to SKIN_TOUCH_FULL_ANGLE off the skin's (fading out by
+    SKIN_TOUCH_ZERO_ANGLE), since it lies on the skin instead of floating over the crease or meeting its wall
+    edge-on. Within BRIDGE_BORDER_RADIUS of
     a free border, the trust is at least that of a vertex floating BRIDGE_BORDER_SOFTNESS / softness times as
     high, fading out with the distance to the border and with normals differing by BRIDGE_BORDER_FULL_ANGLE to
     BRIDGE_BORDER_ZERO_ANGLE: a hem along a thigh follows it, while a strap across a crease still blends.
@@ -472,7 +560,9 @@ def bridge_confidence(vertices, triangles, distances, cosines, points=None, soft
         full, zero = np.cos(np.radians(BRIDGE_BORDER_FULL_ANGLE)), np.cos(np.radians(BRIDGE_BORDER_ZERO_ANGLE))
         border_agreement = _smoothstep((cosines - zero) / (full - zero))
         trust = np.maximum(trust, border_odds / (1 + border_odds) * _smoothstep(near) * border_agreement)
-    skin = np.maximum(1 - bridge, _smoothstep((2 * SKIN_TOUCH - distances) / SKIN_TOUCH))
+    full, zero = np.cos(np.radians(SKIN_TOUCH_FULL_ANGLE)), np.cos(np.radians(SKIN_TOUCH_ZERO_ANGLE))
+    skin = np.maximum(1 - bridge, _smoothstep((2 * SKIN_TOUCH - distances) / SKIN_TOUCH)
+                      * _smoothstep((cosines - zero) / (full - zero)))
     if digits is not None:
         skin = np.maximum(skin, _smoothstep((np.asarray(digits, dtype=np.float64) - DIGIT_SHARE[0])
                                             / (DIGIT_SHARE[1] - DIGIT_SHARE[0])))
