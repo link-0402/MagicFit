@@ -360,9 +360,13 @@ def test_long_hair_chains():
                   name, [(chain.kind, len(chain.joints)) for chain in mine] + [round(length, 3)]))
     mine = [chain for chain, m in zip(chains, mains) if m == "ponytail"]
     length = spine_length(co, lock_of(mine[0], locks)) if len(mine) == 1 else math.nan
-    check(len(mine) == 1 and mine[0].kind == "ponytail" and length >= 0.36 and len(mine[0].joints) in (4, 5),
-          "long hair chains: the ponytail is one ponytail chain, its spine 0.36 m or more, 4 or 5 bones ({})".format(
-              [(chain.kind, len(chain.joints)) for chain in mine] + [round(length, 3)]))
+    check(len(mine) == 1 and mine[0].kind == "ponytail" and len(mine[0].joints) in (4, 5),
+          "long hair chains: the ponytail is one ponytail chain of 4 or 5 bones ({})".format(
+              [(chain.kind, len(chain.joints)) for chain in mine]))
+    # The tube's rows are 2 cm apart and its roots on one side of its top rows: a 1 cm band holds the back of
+    # one row and the front of the next. Smoothed, the spine runs down its 42 cm instead of zig-zagging.
+    check(0.36 <= length <= 0.48, "long hair chains: the ponytail's spine runs down its 42 cm ({:.3f} m)".format(
+        length))
     # The fixture's bangs barely hang: their crumbs join the temple locks (test_long_hair_locks), so there
     # are no others here; test_bangs_chain has bangs that hang.
     others = [(m, chain.kind, len(chain.joints)) for chain, m in zip(chains, mains)
@@ -458,6 +462,12 @@ def test_budget():
     check(keys == sorted(keys), "budget: the chains stay in name order")
     check(abs(sum(chain.area for chain in chains) - sum(chain.area for chain in free)) <= 1e-9,
           "budget: merged chains keep the hair's area")
+    # A merged lock hangs from the roots of both locks: its chain runs down the hair, not across the sheet.
+    sideways = [max(abs(float(chain.joints[0][0] - end[0])) for end in (chain.joints[-1], chain.tip))
+                for chain in chains]
+    check(chains and all(side <= 2.0 * hairrig.LOCK_WIDTH for side in sideways),
+          "budget: no chain runs across the sheet (first joint to last joint and tip {} m sideways)".format(
+              [round(side, 3) for side in sideways]))
 
 
 def test_moved_hair():

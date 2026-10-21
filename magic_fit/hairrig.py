@@ -28,12 +28,13 @@ has a chain. Own Skeleton builds the chains from the mesh. It first splits the h
 Then it plans a chain of bones down each lock:
 
 - The lock's spine is its middle line down the hair: its root, then the centroid of its vertices in each
-  SPINE_STEP band of distance from the root. A spine shorter than MIN_CHAIN_LENGTH gets no chain.
+  SPINE_STEP band of distance from the root, smoothed over SPINE_SMOOTHING samples (on a coarse mesh a band
+  mixes neighbouring rows, and the centroids zig-zag). A spine shorter than MIN_CHAIN_LENGTH gets no chain.
 - The chain has a bone per BONE_SPACING of spine (2 to 5), its joints spread evenly along the spine from the
   root, the last bone ending at the spine's end.
 - Its kind (bangs, side, back or ponytail) comes from where the lock leaves the head and how long it is.
 - While the rig takes more than MAX_HAIR_BONES bones, the smallest lock merges into the lock with the
-  nearest root, whose chain is planned again.
+  nearest root. The merged lock hangs from the roots of both (its root is their mean) and is planned again.
 
 Like `hairing`, nothing here depends on the 3D view.
 """
@@ -68,6 +69,9 @@ ROOT_BAND = 0.01
 CUT_STEPS = 10
 # Spine samples along the geodesic distance from the root (metres): one per band this wide.
 SPINE_STEP = 0.01
+# Samples in the centred moving average that smooths the spine (the first and last stay as they are): on a
+# coarse mesh one band holds the back of one ring and the front of the next, and the samples zig-zag.
+SPINE_SMOOTHING = 5
 # A shorter spine (metres) gets no chain; its hair goes to the nearest chain.
 MIN_CHAIN_LENGTH = 0.03
 # Bones per chain: clamp(ceil(length / BONE_SPACING), CHAIN_BONES), evenly along the spine (metres).
@@ -192,6 +196,13 @@ def _welded(points, tris, weld):
     return weld, count, rest, t, edges
 
 
+def _angle(rig, root):
+    """The angle (degrees) of world ``root`` around the head's vertical axis in ``rig``'s model space: 0
+    straight in front (-Y), 180 straight behind, the same on either side."""
+    at = rig.model(root)
+    return math.degrees(math.atan2(abs(at[0]), -(at[1] - rig.by_name[HEAD].head[1])))
+
+
 def find_locks(points, tris, rig, *, hang_start=0.025, hang_length=0.07, weld=None):
     """The locks of hair ``points`` (world space, rest pose, (n, 3)) with triangles ``tris`` hanging from
     ``rig`` (`hairing.HairRig`), sorted by angle and then by the root's X. ``weld`` (vertex -> welded group)
@@ -310,8 +321,7 @@ def find_locks(points, tris, rig, *, hang_start=0.025, hang_length=0.07, weld=No
         crumb = joined[weld[vertices]]
         lock_distance = distance[weld[vertices]]
         lock_distance[crumb] = np.linalg.norm(rest[weld[vertices[crumb]]] - root, axis=1)
-        at = rig.model(root)
-        angle = math.degrees(math.atan2(abs(at[0]), -(at[1] - axis_y)))
+        angle = _angle(rig, root)
         whole = drafts[index][2]
         locks.append(Lock(vertices, lock_distance, float(sizes[index]), root, whole, angle, crumb,
                           point_area[vertices]))
@@ -356,11 +366,25 @@ def chain_kind(angle, length, whole):
     return "back"
 
 
+def _smooth(line):
+    """``line`` ((m, 3)) smoothed by a centred moving average of SPINE_SMOOTHING samples, narrower near the
+    ends so it stays centred; the first and last samples stay as they are."""
+    half = SPINE_SMOOTHING // 2
+    count = len(line)
+    index = np.arange(count)
+    sums = np.vstack((np.zeros((1, 3)), np.cumsum(line, axis=0)))
+    reach = np.minimum(np.minimum(index, count - 1 - index), half)
+    low, high = index - reach, index + reach + 1
+    smooth = (sums[high] - sums[low]) / (high - low)[:, None]
+    smooth[[0, -1]] = line[[0, -1]]
+    return smooth
+
+
 def spine(points, lock, step=SPINE_STEP):
     """The middle line of ``lock`` down the hair ((m, 3), world space like ``points``, root to end): the
     lock's root, then the area-weighted centroid of its vertices in each ``step``-wide band of distance from
-    the root, nearest first (empty bands are skipped). Joined vertices (crumbs, measured in a straight line)
-    are left out: they would pull the line toward wherever the crumb is."""
+    the root, nearest first (empty bands are skipped), smoothed (SPINE_SMOOTHING). Joined vertices (crumbs,
+    measured in a straight line) are left out: they would pull the line toward wherever the crumb is."""
     points = np.asarray(points, dtype=np.float64)
     own = ~np.asarray(lock.joined, dtype=bool)
     vertices = lock.vertices[own]
@@ -372,7 +396,7 @@ def spine(points, lock, step=SPINE_STEP):
     total = np.bincount(band, weight, minlength=len(bands))
     centroids = np.column_stack([np.bincount(band, weight * points[vertices, k], minlength=len(bands)) / total
                                  for k in range(3)])
-    return np.vstack((root, centroids))
+    return _smooth(np.vstack((root, centroids)))
 
 
 def plan_chain(points, lock):
@@ -395,11 +419,20 @@ def plan_chain(points, lock):
                      lock.angle, lock.vertices)
 
 
-def _merge(target, small, mesh, points):
-    """The lock ``small`` merged into ``target`` (`Lock`s) on ``mesh`` (`_welded`): the target's root, angle
-    and kind of lock, both locks' vertices and area. Distances are measured again from the target's roots
-    (its own vertices at distance 0), along the hair of both; what can't be reached that way (another loose
-    part) is joined like a crumb, measured in a straight line from the root and left out of the spine."""
+def _roots(lock):
+    """Positions in ``lock.vertices`` of its roots: its own vertices at distance 0 (the nearest one if
+    none is)."""
+    own = np.flatnonzero(~lock.joined)
+    roots = own[lock.distance[own] <= 0.0]
+    return roots if len(roots) else own[[int(np.argmin(lock.distance[own]))]]
+
+
+def _merge(target, small, mesh, points, rig):
+    """The lock ``small`` merged into ``target`` (`Lock`s) on ``mesh`` (`_welded`): both locks' vertices
+    and area, the target's kind of lock (``whole``). The roots of both are the merged lock's roots: its root
+    is their area-weighted mean, and its distances are measured again from them along the hair of both. The
+    target's own vertices they don't reach keep their distance, as find_locks measured it; the small lock's
+    (another loose part) join like a crumb. Crumbs are measured in a straight line from the new root."""
     weld, count, rest, _tris, edges = mesh
     vertices = np.concatenate((target.vertices, small.vertices))
     order = np.argsort(vertices, kind='stable')
@@ -407,36 +440,32 @@ def _merge(target, small, mesh, points):
     joined = np.concatenate((target.joined, small.joined))[order]
     distance = np.concatenate((target.distance, small.distance)).astype(np.float64)[order]
     from_small = (np.arange(len(order)) >= len(target.vertices))[order]
+    areas = None
+    if target.areas is not None and small.areas is not None:
+        areas = np.concatenate((target.areas, small.areas))[order]
+    roots = np.argsort(order)[np.concatenate((_roots(target), len(target.vertices) + _roots(small)))]
+    weight = (np.ones(len(vertices)) if areas is None else areas)[roots] + 1e-12
+    root = np.average(points[vertices[roots]], axis=0, weights=weight)
     nodes = weld[vertices]
     free = np.zeros(count, dtype=bool)
     free[nodes[~joined]] = True
     inside = free[edges[:, 0]] & free[edges[:, 1]]
     lengths = np.linalg.norm(rest[edges[inside, 0]] - rest[edges[inside, 1]], axis=1)
-    own = ~target.joined
-    roots = weld[target.vertices[own & (target.distance <= 0.0)]]
-    if not len(roots):
-        roots = weld[target.vertices[own]][[int(np.argmin(target.distance[own]))]]
-    measured, _source = _dijkstra(count, edges[inside], lengths, np.unique(roots))
+    measured, _source = _dijkstra(count, edges[inside], lengths, np.unique(nodes[roots]))
     measured = measured[nodes]
-    # The target's own vertices its roots don't reach keep their distance, as find_locks measured it; the
-    # small lock's join like a crumb.
     reached = ~joined & np.isfinite(measured)
     distance[reached] = measured[reached]
     joined = joined | (from_small & ~reached)
-    straight = from_small & joined
-    distance[straight] = np.linalg.norm(points[vertices[straight]] - target.root, axis=1)
-    areas = None
-    if target.areas is not None and small.areas is not None:
-        areas = np.concatenate((target.areas, small.areas))[order]
-    return Lock(vertices, distance, target.area + small.area, target.root, target.whole, target.angle, joined, areas)
+    distance[joined] = np.linalg.norm(points[vertices[joined]] - root, axis=1)
+    return Lock(vertices, distance, target.area + small.area, root, target.whole, _angle(rig, root), joined, areas)
 
 
 def plan_rig(points, tris, rig, *, hang_start=0.025, hang_length=0.07, weld=None, max_bones=MAX_HAIR_BONES):
     """The chains of a hair skeleton for hair ``points`` (world space, rest pose) with triangles ``tris``
     hanging from ``rig`` (`hairing.HairRig`): one `ChainPlan` per lock (`find_locks`) whose spine is long
     enough, in name order (by angle, then by the root's X). While they take more than ``max_bones`` bones,
-    the smallest lock (by area) merges into the lock with the nearest root, which is planned again in its
-    place."""
+    the smallest lock (by area) merges into the lock with the nearest root (both hang from both roots, see
+    `_merge`), which is planned again."""
     points = np.asarray(points, dtype=np.float64)
     mesh = _welded(points, tris, weld)
     if mesh is None:
@@ -450,8 +479,10 @@ def plan_rig(points, tris, rig, *, hang_start=0.025, hang_length=0.07, weld=None
         gap = np.linalg.norm(roots - roots[small], axis=1)
         gap[small] = math.inf
         into = int(np.argmin(gap))
-        merged = _merge(planned[into][0], planned[small][0], mesh, points)
+        merged = _merge(planned[into][0], planned[small][0], mesh, points, rig)
         planned[into] = (merged, plan_chain(points, merged))
         del planned[small]
         planned = [(lock, chain) for lock, chain in planned if chain is not None]
+    # A merged lock's root moved: back in name order, as find_locks sorts.
+    planned.sort(key=lambda pair: (round(pair[0].angle, 6), pair[0].root[0]))
     return [chain for _lock, chain in planned]
