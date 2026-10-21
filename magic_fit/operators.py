@@ -2473,7 +2473,10 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
         renamed = []
         try:
             added = hairing.ensure_bones(context, armature, rig, wanted)
-            if custom and (self.rebuild or not hairrig.has_rig(armature, race)):
+            # A rig without hair bones (nothing hung when it was built, or the user deleted them all) has no
+            # edits to keep: it counts as none, so hair added since gets its chains.
+            empty = not any(bone.name.startswith(hairrig.BONE_PREFIX) for bone in armature.data.bones)
+            if custom and (self.rebuild or empty or not hairrig.has_rig(armature, race)):
                 # Built over the whole hair, its other parts too, as the matching sees it.
                 points = np.concatenate([rest.co for rest in whole])
                 starts = np.cumsum([0] + [len(rest.co) for rest in whole[:-1]])

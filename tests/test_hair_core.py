@@ -897,6 +897,16 @@ def test_nothing_hangs():
     check("Nothing hangs far enough from the head to swing: no chains built" in reports,
           "nothing hangs: says so")
     custom = hair.by_name(obj)
+    # A ponytail joined to the cap later: the rig without chains has no bones to keep, so it is built again.
+    co, tris, _ranges = join([hair.cap(), hair.tube((0.0, 0.105, 1.53), (0.0, 0.16, 1.11), 0.035)])
+    mesh = bpy.data.meshes.new("Cap")
+    mesh.from_pydata([tuple(p) for p in co], [], [tuple(t) for t in tris.tolist()])
+    obj.data = mesh
+    result, reports = hair_weights_reports()
+    chains = json.loads(armature.get(hairrig.RIG_PROPERTY, "{}")).get("chains")
+    check(result == {'FINISHED'} and own_bones(armature) and chains
+          and any(text.startswith("Built ") for text in reports),
+          "nothing hangs: hair hanging later gets chains without Rebuild ({:d} bones)".format(len(own_bones(armature))))
     hair.clear_scene()
     use_settings(hair_skeleton_mode='PICK', hair_skeleton=0)
     obj = strips_object("Cap", hair.cap())
@@ -947,6 +957,24 @@ def test_custom_brush():
     check(refused, "own brush: ...and the stroke refuses")
 
 
+def test_custom_view_layer():
+    # Own Skeleton edits the armature's bones every time: an armature outside the view layer is refused.
+    hair.clear_scene()
+    obj, _parts = hair.build()
+    rig_collection = bpy.data.collections.new("Rig")
+    bpy.context.scene.collection.children.link(rig_collection)
+    armature = hairing.new_armature(bpy.context, "Away", rig_collection)
+    hairing.add_armature_modifier(obj, armature)
+    bpy.context.view_layer.layer_collection.children[rig_collection.name].exclude = True
+    use_settings(hair_skeleton_mode='CUSTOM')
+    problem = operators.check_hair_weights_ready(bpy.context)
+    check(problem == "Armature 'Away' is not in the view layer: Own Skeleton edits its bones",
+          "own view layer: refused with Own Skeleton ({})".format(problem))
+    use_settings(hair_skeleton_mode='PICK', hair_skeleton=210)
+    check(operators.check_hair_weights_ready(bpy.context) is None, "own view layer: Pick isn't refused up front")
+    bpy.data.collections.remove(rig_collection)
+
+
 def test_custom_parts():
     # One part with a vanilla skeleton, the other with the hair's own: each warns about the other.
     hair.clear_scene()
@@ -987,7 +1015,7 @@ def main():
                      test_existing_armature, test_customize_plus, test_armature_out_of_view_layer, test_parts,
                      test_selected, test_replace, test_masks, test_pick, test_brush, test_readiness,
                      test_custom_button, test_custom_reuses_rig, test_race_change_rebuilds, test_nothing_hangs,
-                     test_custom_brush, test_custom_parts):
+                     test_custom_brush, test_custom_view_layer, test_custom_parts):
             print("==", test.__name__)
             try:
                 test()
