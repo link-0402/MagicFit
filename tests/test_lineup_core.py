@@ -1235,11 +1235,11 @@ def test_body_without_armature():
 # -----------------------------------------------------------------------------
 # Hair
 
-def hair_scene(narrower=0.0, junk=False, armature=False):
+def hair_scene(narrower=0.0, junk=False, armature=False, long=False):
     """The head and hair from elsewhere, the head picked, the hair selected, in Hair mode."""
     fixture.clear()
     head = fixture.build_head()
-    hair, part, rig = fixture.build_hair(narrower, junk, armature)
+    hair, part, rig = fixture.build_hair(narrower, junk, armature, long)
     settings = bpy.context.scene.body_fit_brush
     settings.lineup_mode = 'HAIR'
     settings.lineup_head = head
@@ -1295,6 +1295,18 @@ def test_hair_place():
           "hair: placed again, it stays")
 
 
+def test_hair_place_long():
+    head_object, hair, _part, _rig = hair_scene(long=True)
+    head = head_of(head_object)
+    points = lineup.mesh_positions(hair)
+    placement = hairlineup.place(points, lineup.mesh_tris(hair), head, 0.002)
+    made = fixture.hair_parts(long=True)[0]
+    off = np.linalg.norm(placement.move(points) - made, axis=1)
+    check(abs(placement.scale * fixture.HAIR_SCALE - 1.0) < 0.02 and np.median(off) < 0.003,
+          "hair: long hair, hanging far below the head, is found on it too ({:.1f} % of its size, {:s} off)".format(
+              100.0 * placement.scale, mm(np.median(off))))
+
+
 def test_hair_push():
     head_object, hair, part, _rig = hair_scene(narrower=0.012, junk=True)
     head = head_of(head_object)
@@ -1311,10 +1323,16 @@ def test_hair_push():
     inner, outer = pushed[part == 0], pushed[part == 1]
     middle = head.centre
     order = np.linalg.norm(outer - middle, axis=1) - np.linalg.norm(inner - middle, axis=1)
-    kept = (np.linalg.norm(outer - inner, axis=1) - np.linalg.norm(placed[part == 1] - placed[part == 0], axis=1))
-    check(order.min() > 0.0 and np.abs(kept).max() < 0.001,
-          "push: the outer layer rose with the inner one (stays {:s} farther out at least, distance kept within "
-          "{:s})".format(mm(order.min()), mm(np.abs(kept).max())))
+    spacing = fixture.HAIR_LAYERS[1] - fixture.HAIR_LAYERS[0]
+    outer_rise = np.linalg.norm(push.moves[part == 1], axis=1)
+    check(order.min() > 0.5 * spacing and outer_rise.max() > 0.001,
+          "push: the outer layer rose with the inner one, staying over it ({:s} farther out at least, from {:s}; "
+          "risen up to {:s})".format(mm(order.min()), mm(spacing), mm(outer_rise.max())))
+    out_of = layer_gaps(head, placed)
+    far = np.linalg.norm(push.moves[out_of > 0.03], axis=1)
+    check(len(far) > 0 and far.max() < 1e-4,
+          "push: hair farther than 3 cm off the head stays where it is ({:d} points, up to {:s})".format(
+              len(far), mm(far.max() if len(far) else 0.0)))
     sheet = np.linalg.norm(push.moves[part == 3], axis=1)
     check(sheet.max() < 1e-4, "push: a sheet through the skull stays where it is ({:s})".format(mm(sheet.max())))
     locks = np.linalg.norm(push.moves[part == 2], axis=1)

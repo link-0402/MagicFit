@@ -20,10 +20,11 @@ without the hair's weights or armature:
 - Pushing it out (`push_out`). Hair made on another head clips where this one is fuller. Every point of the hair
   is seen from the middle of the head: from its centre for the skull and face, from the neck's axis (sideways)
   for the neck. Each direction rises by the most any point along it needs to clear the scalp by Distance, over
-  about a centimetre around it and easing out past that. Everything along a direction rises alike, so layers lying
-  on each other keep their distance and order, and a strand that clips in one spot lifts with those around it.
+  about a centimetre around it and easing out past that, so a strand that clips in one spot lifts with those
+  around it. Hair farther out along a direction rises less, by half of how much farther out it is: layers lying on
+  each other keep their order (coming closer), and hair hanging far off, like a ponytail, stays where it is.
   Points deeper in than a quarter of the head's radius are tucked in on purpose (the game's hair cuts sheets
-  through the skull) and stay, and hair far out from the scalp rises less, to nothing 10 cm out.
+  through the skull) and stay.
 
 Like the other engines, this works on world space arrays and doesn't need the 3D view.
 """
@@ -54,7 +55,8 @@ MATCH_SCALE = 0.15
 SUNK_COST = 10.0
 # ...among the first this many layers along it.
 LAYERS = 4
-# Points tried for the head's middle: a grid this many points across the hair, those with hair straight above,
+# Points tried for the head's middle: a grid this many points across the hair's width (as far apart up and down
+# and front to back), those with hair straight above,
 # then finer grids (a third of the step each time) around the best few.
 GRID = 7
 LEVELS = 4
@@ -72,6 +74,10 @@ PUSH_SPREAD = 0.012
 # Points deeper in than this many head radii are tucked in on purpose and stay (easing in from 60 % of that).
 TUCKED = 0.25
 TUCKED_EASE = 0.6
+# Hair farther out from the scalp than Distance rises less, by this much of how much farther: layers over the
+# hair pushed out rise only to stay over it (closer to it, never through it), and hair hanging far off (a
+# ponytail) stays where it is.
+PUSH_EASE = 0.5
 # Hair farther out from the scalp than PUSH_BAND rises less, to nothing PUSH_FADE farther.
 PUSH_BAND = 0.06
 PUSH_FADE = 0.04
@@ -246,11 +252,14 @@ def place(points, tris, head, gap):
     match = MATCH_SCALE * head.radius
     cast = bvh.ray_cast
     up = tuple(UP)
-    step = size / GRID
+    # As fine along every axis as across: long hair hangs far below the head, whose middle a grid spread over all
+    # its length would step past.
+    step = width / GRID
     best = []
     for level in range(LEVELS):
         if level == 0:
-            axes = [low[k] + size[k] * (np.arange(GRID) + 0.5) / GRID for k in range(3)]
+            axes = [low[k] + 0.5 * (size[k] % step) + step * (np.arange(max(1, int(size[k] // step))) + 0.5)
+                    for k in range(3)]
             grid = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(-1, 3)
             grid = np.array([point for point in grid.tolist() if cast(point, up, 1e9)[0] is not None]).reshape(-1, 3)
             # Every third direction at first.
@@ -458,8 +467,8 @@ def push_out(points, head, gap):
     cells_along = max(1, int(math.ceil(PUSH_SPREAD / PUSH_STEP)))
     cells_around = max(1, int(math.ceil(PUSH_SPREAD / (2.0 * math.pi * head.radius / around.around))))
     field = _blur(_spread_max(lowest, cells_around, cells_along), max(cells_around, cells_along))
-    rise = _lookup(field, cell_around, cell_along)
     out_of = np.where(over, distance - surface, np.inf)
+    rise = np.maximum(_lookup(field, cell_around, cell_along) - PUSH_EASE * np.maximum(out_of - gap, 0.0), 0.0)
     weight = np.where(over, 1.0 - _smoothstep((out_of - PUSH_BAND) / PUSH_FADE), 0.0)
     sunk = np.where(over, (surface - distance) / tucked, 0.0)
     weight *= 1.0 - _smoothstep((sunk - TUCKED_EASE) / (1.0 - TUCKED_EASE))

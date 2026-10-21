@@ -750,10 +750,10 @@ def build_head():
     return mesh_object("c0201f0001_fac Part 0.0", vertices, faces, [])
 
 
-def hair_parts(narrower=0.0, junk=False):
+def hair_parts(narrower=0.0, junk=False, long=False):
     """Hair made on the head (``narrower``: on one that much narrower), as it would sit on it: two layers over
-    the skull but the face, three locks hanging at the back and, with ``junk``, a sheet through the skull (as the
-    game's hair has). Returns (vertices, faces, which part each vertex is: 0 inner layer, 1 outer, 2 locks, 3
+    the skull but the face, three locks hanging at the back (``long``: down to the hips) and, with ``junk``, a
+    sheet through the skull (as the game's hair has). Returns (vertices, faces, which part each vertex is: 0 inner layer, 1 outer, 2 locks, 3
     sheet), with the layers' vertices in the same order."""
     axes = HEAD_AXES - (narrower, 0.0, 0.0)
     centre = HEAD_CENTRE
@@ -771,14 +771,15 @@ def hair_parts(narrower=0.0, junk=False):
         vertices.extend(v.tolist())
         faces.extend(tuple(i + first for i in face) for face in f)
         part.extend([k] * len(v))
+    rows = 40 if long else 12
     for x in (-0.04, 0.0, 0.04):
         first = len(vertices)
-        for row in range(12):
+        for row in range(rows):
             z = centre[2] - 0.02 - 0.02 * row
             for dx in (-0.01, 0.01):
                 vertices.append((x + dx, centre[1] + axes[1] + 0.012, z))
-        faces.extend((first + 2 * r, first + 2 * r + 1, first + 2 * r + 3, first + 2 * r + 2) for r in range(11))
-        part.extend([2] * 24)
+        faces.extend((first + 2 * r, first + 2 * r + 1, first + 2 * r + 3, first + 2 * r + 2) for r in range(rows - 1))
+        part.extend([2] * 2 * rows)
     if junk:
         first = len(vertices)
         for row in range(5):
@@ -795,10 +796,10 @@ def from_elsewhere(points):
     return (points - HEAD_CENTRE) * HAIR_SCALE + HEAD_CENTRE + HAIR_OFFSET
 
 
-def build_hair(narrower=0.0, junk=False, armature=False):
+def build_hair(narrower=0.0, junk=False, armature=False, long=False):
     """The hair as imported from elsewhere, as one mesh "Hair" (with "Hair Bone" bending it all with
     ``armature``). Returns (mesh, part of each vertex, armature or None)."""
-    vertices, faces, part = hair_parts(narrower, junk)
+    vertices, faces, part = hair_parts(narrower, junk, long)
     rig = None
     if armature:
         head = from_elsewhere(HEAD_CENTRE[None])[0]
