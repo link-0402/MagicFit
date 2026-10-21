@@ -627,6 +627,51 @@ def _hair_bones(bones):
             if any(b.name.startswith(BONE_PREFIX) for b in [bone] + list(bone.parent_recursive))]
 
 
+def _walk_chains(bones):
+    """The chains through ``bones`` (the hair's edit bones, `_hair_bones`): (names root to tip, fresh) each,
+    no bone in two chains. A fresh chain takes a new number and all its bones new names.
+
+    A chain starts at each bone whose parent isn't one of them (in name order, hair bone names first) and
+    runs down its children: those named for its own chain number in name order, then those not named for any
+    (BONE_PATTERN). Where it goes on down the first, each other one starts a fresh chain (a branch). A child
+    named for another chain number starts a chain of its own, which keeps its names (a branch made before)
+    unless that number is taken already. Branches come after all the others."""
+    names = {bone.name for bone in bones}
+    children = {name: [] for name in names}
+    for bone in bones:
+        if bone.parent is not None and bone.parent.name in names:
+            children[bone.parent.name].append(bone)
+    tops = sorted((bone for bone in bones if bone.parent is None or bone.parent.name not in names),
+                  key=lambda bone: (_parse(bone.name) is None, bone.name))
+    pending = [(bone, False) for bone in tops]
+    claimed = set()
+    chains = []
+    index = 0
+    while index < len(pending):
+        bone, fresh = pending[index]
+        index += 1
+        parsed = _parse(bone.name)
+        fresh = fresh or (parsed is not None and parsed[0] in claimed)
+        number = None if fresh or parsed is None else parsed[0]
+        if number is not None:
+            claimed.add(number)
+        chain = [bone.name]
+        while True:
+            kids = sorted(children[bone.name], key=lambda kid: kid.name)
+            numbered = [(kid, _parse(kid.name)) for kid in kids]
+            own = [kid for kid, at in numbered if at is not None and number is not None and at[0] == number]
+            own += [kid for kid, at in numbered if at is None]
+            taken = {kid.name for kid in own}
+            pending.extend((kid, False) for kid, _at in numbered if kid.name not in taken)
+            if not own:
+                break
+            pending.extend((kid, True) for kid in own[1:])
+            bone = own[0]
+            chain.append(bone.name)
+        chains.append((chain, fresh))
+    return chains
+
+
 def _known_kinds(armature_object):
     """{chain number: kind} of the chains in the rig state; when it has none (a file from another tool),
     of the chains in RIG_PROPERTY. A chain's number is its first bone's (by its place when that isn't a
@@ -663,11 +708,13 @@ def sync_rig(context, armature_object, race):
     """Read the chains of ``armature_object``'s hair bones as they are now (the user may have moved, deleted
     or added some in Edit Mode) into its rig state for ``race``, and write RIG_PROPERTY.
 
-    The hair bones are those named BONE_PREFIX and every bone below them; their chains (`hairing.chains_of`)
-    are ordered by their first bone's name. A bone whose name isn't a hair bone's (BONE_PATTERN) gets the
-    next free name in its chain (Blender renames the vertex groups of the meshes the armature deforms
-    with it); a chain whose first bone has no such name gets the next free number. Chains keep their kinds
-    by number (`_known_kinds`), and new ones get `chain_kind`. Returns the renamed bones as "old → new"."""
+    The hair bones are those named BONE_PREFIX and every bone below them; their chains (`_walk_chains`) are
+    ordered by their first bone's name. A bone whose name isn't a hair bone's (BONE_PATTERN) gets the next
+    free name in its chain (Blender renames the vertex groups of the meshes the armature deforms with it); a
+    chain whose first bone has no such name gets the next free number. A new branch (a bone's second child
+    on) starts a chain of its own: the next free number, its bones named a, b, ... down it; a branch made
+    before keeps its chain. Chains keep their kinds by number (`_known_kinds`), and new ones get
+    `chain_kind`. Returns the renamed bones as "old → new"."""
     kinds = _known_kinds(armature_object)
     base = hairing.Reference.get().rig(race, 0)
     renamed = []
@@ -676,38 +723,39 @@ def sync_rig(context, armature_object, race):
         head = edit_bones.get(HEAD)
         offset = _transform(world, head.head) - base.by_name[HEAD].head if head is not None else np.zeros(3)
         rig = base.moved(offset)
-        ends = {}
-        bones = []
-        for edit in _hair_bones(edit_bones):
-            ends[edit.name] = (_transform(world, edit.head), _transform(world, edit.tail))
-            bones.append(hairing.Bone(edit.name, edit.parent.name if edit.parent is not None else None,
-                                      world @ np.array(edit.matrix, dtype=np.float64) @ ALONG_X))
-        chains = sorted(([bone.name for bone in chain.bones] for chain in hairing.chains_of(bones)),
-                        key=lambda names: names[0])
+        bones = _hair_bones(edit_bones)
+        ends = {edit.name: (_transform(world, edit.head), _transform(world, edit.tail)) for edit in bones}
+        walked = _walk_chains(bones)
         used = {edit.name for edit in edit_bones}
         numbers = {parsed[0] for parsed in map(_parse, used) if parsed is not None}
+        fresh = set()
         rename = {}
-        for names in chains:
-            first = _parse(rename.get(names[0], names[0]))
+        for names, fresh_chain in walked:
+            first = None if fresh_chain else _parse(names[0])
             if first is None:
                 number = max(numbers, default=0) + 1
                 if number > MAX_CHAINS:
                     raise HairError("The hair has more than {:d} chains".format(MAX_CHAINS))
                 numbers.add(number)
+                fresh.add(number)
             else:
                 number = first[0]
             for name in names:
-                if name in rename or _parse(name) is not None:
+                # A fresh chain's bones are all named for it.
+                if not fresh_chain and _parse(name) is not None:
                     continue
                 rename[name] = _free_name(used, number)
                 used.add(rename[name])
+        chains = [names for names, _fresh in walked]
         for old, new in rename.items():
             edit_bones[old].name = new
             renamed.append("{:s} → {:s}".format(old, new))
     result = []
     for old in chains:
         names = [rename.get(name, name) for name in old]
-        kind = kinds.get(_parse(names[0])[0])
+        number = _parse(names[0])[0]
+        # A new chain may take the number of one the user deleted: it doesn't take that one's kind.
+        kind = kinds.get(number) if number not in fresh else None
         if kind is None:
             length = sum(float(np.linalg.norm(ends[name][1] - ends[name][0])) for name in old)
             kind = chain_kind(_angle(rig, ends[old[0]][0]), length, False)

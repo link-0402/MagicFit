@@ -681,6 +681,66 @@ def test_edited_rig_is_kept():
           == [chain["kind"] for chain in data["chains"]], "edited rig: with no state, the property's kinds are kept")
 
 
+def chains_are_clean(armature):
+    """Whether every hair bone of the armature is in exactly one chain of the rig property, and each chain
+    lists its bones root to tip, each bone's parent the one before it."""
+    chains = rig_json(armature)["chains"]
+    listed = [name for chain in chains for name in chain["bones"]]
+    have = sorted(bone.name for bone in armature.data.bones if bone.name.startswith(hairrig.BONE_PREFIX))
+    chained = all(armature.data.bones[name].parent is not None and armature.data.bones[name].parent.name == parent
+                  for chain in chains for parent, name in zip(chain["bones"], chain["bones"][1:]))
+    return sorted(listed) == have and len(set(listed)) == len(listed) and chained
+
+
+def test_branch_starts_chain():
+    _obj, armature, _plans, _bones, _co, _tris, _part, _names = rig_scene()
+    before = state_chains(armature)
+    first = before[0][1][0]
+    # Two bones branching off chain 01's first bone, one below the other, 5 cm each, 3 cm off its chain.
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='EDIT')
+    edit_bones = armature.data.edit_bones
+    root = edit_bones[first]
+    upper = edit_bones.new("Branch")
+    upper.head = root.tail + Vector((0.03, 0.0, 0.0))
+    upper.tail = upper.head - Vector((0.0, 0.0, 0.05))
+    upper.parent = root
+    lower = edit_bones.new("Branch.001")
+    lower.head, lower.tail = upper.tail, upper.tail - Vector((0.0, 0.0, 0.05))
+    lower.parent = upper
+    renamed = hairrig.sync_rig(bpy.context, armature, hair.RACE)
+    print("      renamed:", renamed)
+    after = state_chains(armature)
+    number = len(before) + 1
+    branch = ["j_ex_hair_{:02d}_a".format(number), "j_ex_hair_{:02d}_b".format(number)]
+    check(len(after) == len(before) + 1 and after[:len(before)] == before,
+          "branch: one more chain, the others as they were ({:d} -> {:d})".format(len(before), len(after)))
+    check(after and after[-1][1] == branch and after[-1][0] in hairrig.KINDS
+          and armature.data.bones.get(branch[0]) is not None
+          and armature.data.bones[branch[0]].parent.name == first,
+          "branch: the branch is chain {:02d}, {:s}, hanging from {:s} ({})".format(
+              number, ", ".join(branch), first, after[-1] if after else None))
+    check(chains_are_clean(armature) and json_matches_state(armature),
+          "branch: every hair bone in exactly one chain, each chain root to tip")
+
+    # One more bone off the same bone (a third child): one more chain again; the first child keeps its chain.
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='EDIT')
+    edit_bones = armature.data.edit_bones
+    root = edit_bones[first]
+    twig = edit_bones.new("Twig")
+    twig.head = root.tail - Vector((0.03, 0.0, 0.0))
+    twig.tail = twig.head - Vector((0.0, 0.0, 0.05))
+    twig.parent = root
+    hairrig.sync_rig(bpy.context, armature, hair.RACE)
+    again = state_chains(armature)
+    twig_name = "j_ex_hair_{:02d}_a".format(number + 1)
+    check(len(again) == len(after) + 1 and again[:len(after)] == after and again[-1][1] == [twig_name],
+          "branch: a second branch off the same bone is chain {:02d} ({})".format(number + 1, again[-1]))
+    check(chains_are_clean(armature) and json_matches_state(armature),
+          "branch: still every hair bone in exactly one chain")
+
+
 def test_kind_change_writes_json():
     _obj, armature, _plans, _bones, _co, _tris, _part, _names = rig_scene()
     chains = armature.magic_fit_hair_rig.chains
@@ -696,7 +756,7 @@ def main():
         for test in (test_long_hair_locks, test_one_piece_long_hair, test_separate_strands, test_crumbs,
                      test_parted_locks, test_long_hair_chains, test_bangs_chain, test_pivot_at_root, test_even_joints,
                      test_kinds, test_budget, test_moved_hair, test_armature_rig, test_weights_follow_locks,
-                     test_edited_rig_is_kept, test_kind_change_writes_json):
+                     test_edited_rig_is_kept, test_branch_starts_chain, test_kind_change_writes_json):
             print("==", test.__name__)
             try:
                 test()
