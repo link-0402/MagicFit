@@ -1072,6 +1072,9 @@ def test_custom_parts_one_after_another():
         moved = before[0][1][0]
         if edited:
             move_bone_head(first, armature, moved, (0.01, 0.0, 0.0))
+        else:
+            # A kind picked in the list isn't a bone edit: the chains are still built again, keeping it.
+            armature.magic_fit_hair_rig.chains[0].kind = 'back'
         joint = bone_head(armature, moved)
         second = parts_object("Ponytail", ("ponytail",))
         result, reports = hair_weights_reports()
@@ -1086,6 +1089,10 @@ def test_custom_parts_one_after_another():
         check(warning not in reports, "one after another: no warning while the bones are as they were built")
         check("The chains were rebuilt: give 'Hair' Hair Weights again" in reports,
               "one after another: the first part is asked to get Hair Weights again")
+        picked = [kind for kind, bones in rig_chains(armature)
+                  if bones and armature.data.bones.get(bones[0]) is not None
+                  and np.linalg.norm(bone_head(armature, bones[0]) - joint) < 1e-4]
+        check(picked == ['back'], "one after another: the chain picked as back stays back ({})".format(picked))
         chain = next((bones for kind, bones in rig_chains(armature) if kind == 'ponytail'), None)
         check(chain is not None, "one after another: the chains are built again with a ponytail chain ({})".format(
             rig_chains(armature)))

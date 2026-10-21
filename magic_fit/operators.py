@@ -2497,6 +2497,9 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
                                        for rest, start in zip(whole, starts)])
                 plans = hairrig.plan_rig(points, tris, rig, hang_start=settings.hair_hang_start,
                                          hang_length=settings.hair_hang_length)
+                if again and not self.rebuild:
+                    # Built again only because a part joined: the chains the user picked kinds for keep them.
+                    plans = hairrig.keep_kinds(armature, plans)
                 built = hairrig.build_armature_rig(context, armature, plans, race)
             elif custom:
                 # The chains as the user left them: moved, deleted or added bones; new ones get names.

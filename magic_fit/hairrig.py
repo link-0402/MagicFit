@@ -119,6 +119,9 @@ BONE_PATTERN = re.compile(r"j_ex_hair_([0-9]{2})_([a-z])")
 MAX_CHAINS = 99
 # Decimals (of metres, and of the bones' Z axes) `bones_hash` rounds the hair's bones to.
 HASH_PRECISION = 6
+# Chains built again when a part joins the hair keep the kind of the chain before whose first bone starts
+# within this of theirs (half a lock): the same lock, so a kind the user picked in the list stays.
+KIND_REACH = 0.5 * LOCK_WIDTH
 # The game's frame of a hair bone from the Blender bone's (rest @ ALONG_X): the game's X (along which a
 # hair bone points) is the bone's +Y (head to tail), the game's Y its -X, and Z stays.
 ALONG_X = np.array(((0.0, -1.0, 0.0, 0.0),
@@ -691,6 +694,31 @@ def rig_edited(armature_object):
     (`bones_hash`); so it seems when it has no hash of them."""
     stored = armature_object.magic_fit_hair_rig.bones_hash
     return not stored or stored != bones_hash(armature_object)
+
+
+def keep_kinds(armature_object, plans):
+    """``plans`` (`ChainPlan`s, world space) with the kinds of the chains on ``armature_object`` (its rig
+    state) whose first bone starts within KIND_REACH of theirs, nearest first, each chain's kind given once:
+    built again over the hair, the same locks keep the kinds the user picked. Others keep their own."""
+    world = np.array(armature_object.matrix_world, dtype=np.float64)
+    bones = armature_object.data.bones
+    old = []
+    for chain in armature_object.magic_fit_hair_rig.chains:
+        first = bones.get(chain.bones.split(",")[0])
+        if first is not None and chain.kind in KINDS:
+            old.append((_transform(world, first.head_local), chain.kind))
+    pairs = sorted((float(np.linalg.norm(plan.joints[0] - root)), p, o)
+                   for p, plan in enumerate(plans) for o, (root, _kind) in enumerate(old))
+    given, taken = set(), set()
+    for distance, p, o in pairs:
+        if distance > KIND_REACH:
+            break
+        if p in given or o in taken:
+            continue
+        plans[p].kind = old[o][1]
+        given.add(p)
+        taken.add(o)
+    return plans
 
 
 def counted(count, word):
