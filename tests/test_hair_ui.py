@@ -10,6 +10,7 @@ Screenshots are written to the directory in the MF_SCREENSHOTS environment varia
 import os
 import sys
 import traceback
+from types import SimpleNamespace
 
 import bpy
 import numpy as np
@@ -22,10 +23,12 @@ sys.path.insert(0, os.path.join(ROOT, "tests"))
 
 import hair  # noqa: E402
 import magic_fit  # noqa: E402
-from magic_fit import hairing, operators  # noqa: E402
+from magic_fit import hairing, operators, tool  # noqa: E402
 
 SHOTS = os.environ.get("MF_SCREENSHOTS")
 FAILURES = []
+DRAW_ERRORS = []  # exceptions in the Hair Weights panel's draw and the chain list's rows, which Blender only prints
+LIST_ROWS = []  # the chain list rows drawn since it was cleared
 
 
 def check(condition, message):
@@ -33,6 +36,62 @@ def check(condition, message):
     sys.stdout.flush()
     if not condition:
         FAILURES.append(message)
+
+
+def watch():
+    """Record the exceptions of the Hair Weights panel's draw and the chain list's rows, and the rows drawn.
+    Done before registering: Blender checks the methods' argument counts then."""
+    panel = tool.VIEW3D_PT_hair_weights_sidebar
+    draw = panel.draw
+
+    def draw_panel(self, context):
+        try:
+            draw(self, context)
+        except Exception:
+            DRAW_ERRORS.append(traceback.format_exc())
+            raise
+
+    panel.draw = draw_panel
+    chains = getattr(tool, "MAGIC_FIT_UL_hair_chains", None)
+    if chains is None:
+        return
+    draw_item = chains.draw_item
+
+    def draw_row(self, context, layout, data, item, icon, active_data, active_property, index=0, flt_flag=0):
+        LIST_ROWS.append(index)
+        try:
+            draw_item(self, context, layout, data, item, icon, active_data, active_property, index, flt_flag)
+        except Exception:
+            DRAW_ERRORS.append(traceback.format_exc())
+            raise
+
+    chains.draw_item = draw_row
+
+
+class Recorder:
+    """Stands in for a UILayout: keeps what is drawn on it, as (call, text, args, the Recorder it returned).
+    An operator's settings are the attributes set on its Recorder."""
+
+    def __init__(self, drawn):
+        object.__setattr__(self, "drawn", drawn)
+
+    def __getattr__(self, name):
+        def call(*args, **kwargs):
+            item = Recorder(self.drawn)
+            self.drawn.append((name, kwargs.get("text"), args, item))
+            return item
+        return call
+
+
+def drawn_texts(settings, rig_state):
+    """What the Hair Weights result box draws for the active hair, and the chain list's first row."""
+    drawn = []
+    tool.VIEW3D_PT_hair_weights_sidebar.draw_result(bpy.context, Recorder(drawn), settings)
+    chains = getattr(tool, "MAGIC_FIT_UL_hair_chains", None)
+    if chains is not None and rig_state is not None and len(rig_state.chains):
+        chains.draw_item(SimpleNamespace(layout_type='DEFAULT'), bpy.context, Recorder(drawn), rig_state,
+                         rig_state.chains[0], 0, rig_state, "active", 0)
+    return drawn
 
 
 class Env:
@@ -219,8 +278,52 @@ def steps():
     check(obj.magic_fit_hair.skeleton == other and obj.get(hairing.EST_PROPERTY) == other,
           "try another: one undo takes it back ({:d})".format(obj.magic_fit_hair.skeleton))
 
+    # --- Own Skeleton: chains built from the hair's shape, listed with their kinds in the result box.
+    settings = bpy.context.scene.magic_fit
+    settings.hair_skeleton_mode = 'CUSTOM'
+    bpy.context.view_layer.objects.active = obj
+    with env.override(sidebar):
+        result = bpy.ops.magic_fit.hair_weights('EXEC_DEFAULT', True)
+    yield 0.4
+    obj = bpy.data.objects["Hair"]
+    settings = bpy.context.scene.magic_fit
+    armature = hairing.weighted_armature(obj)
+    rig_state = armature.magic_fit_hair_rig if armature is not None else None
+    count = len(rig_state.chains) if rig_state is not None else 0
+    check(result == {'FINISHED'} and obj.magic_fit_hair.custom and count > 0,
+          "own skeleton: the hair got its own chains ({:d})".format(count))
+    DRAW_ERRORS.clear()
+    LIST_ROWS.clear()
+    for area in env.window.screen.areas:
+        area.tag_redraw()
+    yield 0.5
+    check(not DRAW_ERRORS, "own skeleton: the panel and the chain list drew without errors")
+    check(len(LIST_ROWS) > 0, "own skeleton: the chain list drew its rows ({:d})".format(len(LIST_ROWS)))
+    with env.override(sidebar):
+        drawn = drawn_texts(settings, rig_state)
+    texts = [text for _call, text, _args, _item in drawn if text]
+    bones = sum(len([name for name in chain.bones.split(",") if name]) for chain in rig_state.chains) if count else 0
+    check("{:d} chains, {:d} bones (at most 48)".format(count, bones) in texts,
+          "own skeleton: the box counts the chains and bones")
+    check(any(text.startswith("Chain 01  ") and text.endswith(" bones") for text in texts),
+          "own skeleton: the list's first row is Chain 01 with its bones")
+    check(any(call == 'prop' and args[1:] == ("kind",) for call, _text, args, _item in drawn),
+          "own skeleton: the row has the kind dropdown")
+    check(any(call == 'template_list' and args[0] == "MAGIC_FIT_UL_hair_chains" for call, _text, args, _item in drawn),
+          "own skeleton: the box lists the chains")
+    rebuild = [item for call, text, _args, item in drawn if call == 'operator' and text == "Rebuild Chains"]
+    check(len(rebuild) == 1 and getattr(rebuild[0], "rebuild", False) is True,
+          "own skeleton: Rebuild Chains builds the chains again")
+    check(not [text for text in texts if text.startswith("EST entry") or text in ("Also fitting:", "Try Another EST Entry")],
+          "own skeleton: no EST entry, matches or Try Another EST Entry")
+    check(operators.MAGIC_FIT_OT_hair_weights.description(bpy.context, SimpleNamespace(rebuild=True, skeleton=-1)) ==
+          "Build the hair's bone chains again from its shape. Your bone edits are lost",
+          "own skeleton: Rebuild Chains says what it does")
+    env.screenshot("hair_custom_chains.png", whole_window=True)
+
 
 def run():
+    watch()
     magic_fit.register()
     gen = steps()
 

@@ -8,7 +8,7 @@ import bpy
 import gpu
 from gpu.types import GPUBatch, GPUVertBuf, GPUVertFormat
 
-from . import clipping, facing, hairing, sizing, tabs
+from . import clipping, facing, hairing, hairrig, sizing, tabs
 from .operators import (
     FACE_REPAIRS,
     MAGIC_FIT_OT_body_fit,
@@ -1001,6 +1001,24 @@ class VIEW3D_PT_heels_brush_sidebar(_WeightBrushPanel, bpy.types.Panel):
     button = "Paint Heel Weights"
 
 
+def _chain_bones(chain):
+    """The bone names of a chain of the hair's own skeleton (`HairRigChain`), root to tip."""
+    return [name for name in chain.bones.split(",") if name]
+
+
+class MAGIC_FIT_UL_hair_chains(bpy.types.UIList):
+    """The chains of the hair's own skeleton (Object.magic_fit_hair_rig), with their bones and kinds"""
+
+    def draw_item(self, _context, layout, _data, item, _icon, _active_data, _active_property, index=0, flt_flag=0):
+        bones = _chain_bones(item)
+        # The chain's number is its bones' (j_ex_hair_NN_x), as the user sees them on the armature.
+        parsed = hairrig._parse(bones[0]) if bones else None
+        number = parsed[0] if parsed is not None else index + 1
+        split = layout.split(factor=0.55)
+        split.label(text="Chain {:02d}  {:d} bones".format(number, len(bones)))
+        split.prop(item, "kind", text="", emboss=True)
+
+
 class VIEW3D_PT_hair_weights_sidebar(tabs.TabPanel, bpy.types.Panel):
     """Give whole hair meshes FFXIV hair bone weights, using the hair skeleton that fits best"""
     bl_label = "Hair Weights"
@@ -1053,10 +1071,14 @@ class VIEW3D_PT_hair_weights_sidebar(tabs.TabPanel, bpy.types.Panel):
 
     @staticmethod
     def draw_result(context, layout, settings):
-        """The skeleton the active hair got, and the others that fit it well, to try instead."""
+        """The skeleton the active hair got, and the others that fit it well, to try instead. For a hair with
+        its own skeleton, its chains instead."""
         obj = context.object
         state = getattr(obj, "magic_fit_hair", None) if obj is not None else None
         if state is None or state.skeleton < 0 or state.race != settings.hair_race:
+            return
+        if state.custom:
+            VIEW3D_PT_hair_weights_sidebar.draw_chains(layout, obj)
             return
         try:
             reference = hairing.Reference.get()
@@ -1082,6 +1104,22 @@ class VIEW3D_PT_hair_weights_sidebar(tabs.TabPanel, bpy.types.Panel):
         box.separator()
         op = box.operator(MAGIC_FIT_OT_pick_hair_skeleton.bl_idname, text="Try Another EST Entry", icon='VIEWZOOM')
         op.apply = True
+
+    @staticmethod
+    def draw_chains(layout, obj):
+        """The chains of the hair's own skeleton, on its armature, with their kinds to change, and the button
+        that builds them again."""
+        armature = hairing.weighted_armature(obj)
+        if armature is None:
+            return
+        rig_state = armature.magic_fit_hair_rig
+        bones = sum(len(_chain_bones(chain)) for chain in rig_state.chains)
+        box = layout.box().column()
+        box.label(text="{:d} chains, {:d} bones (at most {:d})".format(
+            len(rig_state.chains), bones, hairrig.MAX_HAIR_BONES), icon='ARMATURE_DATA')
+        box.template_list("MAGIC_FIT_UL_hair_chains", "", rig_state, "chains", rig_state, "active", rows=4)
+        op = box.operator(MAGIC_FIT_OT_hair_weights.bl_idname, text="Rebuild Chains", icon='FILE_REFRESH')
+        op.rebuild = True
 
 
 class VIEW3D_PT_hair_brush_sidebar(_WeightBrushPanel, bpy.types.Panel):
@@ -1866,6 +1904,7 @@ classes = (
     VIEW3D_PT_skirt_brush_sidebar,
     VIEW3D_PT_heel_weights_sidebar,
     VIEW3D_PT_heels_brush_sidebar,
+    MAGIC_FIT_UL_hair_chains,
     VIEW3D_PT_hair_weights_sidebar,
     VIEW3D_PT_hair_brush_sidebar,
     VIEW3D_PT_face_weights_sidebar,
