@@ -35,6 +35,8 @@ Then it plans a chain of bones down each lock:
 - Its kind (bangs, side, back or ponytail) comes from where the lock leaves the head and how long it is.
 - While the rig takes more than MAX_HAIR_BONES bones, the smallest lock merges into the lock with the
   nearest root. The merged lock hangs from the roots of both (its root is their mean) and is planned again.
+  It is kept whole only when both locks were and one's roots lie within the other's, no wider than
+  WHOLE_WIDTH: layers of one ponytail. Strands or cards merged side by side make back hair.
 
 The chains become bones on the hair's armature (`build_armature_rig`), j_ex_hair_01_a and on, hanging from
 j_kao. They are ordinary Blender bones, head on a joint and tail on the next, so they draw along the hair
@@ -91,6 +93,9 @@ CHAIN_BONES = (2, 5)
 # The budget of the whole rig: the smallest lock (by area) merges into the lock with the nearest root until
 # the chains fit.
 MAX_HAIR_BONES = 48
+# Two whole locks merged are still whole (WHOLE_WIDTH) only when one's roots lie within the other's around the
+# head, give or take this (radians): layers of one ponytail. Strands or cards side by side make back hair.
+WITHIN_SLACK = 1e-6
 # The kinds of chain, by where the lock leaves the head and how long it is (see chain_kind).
 KINDS = ("bangs", "side", "back", "ponytail")
 # Bangs: a root this close to straight in front (degrees around the head's axis, 0 in front)...
@@ -477,9 +482,22 @@ def _edges_from(graph, nodes, inside):
     return edge[at[inside[to[at]]]]
 
 
+def _root_arcs(rig, at, weights):
+    """The angles (radians) of world points ``at`` around the head's vertical axis in ``rig``'s model space,
+    about their ``weights``-weighted circular mean, and their weighted mean distance from the axis (metres):
+    an angle times that distance is an arc, as find_locks measures root spans."""
+    model = rig.model(at)
+    axis_y = rig.by_name[HEAD].head[1]
+    theta = np.arctan2(model[:, 0], -(model[:, 1] - axis_y))
+    mean = math.atan2(float((weights * np.sin(theta)).sum()), float((weights * np.cos(theta)).sum()))
+    radius = np.hypot(model[:, 0], model[:, 1] - axis_y)
+    return (theta - mean + math.pi) % (2.0 * math.pi) - math.pi, float(np.average(radius, weights=weights))
+
+
 def _merge(target, small, mesh, points, rig, graph=None):
     """The lock ``small`` merged into ``target`` (`Lock`s) on ``mesh`` (`_welded`, with its `_graph`, found
-    here when None): both locks' vertices and area, the target's kind of lock (``whole``). The roots of both
+    here when None): both locks' vertices and area, ``whole`` when both are and one's roots lie within the
+    other's (WITHIN_SLACK), spanning at most WHOLE_WIDTH around the head (`_root_arcs`). The roots of both
     are the merged lock's roots: its root is their area-weighted mean, and its distances are measured again
     from them along the hair of both, so the small lock's own vertices are measured from its own roots when
     it is another loose part. Vertices of the target those roots don't reach keep their distance, as
@@ -527,8 +545,16 @@ def _merge(target, small, mesh, points, rig, graph=None):
         distance[reached] = measured[reached]
     joined = joined | (from_small & ~reached)
     distance[joined] = np.linalg.norm(points[vertices[joined]] - root, axis=1)
-    return Lock(vertices, distance, target.area + small.area, root, target.whole, _angle(rig, root), joined, areas,
-                reached)
+    # Whole when both are, their roots span at most WHOLE_WIDTH together, and one's roots lie within the
+    # other's (around the head): layers of one ponytail, not strands or cards side by side.
+    whole = bool(target.whole and small.whole)
+    if whole:
+        arcs, scale = _root_arcs(rig, points[vertices[roots]], weight)
+        mine = ~from_small[roots]
+        span = float(np.ptp(arcs))
+        whole = span * scale <= WHOLE_WIDTH and span <= max(float(np.ptp(arcs[mine])), float(np.ptp(arcs[~mine]))) \
+            + WITHIN_SLACK
+    return Lock(vertices, distance, target.area + small.area, root, whole, _angle(rig, root), joined, areas, reached)
 
 
 def plan_rig(points, tris, rig, *, hang_start=0.025, hang_length=0.07, weld=None, max_bones=MAX_HAIR_BONES):

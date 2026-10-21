@@ -480,6 +480,32 @@ def card_hair(count, seed=0):
     return co, tris
 
 
+def test_card_hair_kinds():
+    # Card hair: 300 cards, each its own loose part kept whole (a single strand), 4 bones each: merged down to
+    # the budget, the locks are slices of the hair around the back, not ponytails.
+    model_rig = rig()
+    co, tris = card_hair(300)
+    chains = hairrig.plan_rig(co, tris, model_rig)
+    describe_chains(chains, co, [])
+    check(len(chains) > 1 and sum(len(chain.joints) for chain in chains) <= hairrig.MAX_HAIR_BONES,
+          "card hair: merged down to the budget ({:d} chains)".format(len(chains)))
+    check(not [chain for chain in chains if chain.kind == "ponytail"],
+          "card hair: no ponytail chains ({})".format([chain.kind for chain in chains]))
+    behind = [chain for chain in chains if chain.angle > hairrig.SIDE_ANGLE]
+    check(behind and all(chain.kind == "back" for chain in behind),
+          "card hair: every chain behind the head is back hair ({})".format([chain.kind for chain in behind]))
+    # A ponytail in two layers, a tube in a tube (two loose parts, each kept whole): merged, it is still one
+    # ponytail.
+    co, tris, _ranges = join([hair.cap(), hair.tube((0.0, 0.105, 1.53), (0.0, 0.16, 1.11), 0.035),
+                              hair.tube((0.0, 0.105, 1.53), (0.0, 0.16, 1.11), 0.028)])
+    free = hairrig.plan_rig(co, tris, model_rig)
+    chains = hairrig.plan_rig(co, tris, model_rig, max_bones=5)
+    describe_chains(chains, co, [])
+    check(len(free) == 2 and len(chains) == 1 and chains[0].kind == "ponytail" and chains[0].whole,
+          "card hair: a ponytail in two layers merged stays one ponytail ({} -> {})".format(
+              [chain.kind for chain in free], [chain.kind for chain in chains]))
+
+
 def test_card_hair_time():
     # Card hair of 3000 cards (66,000 vertices): about 2950 budget merges, each measuring only the locks it
     # merges, not the whole hair.
@@ -775,7 +801,8 @@ def main():
     try:
         for test in (test_long_hair_locks, test_one_piece_long_hair, test_separate_strands, test_crumbs,
                      test_parted_locks, test_long_hair_chains, test_bangs_chain, test_pivot_at_root, test_even_joints,
-                     test_kinds, test_budget, test_card_hair_time, test_moved_hair, test_armature_rig, test_weights_follow_locks,
+                     test_kinds, test_budget, test_card_hair_kinds, test_card_hair_time, test_moved_hair,
+                     test_armature_rig, test_weights_follow_locks,
                      test_edited_rig_is_kept, test_branch_starts_chain, test_kind_change_writes_json):
             print("==", test.__name__)
             try:
