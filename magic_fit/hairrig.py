@@ -59,21 +59,24 @@ CUT_STEPS = 10
 
 
 class Lock:
-    """A lock of hair: ``vertices`` (indices of the points), ``distance`` (metres along the mesh from the
-    lock's roots, one per vertex; 0 at the roots, a joined crumb's included), ``area`` (m²), ``root`` ((3,),
-    world space: the area-weighted mean of its own roots, not those of crumbs that joined it), ``whole`` (a
-    loose part kept whole, see WHOLE_WIDTH) and ``angle`` (of the root around the head's vertical axis,
-    degrees: 0 straight in front, 180 straight behind)."""
+    """A lock of hair: ``vertices`` (indices of the points), ``distance`` (metres from the lock's root, one
+    per vertex: along the mesh from its roots, 0 there; for a joined crumb's vertices, in a straight line
+    from ``root``), ``area`` (m²), ``root`` ((3,), world space: the area-weighted mean of its own roots, not
+    those of crumbs that joined it), ``whole`` (a loose part kept whole, see WHOLE_WIDTH), ``angle`` (of the
+    root around the head's vertical axis, degrees: 0 straight in front, 180 straight behind) and ``joined``
+    (bool per vertex: it came from a crumb that joined the lock, see MIN_LOCK_AREA). The chain's spine
+    skips the ``joined`` vertices; they only take its weights."""
 
-    __slots__ = ("vertices", "distance", "area", "root", "whole", "angle")
+    __slots__ = ("vertices", "distance", "area", "root", "whole", "angle", "joined")
 
-    def __init__(self, vertices, distance, area, root, whole, angle):
+    def __init__(self, vertices, distance, area, root, whole, angle, joined):
         self.vertices = vertices
         self.distance = distance
         self.area = area
         self.root = root
         self.whole = whole
         self.angle = angle
+        self.joined = joined
 
 
 def _dijkstra(count, edges, lengths, sources):
@@ -199,6 +202,9 @@ def find_locks(points, tris, rig, *, hang_start=0.025, hang_length=0.07, weld=No
         scale = float(np.average(radius[roots], weights=weight[roots]))
         arc[nodes] = ((theta[nodes] - mean + math.pi) % (2.0 * math.pi) - math.pi) * scale
         own = arc[nodes]
+        # A region is connected and holds its roots, so the Dijkstra reached every vertex of it (a source of
+        # -1 would read the last vertex's arc).
+        assert (source[nodes] >= 0).all(), "a hanging region's vertex not reached from its roots"
         root_arc = arc[source[nodes]]
         root_span = float(np.ptp(arc[roots]))
         own_span = float(np.ptp(own))
@@ -223,10 +229,8 @@ def find_locks(points, tris, rig, *, hang_start=0.025, hang_length=0.07, weld=No
     # Small locks (crumbs) join the nearest lock (by root) of at least MIN_LOCK_AREA, across loose parts if
     # need be, without moving its root; with none to join they are dropped. Crumbs never join each other.
     owner = np.full(count, -1, dtype=np.int64)
-    is_lock_root = np.zeros(count, dtype=bool)
-    for index, (nodes, roots, _whole) in enumerate(drafts):
+    for index, (nodes, _roots, _whole) in enumerate(drafts):
         owner[nodes] = index
-        is_lock_root[roots] = True
     sizes = np.array([area[nodes].sum() for nodes, _roots, _whole in drafts])
     roots_at = np.array([np.average(rest[roots], axis=0, weights=weight[roots]) for _nodes, roots, _whole in drafts])
     alive = sizes >= MIN_LOCK_AREA
@@ -237,13 +241,18 @@ def find_locks(points, tris, rig, *, hang_start=0.025, hang_length=0.07, weld=No
             into = int(np.argmin(np.where(alive, gap, np.inf)))
             target[small] = into
             sizes[into] += sizes[small]
+    joined = (owner >= 0) & ~alive[np.maximum(owner, 0)]
     owner = np.where(owner >= 0, target[np.maximum(owner, 0)], -1)
 
-    # Every lock measured again from its roots (a crumb's own included), along itself; a piece its roots
-    # don't reach that way (a cut runs around it) keeps its distance from the region's roots.
-    within = (owner[edges[:, 0]] == owner[edges[:, 1]]) & (owner[edges[:, 0]] >= 0)
-    distance, _source = _dijkstra(count, edges[within], lengths[within],
-                                  np.flatnonzero(is_lock_root & (owner >= 0)))
+    # Every lock measured again from its own roots, along itself; a piece its roots don't reach that way (a
+    # cut runs around it) keeps its distance from the region's roots. A joined crumb, often on another loose
+    # part, is as far from the lock's root as it is in a straight line.
+    is_lock_root = np.zeros(count, dtype=bool)
+    for index in np.flatnonzero(alive):
+        is_lock_root[drafts[index][1]] = True
+    within = (owner[edges[:, 0]] == owner[edges[:, 1]]) & (owner[edges[:, 0]] >= 0) & ~joined[edges[:, 0]] \
+        & ~joined[edges[:, 1]]
+    distance, _source = _dijkstra(count, edges[within], lengths[within], np.flatnonzero(is_lock_root))
     distance = np.where(np.isfinite(distance), distance, region_distance)
     point_owner = owner[weld]
     by_owner = np.argsort(point_owner, kind='stable')
@@ -252,9 +261,14 @@ def find_locks(points, tris, rig, *, hang_start=0.025, hang_length=0.07, weld=No
     for index in np.flatnonzero(alive):
         vertices = by_owner[bounds[index]:bounds[index + 1]]
         root = roots_at[index]
+        crumb = joined[weld[vertices]]
+        lock_distance = distance[weld[vertices]]
+        lock_distance[crumb] = np.linalg.norm(rest[weld[vertices[crumb]]] - root, axis=1)
         at = rig.model(root)
         angle = math.degrees(math.atan2(abs(at[0]), -(at[1] - axis_y)))
         whole = drafts[index][2]
-        locks.append(Lock(vertices, distance[weld[vertices]], float(sizes[index]), root, whole, angle))
-    locks.sort(key=lambda lock: (lock.angle, lock.root[0]))
+        locks.append(Lock(vertices, lock_distance, float(sizes[index]), root, whole, angle, crumb))
+    # Mirrored locks have the same angle but for float noise, which mustn't decide their order (chain names
+    # come from it): the lower root X first.
+    locks.sort(key=lambda lock: (round(lock.angle, 6), lock.root[0]))
     return locks

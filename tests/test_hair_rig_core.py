@@ -164,6 +164,18 @@ def test_long_hair_locks():
             check(len(mine) == 1 and names[main[locks.index(mine[0])]] == temple,
                   "long hair: bangs strip {:d}'s crumb joins {:s}, the nearest lock ({})".format(
                       index, temple, [names[main[locks.index(lock)]] for lock in mine]))
+            if len(mine) != 1:
+                continue
+            # The crumb's vertices are marked joined and measured from the lock's root, about 10 cm away; the
+            # lock's own vertices nearest its root are still at its start.
+            lock = mine[0]
+            crumb = part[lock.vertices] == index
+            own = ~lock.joined
+            nearest = np.argsort(np.linalg.norm(co[lock.vertices[own]] - lock.root, axis=1))[:2]
+            check(np.array_equal(lock.joined, crumb) and lock.distance[crumb].min() > 0.05
+                  and lock.distance[own][nearest].max() < 0.01,
+                  "long hair: ...as joined vertices {:.3f} m from its root, its own nearest at {:.3f} m".format(
+                      float(lock.distance[crumb].min()), float(lock.distance[own][nearest].max())))
     # Each lock's root lies where its (main) part leaves the head: the part's hanging vertex closest to the
     # head; crumbs that joined it don't move it. The ponytail's root is the middle of the ring where its 7 cm
     # tube leaves the head, and that vertex is on the ring's side: within the tube's radius.
@@ -193,10 +205,13 @@ def test_one_piece_long_hair():
         [round(span, 3) for span in spans]))
     angles = [lock.angle for lock in locks]
     check(angles == sorted(angles), "one piece: the locks come sorted by angle")
+    check(all(a.root[0] < b.root[0] for a, b in zip(locks, locks[1:]) if abs(a.angle - b.angle) < 1e-6),
+          "one piece: mirrored locks come lower root X first")
     weld = fitting.weld_groups(co, fitting.WELD_DISTANCE)[0]
     given = hairrig.find_locks(co, tris, model_rig, weld=weld)
-    check([len(lock.vertices) for lock in given] == [len(lock.vertices) for lock in locks],
+    check(len(given) == len(locks) and all(np.array_equal(a.vertices, b.vertices) for a, b in zip(given, locks)),
           "one piece: the same locks with the weld given")
+    check(not any(lock.joined.any() for lock in locks), "one piece: no crumbs joined")
     # Hair whose armature has its head elsewhere: the same locks, their roots moved along.
     offset = np.array((0.05, -0.1, 0.2))
     moved = hairrig.find_locks(co + offset, tris, model_rig.moved(offset))
