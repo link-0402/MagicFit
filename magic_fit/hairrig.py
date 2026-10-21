@@ -36,16 +36,26 @@ Then it plans a chain of bones down each lock:
 - While the rig takes more than MAX_HAIR_BONES bones, the smallest lock merges into the lock with the
   nearest root. The merged lock hangs from the roots of both (its root is their mean) and is planned again.
 
+The chains become bones on the hair's armature (`build_armature_rig`), j_ex_hair_01_a and on, hanging from
+j_kao. They are ordinary Blender bones, head on a joint and tail on the next, so they draw along the hair
+and the user can move, delete or add some in Edit Mode; `sync_rig` reads them back as they are and names
+new ones. Each bone's Z axis points away from the head's axis. The armature carries the rig as RIG_PROPERTY,
+written from `Object.magic_fit_hair_rig` after every change, for exporters (Instant Edit) to make the hair
+skeleton. A hair bone points along its X axis in the game and along its Y axis in Blender: ALONG_X turns
+one into the other, here (`custom_rig`) and in the exporter.
+
 Like `hairing`, nothing here depends on the 3D view.
 """
 
 import heapq
+import json
 import math
+import re
 
 import numpy as np
 
-from . import fitting
-from .hairing import HEAD, components, hanging_share, unique_triangles, vertex_areas
+from . import fitting, hairing
+from .hairing import HEAD, HairError, components, hanging_share, unique_triangles, vertex_areas
 
 # A vertex belongs to a lock when its hanging share (the settings' Hang Start and Hang Length) is above
 # this: just past Hang Start, so a lock's root is where the hair leaves the head.
@@ -91,6 +101,21 @@ BANGS_LENGTH = 0.20
 SIDE_ANGLE = 110.0
 # Ponytail: a lock kept whole (WHOLE_WIDTH) with a spine at least this long (metres).
 PONYTAIL_LENGTH = 0.30
+# The custom property on the armature object that holds the rig for exporters, as JSON: {"race": "c0801",
+# "chains": [{"kind": "back", "bones": ["j_ex_hair_01_a", ...]}]}, each chain's bones root to tip.
+RIG_PROPERTY = "xiv_hair_rig"
+# The hair's own bones are named BONE_PREFIX, the chain's number (01 on) and the bone's letter (a from the
+# root): j_ex_hair_01_a. Exporters accept no other names (BONE_PATTERN).
+BONE_PREFIX = "j_ex_hair_"
+BONE_PATTERN = re.compile(r"j_ex_hair_([0-9]{2})_([a-z])")
+# The most chains the names allow.
+MAX_CHAINS = 99
+# The game's frame of a hair bone from the Blender bone's (rest @ ALONG_X): the game's X (along which a
+# hair bone points) is the bone's +Y (head to tail), the game's Y its -X, and Z stays.
+ALONG_X = np.array(((0.0, -1.0, 0.0, 0.0),
+                    (1.0, 0.0, 0.0, 0.0),
+                    (0.0, 0.0, 1.0, 0.0),
+                    (0.0, 0.0, 0.0, 1.0)))
 
 
 class Lock:
@@ -486,3 +511,232 @@ def plan_rig(points, tris, rig, *, hang_start=0.025, hang_length=0.07, weld=None
     # A merged lock's root moved: back in name order, as find_locks sorts.
     planned.sort(key=lambda pair: (round(pair[0].angle, 6), pair[0].root[0]))
     return [chain for _lock, chain in planned]
+
+
+# -----------------------------------------------------------------------------
+# Armature
+
+def bone_name(chain, bone):
+    """The name of bone ``bone`` (0-based, from the root) of chain ``chain`` (0-based): (0, 0) is
+    j_ex_hair_01_a."""
+    return "{:s}{:02d}_{:s}".format(BONE_PREFIX, chain + 1, chr(ord("a") + bone))
+
+
+def _parse(name):
+    """(chain number, from 1; bone, from 0) of a hair bone's name, or None when it isn't one (BONE_PATTERN)."""
+    match = BONE_PATTERN.fullmatch(name)
+    return None if match is None else (int(match.group(1)), ord(match.group(2)) - ord("a"))
+
+
+def _away(point, axis):
+    """The horizontal direction (world space) from the head's vertical axis through ``axis`` to ``point``;
+    straight behind when the point is on the axis."""
+    out = np.asarray(point, dtype=np.float64) - axis
+    out[2] = 0.0
+    length = float(np.linalg.norm(out))
+    return out / length if length > 1e-6 else np.array((0.0, 1.0, 0.0))
+
+
+def _transform(matrix, point):
+    return matrix[:3, :3] @ np.asarray(point, dtype=np.float64) + matrix[:3, 3]
+
+
+def _read_property(armature_object):
+    """The rig RIG_PROPERTY holds (a dict), or None when there is none or it isn't JSON."""
+    text = armature_object.get(RIG_PROPERTY) if armature_object is not None else None
+    if not isinstance(text, str):
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def has_rig(armature_object, race):
+    """Whether ``armature_object`` carries a rig (RIG_PROPERTY) for ``race``."""
+    data = _read_property(armature_object)
+    return data is not None and data.get("race") == race
+
+
+def write_rig_property(armature_object):
+    """Write RIG_PROPERTY on ``armature_object`` from its rig state (`Object.magic_fit_hair_rig`)."""
+    state = armature_object.magic_fit_hair_rig
+    armature_object[RIG_PROPERTY] = json.dumps({"race": state.race, "chains": [
+        {"kind": chain.kind, "bones": [name for name in chain.bones.split(",") if name]}
+        for chain in state.chains]})
+    armature_object.id_properties_ui(RIG_PROPERTY).update(
+        description="The hair's own skeleton: its race and chains. Set by Magic Fit's Hair Weights")
+
+
+def _fill_state(armature_object, race, chains):
+    """Fill the rig state of ``armature_object`` with ``race`` and ``chains`` ((kind, bone names) each) and
+    write RIG_PROPERTY."""
+    state = armature_object.magic_fit_hair_rig
+    state.race = race
+    state.chains.clear()
+    for kind, names in chains:
+        chain = state.chains.add()
+        chain.bones = ",".join(names)
+        chain.kind = kind
+    state.active = min(max(state.active, 0), max(len(state.chains) - 1, 0))
+    write_rig_property(armature_object)
+
+
+def build_armature_rig(context, armature_object, plans, race):
+    """Replace every hair bone (BONE_PREFIX) of ``armature_object`` with a bone per joint of ``plans``
+    (`ChainPlan`s, world space): head on its joint, tail on the next joint (the last one's on the plan's
+    tip), its Z axis away from the head's vertical axis, the first hanging from j_kao and each next one from
+    the one before. The armature must have j_kao (`hairing.ensure_bones`). Fills the rig state for ``race``
+    and writes RIG_PROPERTY. Returns the new bone names."""
+    from mathutils import Vector
+    world = np.array(armature_object.matrix_world, dtype=np.float64)
+    to_armature = np.array(armature_object.matrix_world.inverted_safe(), dtype=np.float64)
+    names, chains = [], []
+    with hairing.editing_bones(context, armature_object) as edit_bones:
+        head = edit_bones.get(HEAD)
+        if head is None:
+            raise HairError("Armature '{:s}' has no {:s} bone".format(armature_object.name, HEAD))
+        for edit in [edit for edit in edit_bones if edit.name.startswith(BONE_PREFIX)]:
+            edit_bones.remove(edit)
+        axis = _transform(world, head.head)
+        for c, plan in enumerate(plans):
+            ends = list(plan.joints[1:]) + [plan.tip]
+            parent = head
+            chain = []
+            for b, (joint, end) in enumerate(zip(plan.joints, ends)):
+                edit = edit_bones.new(bone_name(c, b))
+                edit.head = Vector(_transform(to_armature, joint).tolist())
+                edit.tail = Vector(_transform(to_armature, end).tolist())
+                edit.align_roll(Vector((to_armature[:3, :3] @ _away(joint, axis)).tolist()))
+                edit.parent = parent
+                edit.use_connect = b > 0
+                edit.use_deform = True
+                parent = edit
+                chain.append(edit.name)
+            names += chain
+            chains.append((plan.kind, chain))
+    _fill_state(armature_object, race, chains)
+    return names
+
+
+def _hair_bones(bones):
+    """Those of ``bones`` (edit bones) that belong to the hair's own skeleton: named BONE_PREFIX, or below
+    one that is."""
+    return [bone for bone in bones
+            if any(b.name.startswith(BONE_PREFIX) for b in [bone] + list(bone.parent_recursive))]
+
+
+def _known_kinds(armature_object):
+    """{chain number: kind} of the chains in the rig state; when it has none (a file from another tool),
+    of the chains in RIG_PROPERTY. A chain's number is its first bone's (by its place when that isn't a
+    hair bone's name)."""
+    state = armature_object.magic_fit_hair_rig
+    if len(state.chains):
+        listed = [(chain.kind, chain.bones.split(",")) for chain in state.chains]
+    else:
+        data = _read_property(armature_object)
+        chains = data.get("chains") if data is not None else None
+        listed = [(chain.get("kind"), chain.get("bones")) for chain in (chains if isinstance(chains, list) else ())
+                  if isinstance(chain, dict)]
+    kinds = {}
+    for index, (kind, bones) in enumerate(listed):
+        if kind not in KINDS:
+            continue
+        first = _parse(bones[0]) if isinstance(bones, list) and bones and isinstance(bones[0], str) else None
+        kinds[first[0] if first is not None else index + 1] = kind
+    return kinds
+
+
+def _free_name(used, number):
+    """The next free bone name in chain ``number`` (from 1): the letter after its last one taken in
+    ``used`` (names), else the first one free."""
+    taken = {parsed[1] for parsed in map(_parse, used) if parsed is not None and parsed[0] == number}
+    after = max(taken) + 1 if taken else 0
+    free = [k for k in range(after, 26)] or [k for k in range(26) if k not in taken]
+    if not free:
+        raise HairError("Hair chain {:02d} has more than 26 bones".format(number))
+    return bone_name(number - 1, free[0])
+
+
+def sync_rig(context, armature_object, race):
+    """Read the chains of ``armature_object``'s hair bones as they are now (the user may have moved, deleted
+    or added some in Edit Mode) into its rig state for ``race``, and write RIG_PROPERTY.
+
+    The hair bones are those named BONE_PREFIX and every bone below them; their chains (`hairing.chains_of`)
+    are ordered by their first bone's name. A bone whose name isn't a hair bone's (BONE_PATTERN) gets the
+    next free name in its chain (Blender renames the vertex groups of the meshes the armature deforms
+    with it); a chain whose first bone has no such name gets the next free number. Chains keep their kinds
+    by number (`_known_kinds`), and new ones get `chain_kind`. Returns the renamed bones as "old → new"."""
+    kinds = _known_kinds(armature_object)
+    base = hairing.Reference.get().rig(race, 0)
+    renamed = []
+    with hairing.editing_bones(context, armature_object) as edit_bones:
+        world = np.array(armature_object.matrix_world, dtype=np.float64)
+        head = edit_bones.get(HEAD)
+        offset = _transform(world, head.head) - base.by_name[HEAD].head if head is not None else np.zeros(3)
+        rig = base.moved(offset)
+        ends = {}
+        bones = []
+        for edit in _hair_bones(edit_bones):
+            ends[edit.name] = (_transform(world, edit.head), _transform(world, edit.tail))
+            bones.append(hairing.Bone(edit.name, edit.parent.name if edit.parent is not None else None,
+                                      world @ np.array(edit.matrix, dtype=np.float64) @ ALONG_X))
+        chains = sorted(([bone.name for bone in chain.bones] for chain in hairing.chains_of(bones)),
+                        key=lambda names: names[0])
+        used = {edit.name for edit in edit_bones}
+        numbers = {parsed[0] for parsed in map(_parse, used) if parsed is not None}
+        rename = {}
+        for names in chains:
+            first = _parse(rename.get(names[0], names[0]))
+            if first is None:
+                number = max(numbers, default=0) + 1
+                if number > MAX_CHAINS:
+                    raise HairError("The hair has more than {:d} chains".format(MAX_CHAINS))
+                numbers.add(number)
+            else:
+                number = first[0]
+            for name in names:
+                if name in rename or _parse(name) is not None:
+                    continue
+                rename[name] = _free_name(used, number)
+                used.add(rename[name])
+        for old, new in rename.items():
+            edit_bones[old].name = new
+            renamed.append("{:s} → {:s}".format(old, new))
+    result = []
+    for old in chains:
+        names = [rename.get(name, name) for name in old]
+        kind = kinds.get(_parse(names[0])[0])
+        if kind is None:
+            length = sum(float(np.linalg.norm(ends[name][1] - ends[name][0])) for name in old)
+            kind = chain_kind(_angle(rig, ends[old[0]][0]), length, False)
+        result.append((kind, names))
+    result.sort(key=lambda chain: chain[1][0])
+    _fill_state(armature_object, race, result)
+    return renamed
+
+
+def custom_rig(armature_object, race, reference=None):
+    """The `hairing.HairRig` of the hair's own skeleton on ``armature_object``: the body's bones of ``race``
+    (``reference.rig(race, 0)``) and the armature's hair bones (BONE_PREFIX), the latter in the game's frame
+    (ALONG_X: each one's X runs from its head to its tail). Moved by the armature's offset
+    (`hairing.armature_offset`), like a vanilla rig, and ``custom``: the body's hair bones take none of the
+    hair."""
+    reference = hairing.Reference.get() if reference is None else reference
+    base = reference.rig(race, 0)
+    offset = hairing.armature_offset(armature_object, base)
+    world = np.array(armature_object.matrix_world, dtype=np.float64)
+    bones = list(base.bones)
+    have = {bone.name for bone in bones}
+    skeleton = []
+    for bone in sorted(armature_object.data.bones, key=lambda bone: bone.name):
+        if not bone.name.startswith(BONE_PREFIX) or bone.name in have:
+            continue
+        rest = world @ np.array(bone.matrix_local, dtype=np.float64) @ ALONG_X
+        # Rest bones hold no scale.
+        rest[:3, :3] /= np.maximum(np.linalg.norm(rest[:3, :3], axis=0), 1e-12)[None, :]
+        rest[:3, 3] -= offset
+        bones.append(hairing.Bone(bone.name, bone.parent.name if bone.parent is not None else None, rest))
+        skeleton.append(bone.name)
+    return hairing.HairRig(race, 0, bones, base.head_field, skeleton, custom=True).moved(offset)

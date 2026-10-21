@@ -12,7 +12,7 @@ from bpy.props import (
     StringProperty,
 )
 
-from . import earring
+from . import earring, hairrig
 
 
 def _poll_mesh(_self, obj):
@@ -856,6 +856,52 @@ class HairWeightsState(bpy.types.PropertyGroup):
     )
 
 
+_HAIR_RIG_KIND_DESCRIPTIONS = {
+    "bangs": "Short hair over the forehead",
+    "side": "Hair at the sides of the face",
+    "back": "Hair down the back",
+    "ponytail": "A long lock tied together, such as a ponytail or braid",
+}
+HAIR_RIG_KINDS = tuple((kind, kind.capitalize(), _HAIR_RIG_KIND_DESCRIPTIONS[kind]) for kind in hairrig.KINDS)
+
+
+def _hair_rig_kind_changed(self, _context):
+    hairrig.write_rig_property(self.id_data)
+
+
+class HairRigChain(bpy.types.PropertyGroup):
+    """A chain of the hair's own skeleton (Object.magic_fit_hair_rig): its kind and bones, root to tip."""
+    kind: EnumProperty(
+        name="Kind",
+        description="How the game swings this chain",
+        items=HAIR_RIG_KINDS,
+        default='back',
+        update=_hair_rig_kind_changed,
+    )
+    bones: StringProperty(
+        name="Bones",
+        description="The chain's bones, root to tip, separated by commas",
+        default="",
+    )
+
+
+class HairRigState(bpy.types.PropertyGroup):
+    """The hair's own skeleton on an armature (Object.magic_fit_hair_rig), written to its xiv_hair_rig
+    property after every change."""
+    race: StringProperty(
+        name="Race",
+        description="The race the skeleton was made for",
+        default="",
+    )
+    chains: CollectionProperty(type=HairRigChain)
+    active: IntProperty(
+        name="Active Chain",
+        description="The chain selected in the list",
+        default=0,
+        min=0,
+    )
+
+
 class BodyFitBrushSettings(bpy.types.PropertyGroup):
     # The body itself is the shared one (`Scene.magic_fit.target`).
     mode: EnumProperty(
@@ -1509,6 +1555,8 @@ classes = (
     SizeSetting,
     MagicFitSettings,
     HairWeightsState,
+    HairRigChain,
+    HairRigState,
     BodyFitBrushSettings,
     TextureRelaxBrushSettings,
     FitMoveSettings,
@@ -1529,9 +1577,11 @@ def register():
     bpy.types.Scene.close_rips = PointerProperty(type=CloseRipsSettings)
     bpy.types.Scene.magic_fit_clipping = PointerProperty(type=ClippingSettings)
     bpy.types.Object.magic_fit_hair = PointerProperty(type=HairWeightsState)
+    bpy.types.Object.magic_fit_hair_rig = PointerProperty(type=HairRigState)
 
 
 def unregister():
+    del bpy.types.Object.magic_fit_hair_rig
     del bpy.types.Object.magic_fit_hair
     del bpy.types.Scene.magic_fit_clipping
     del bpy.types.Scene.close_rips

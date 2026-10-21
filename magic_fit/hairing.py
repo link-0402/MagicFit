@@ -48,6 +48,7 @@ vanilla hairs (to behave like the game's own weights and skeletons when the head
 Like `painting`, nothing here depends on the 3D view.
 """
 
+import contextlib
 import math
 import os
 
@@ -346,9 +347,10 @@ def skeleton_label(number):
 class HairRig:
     """The bones a hair can hang from, for one race and hair skeleton, in Blender model space (moved by
     ``offset`` when the hair's armature has its head elsewhere). ``skeleton`` names the bones of the hair
-    skeleton (the others are the body's)."""
+    skeleton (the others are the body's). A ``custom`` rig's skeleton is the hair's own (`hairrig`): a chain
+    for every lock that hangs, so the body's hair bones take none of it."""
 
-    def __init__(self, race, number, bones, head, skeleton, offset=None):
+    def __init__(self, race, number, bones, head, skeleton, offset=None, custom=False):
         self.race = race
         self.number = number
         self.bones = bones
@@ -356,14 +358,17 @@ class HairRig:
         self.head_field = head
         self.skeleton = list(skeleton)
         self.offset = np.zeros(3) if offset is None else np.asarray(offset, dtype=np.float64)
+        self.custom = custom
 
     def moved(self, offset):
-        return HairRig(self.race, self.number, self.bones, self.head_field, self.skeleton, offset)
+        return HairRig(self.race, self.number, self.bones, self.head_field, self.skeleton, offset, self.custom)
 
     def hair_bones(self):
-        """The bones hair hangs from: the body's j_kami_* and the hair skeleton's, in rig order."""
+        """The bones hair hangs from: the body's j_kami_* (unless the rig is ``custom``) and the hair
+        skeleton's, in rig order."""
         own = set(self.skeleton)
-        return [bone for bone in self.bones if bone.name in BODY_HAIR or bone.name in own]
+        body = () if self.custom else BODY_HAIR
+        return [bone for bone in self.bones if bone.name in body or bone.name in own]
 
     def skeleton_bones(self):
         own = set(self.skeleton)
@@ -1179,13 +1184,12 @@ def needed_bones(rig, names):
     return wanted
 
 
-def ensure_bones(context, armature_object, rig, names):
-    """Add the bones ``names`` (and their ancestors) of ``rig`` that ``armature_object`` lacks, in the
-    game's rest pose (moved by the rig's offset). Returns the names added."""
-    existing = set(armature_object.data.bones.keys())
-    missing = [name for name in needed_bones(rig, names) if name not in existing]
-    if not missing:
-        return []
+@contextlib.contextmanager
+def editing_bones(context, armature_object):
+    """Edit Mode on ``armature_object`` for a ``with`` block, which gets its edit bones. Afterwards the
+    armature is in Object Mode (its bones as edited) and the active object and its mode are as they were (a
+    mesh in Weight Paint stays in it); a Customize+ rig of the armature is made again with the new bones.
+    Raises (RuntimeError) when the armature isn't in the view layer."""
     import bpy
     previous_active = context.view_layer.objects.active
     previous_mode = previous_active.mode if previous_active is not None else 'OBJECT'
@@ -1197,9 +1201,34 @@ def ensure_bones(context, armature_object, rig, names):
         armature_object.hide_set(False)
         # This raises when the armature isn't in the view layer (its collection is excluded).
         context.view_layer.objects.active = armature_object
-        to_armature = np.array(armature_object.matrix_world.inverted_safe(), dtype=np.float64)
         bpy.ops.object.mode_set(mode='EDIT')
-        edit_bones = armature_object.data.edit_bones
+        yield armature_object.data.edit_bones
+    finally:
+        if armature_object.mode == 'EDIT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        if hidden is not None:
+            armature_object.hide_set(hidden)
+        context.view_layer.objects.active = previous_active
+        if previous_active is not None and previous_mode != 'OBJECT' and previous_active.type == 'MESH':
+            try:
+                bpy.ops.object.mode_set(mode=previous_mode)
+            except RuntimeError:
+                pass
+    # A Customize+ rig is a copy of its armature: while it's on, it's made again with the new bones.
+    from .cplus import rig as cplus_rig
+    if cplus_rig.is_on(armature_object):
+        cplus_rig.connect(armature_object, cplus_rig.ensure(context, armature_object))
+
+
+def ensure_bones(context, armature_object, rig, names):
+    """Add the bones ``names`` (and their ancestors) of ``rig`` that ``armature_object`` lacks, in the
+    game's rest pose (moved by the rig's offset). Returns the names added."""
+    existing = set(armature_object.data.bones.keys())
+    missing = [name for name in needed_bones(rig, names) if name not in existing]
+    if not missing:
+        return []
+    to_armature = np.array(armature_object.matrix_world.inverted_safe(), dtype=np.float64)
+    with editing_bones(context, armature_object) as edit_bones:
         for name in missing:
             bone = rig.by_name[name]
             rest = bone.rest.copy()
@@ -1216,21 +1245,6 @@ def ensure_bones(context, armature_object, rig, names):
             edit.use_deform = True
             if bone.parent is not None and bone.parent in edit_bones:
                 edit.parent = edit_bones[bone.parent]
-    finally:
-        if armature_object.mode == 'EDIT':
-            bpy.ops.object.mode_set(mode='OBJECT')
-        if hidden is not None:
-            armature_object.hide_set(hidden)
-        context.view_layer.objects.active = previous_active
-        if previous_active is not None and previous_mode != 'OBJECT' and previous_active.type == 'MESH':
-            try:
-                bpy.ops.object.mode_set(mode=previous_mode)
-            except RuntimeError:
-                pass
-    # A Customize+ rig is a copy of its armature: while it's on, it's made again with the new bones.
-    from .cplus import rig as cplus_rig
-    if cplus_rig.is_on(armature_object):
-        cplus_rig.connect(armature_object, cplus_rig.ensure(context, armature_object))
     return missing
 
 

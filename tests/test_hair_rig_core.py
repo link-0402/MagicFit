@@ -1,25 +1,29 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Headless tests for the hair rig Hair Weights builds for the hair itself (Own Skeleton): its locks, and the
-chains planned on them (kinds, joints, the bone budget).
+"""Headless tests for the hair rig Hair Weights builds for the hair itself (Own Skeleton): its locks, the
+chains planned on them (kinds, joints, the bone budget) and the bones they make on the hair's armature.
 
 Run from the repository root:
     blender -b --factory-startup --python tests/test_hair_rig_core.py
 """
 
+import json
 import math
 import os
 import sys
 import time
 import traceback
 
+import bpy
 import numpy as np
+from mathutils import Vector
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 
 import hair  # noqa: E402
+import magic_fit  # noqa: E402
 from magic_fit import fitting, hairing, hairrig  # noqa: E402
 
 FAILURES = []
@@ -485,16 +489,222 @@ def test_moved_hair():
             [(chain.kind, len(chain.joints)) for chain in chains]))
 
 
+# -----------------------------------------------------------------------------
+# The rig on the armature
+
+def rig_scene():
+    """The long hair (`hair.build`) deformed by a new armature with c0201's j_kao, j_kubi and j_sebo_c (made by
+    `hairing.ensure_bones`), and its chains built on the armature: (hair object, armature, plans, bone
+    names, points, triangles, part index of each point, part names)."""
+    hair.clear_scene()
+    co, tris, part, names = long_hair()
+    obj, _ranges = hair.build()
+    armature = hairing.new_armature(bpy.context, "Armature", bpy.context.scene.collection)
+    hairing.ensure_bones(bpy.context, armature, rig(), [hairing.HEAD, hairing.NECK, hairing.UPPER_BACK])
+    hairing.add_armature_modifier(obj, armature)
+    plans = hairrig.plan_rig(co, tris, rig())
+    bones = hairrig.build_armature_rig(bpy.context, armature, plans, hair.RACE)
+    return obj, armature, plans, bones, co, tris, part, names
+
+
+def world(armature, local):
+    return np.array(armature.matrix_world @ Vector(local))
+
+
+def rig_json(armature):
+    return json.loads(armature[hairrig.RIG_PROPERTY])
+
+
+def state_chains(armature):
+    """(kind, bone names) of each chain in the armature's rig state."""
+    return [(chain.kind, chain.bones.split(",")) for chain in armature.magic_fit_hair_rig.chains]
+
+
+def json_matches_state(armature):
+    state = armature.magic_fit_hair_rig
+    return rig_json(armature) == {"race": state.race, "chains": [{"kind": kind, "bones": bones}
+                                                                 for kind, bones in state_chains(armature)]}
+
+
+def test_armature_rig():
+    obj, armature, plans, bones, _co, _tris, _part, _names = rig_scene()
+    check(hairrig.bone_name(0, 0) == "j_ex_hair_01_a" and hairrig.bone_name(11, 2) == "j_ex_hair_12_c",
+          "armature rig: bone names count chains from 01 and bones from a")
+    expected = [hairrig.bone_name(c, b) for c, plan in enumerate(plans) for b in range(len(plan.joints))]
+    check(plans and bones == expected, "armature rig: bones j_ex_hair_01_a and on, one per joint ({})".format(bones))
+    have = sorted(bone.name for bone in armature.data.bones if bone.name.startswith(hairrig.BONE_PREFIX))
+    check(have == sorted(expected), "armature rig: the armature has exactly those hair bones")
+    firsts = [armature.data.bones.get(hairrig.bone_name(c, 0)) for c in range(len(plans))]
+    check(all(first is not None and first.parent is not None and first.parent.name == hairing.HEAD
+              for first in firsts), "armature rig: every chain's first bone hangs from j_kao")
+    gaps, chained, deform = [], True, True
+    for c, plan in enumerate(plans):
+        ends = list(plan.joints[1:]) + [plan.tip]
+        for b, (joint, end) in enumerate(zip(plan.joints, ends)):
+            bone = armature.data.bones[hairrig.bone_name(c, b)]
+            gaps.append(max(float(np.linalg.norm(world(armature, bone.head_local) - joint)),
+                            float(np.linalg.norm(world(armature, bone.tail_local) - end))))
+            if b:
+                chained &= bone.parent is not None and bone.parent.name == hairrig.bone_name(c, b - 1)
+            deform &= bone.use_deform
+    check(max(gaps) <= 1e-5, "armature rig: each bone from its joint to the next joint or the tip ({:.2e})".format(
+        max(gaps)))
+    check(chained and deform, "armature rig: each bone hangs from the one before it and deforms")
+    # The roll: each bone's Z axis points away from the head's vertical axis.
+    axis = world(armature, armature.data.bones[hairing.HEAD].head_local)
+    away = []
+    for name in bones:
+        bone = armature.data.bones[name]
+        z = np.array(armature.matrix_world.to_3x3() @ bone.matrix_local.to_3x3().col[2])
+        out = world(armature, bone.head_local)[:2] - axis[:2]
+        away.append(float(np.dot(z[:2], out / max(np.linalg.norm(out), 1e-9))))
+    check(min(away) > 0.0, "armature rig: every bone's Z axis points away from the head's axis ({:.3f})".format(
+        min(away)))
+    check(rig_json(armature) == {"race": hair.RACE, "chains": [
+        {"kind": plan.kind, "bones": [hairrig.bone_name(c, b) for b in range(len(plan.joints))]}
+        for c, plan in enumerate(plans)]}, "armature rig: the rig property lists the race, kinds and bones")
+    check(json_matches_state(armature) and armature.magic_fit_hair_rig.race == hair.RACE,
+          "armature rig: the state holds the same")
+    check(hairrig.has_rig(armature, hair.RACE) and not hairrig.has_rig(armature, "c0801")
+          and not hairrig.has_rig(obj, hair.RACE), "armature rig: has_rig for its race only")
+
+    custom = hairrig.custom_rig(armature, hair.RACE)
+    hair_bones = custom.hair_bones()
+    check(custom.custom and custom.moved(np.zeros(3)).custom and not rig().custom,
+          "custom rig: marked custom, also when moved; vanilla rigs aren't")
+    check(sorted(bone.name for bone in hair_bones) == sorted(bones) and sorted(custom.skeleton) == sorted(bones),
+          "custom rig: its hair bones are exactly the j_ex_hair_ bones, no j_kami_*")
+    along = []
+    for bone in hair_bones:
+        data = armature.data.bones[bone.name]
+        direction = world(armature, data.tail_local) - world(armature, data.head_local)
+        along.append(float(np.linalg.norm(bone.x - direction / np.linalg.norm(direction))))
+    check(max(along) <= 1e-5, "custom rig: each bone's X runs from its head to its tail ({:.2e})".format(max(along)))
+    check(np.allclose(custom.offset, 0.0) and all(np.allclose(custom.by_name[bone.name].head, bone.head)
+                                                   for bone in rig().bones),
+          "custom rig: the body's bones as the race has them, not moved")
+    # An armature with its head elsewhere: the rig moves with it, the bones stay where they are on it.
+    armature.location = (0.3, -0.1, 0.05)
+    bpy.context.view_layer.update()
+    moved = hairrig.custom_rig(armature, hair.RACE)
+    check(np.allclose(moved.offset, (0.3, -0.1, 0.05)) and all(
+        np.allclose(moved.by_name[name].head, custom.by_name[name].head, atol=1e-6) for name in bones),
+        "custom rig: an armature moved by an offset gives the same rig, moved by it")
+    armature.location = (0.0, 0.0, 0.0)
+    bpy.context.view_layer.update()
+
+    # Building again replaces every hair bone.
+    again = hairrig.build_armature_rig(bpy.context, armature, plans[:1], hair.RACE)
+    have = sorted(bone.name for bone in armature.data.bones if bone.name.startswith(hairrig.BONE_PREFIX))
+    check(have == sorted(again) == sorted(expected[:len(plans[0].joints)])
+          and len(rig_json(armature)["chains"]) == 1, "armature rig: building again replaces the hair bones")
+
+
+def test_weights_follow_locks():
+    obj, armature, plans, bones, co, tris, part, names = rig_scene()
+    custom = hairrig.custom_rig(armature, hair.RACE)
+    bone_names, weights = hairing.hair_weights(co, tris, custom)
+    column = {name: i for i, name in enumerate(bone_names)}
+    kami = [i for i, name in enumerate(bone_names) if name.startswith("j_kami_")]
+    check(not kami or float(np.abs(weights[:, kami]).max()) <= 1e-9,
+          "follow locks: no weight on j_kami_* ({:.3g})".format(float(np.abs(weights[:, kami]).max()) if kami else 0.0))
+    area = hairing.vertex_areas(co, tris)
+    hanging = hairing.hanging_share(custom.head_distance(co), 0.025, 0.07) > hairrig.LOCK_START
+    hair_columns = [column[name] for name in bones]
+    for name in ("lock_l", "lock_r", "ponytail"):
+        index = names.index(name)
+        mine = [c for c, plan in enumerate(plans) if main_part(plan, part, area) == index]
+        if len(mine) != 1:
+            check(False, "follow locks: {:s} has one chain ({})".format(name, mine))
+            continue
+        own = [column[hairrig.bone_name(mine[0], b)] for b in range(len(plans[mine[0]].joints))]
+        vertices = np.flatnonzero((part == index) & hanging)
+        total = weights[np.ix_(vertices, hair_columns)].sum(1)
+        ratio = weights[np.ix_(vertices, own)].sum(1) / np.maximum(total, 1e-12)
+        check(len(vertices) and float(ratio.mean()) >= 0.8,
+              "follow locks: {:s}'s hanging hair has {:.3f} of its chain weight on its own chain".format(
+                  name, float(ratio.mean())))
+
+
+def test_edited_rig_is_kept():
+    obj, armature, plans, bones, _co, _tris, _part, _names = rig_scene()
+    before = state_chains(armature)
+    obj.vertex_groups.new(name="Bone").add([0], 1.0, 'REPLACE')
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='EDIT')
+    edit_bones = armature.data.edit_bones
+    edit_bones.remove(edit_bones[before[0][1][-1]])
+    last = edit_bones[before[1][1][-1]]
+    added = edit_bones.new("Bone")
+    added.head = last.tail
+    added.tail = last.tail - Vector((0.0, 0.0, 0.05))
+    added.parent = last
+    # A new chain behind the head, its first bone named for the hair, the second not.
+    top = edit_bones.new("j_ex_hair_new")
+    top.head, top.tail = (0.0, 0.10, 1.55), (0.0, 0.12, 1.42)
+    top.parent = edit_bones[hairing.HEAD]
+    below = edit_bones.new("Bone.001")
+    below.head, below.tail = top.tail, (0.0, 0.13, 1.30)
+    below.parent = top
+    renamed = hairrig.sync_rig(bpy.context, armature, hair.RACE)
+    print("      renamed:", renamed)
+    after = state_chains(armature)
+    new_name = "j_ex_hair_02_" + chr(ord("a") + len(before[1][1]))
+    count = len(before) + 1
+    check(armature.mode == 'OBJECT', "edited rig: the armature is back in Object Mode")
+    check(len(after) == count and after[0][1] == before[0][1][:-1],
+          "edited rig: chain 01 has one bone fewer ({})".format(after[0][1] if after else None))
+    check(len(after) == count and after[1][1] == before[1][1] + [new_name],
+          "edited rig: chain 02 has one more, named {:s} ({})".format(new_name, after[1][1] if len(after) > 1 else None))
+    check(after[2:-1] == before[2:], "edited rig: the other chains are as they were")
+    new_chain = ["j_ex_hair_{:02d}_a".format(count), "j_ex_hair_{:02d}_b".format(count)]
+    check(after[-1] == ("back", new_chain), "edited rig: the new chain is {:s}, back hair ({})".format(
+        ", ".join(new_chain), after[-1]))
+    check(sorted(renamed) == sorted(["Bone → " + new_name, "j_ex_hair_new → " + new_chain[0],
+                                     "Bone.001 → " + new_chain[1]]), "edited rig: the renames are listed")
+    check(obj.vertex_groups.get(new_name) is not None and obj.vertex_groups.get("Bone") is None,
+          "edited rig: the hair's vertex group Bone took the bone's new name")
+    check([kind for kind, _bones in after[:len(before)]] == [kind for kind, _bones in before],
+          "edited rig: the chains keep their kinds")
+    check(json_matches_state(armature) and [chain["bones"] for chain in rig_json(armature)["chains"]]
+          == [bones for _kind, bones in after], "edited rig: the rig property lists the chains as they are now")
+    head = armature.data.bones[new_chain[0]]
+    check(head.parent is not None and head.parent.name == hairing.HEAD, "edited rig: the new chain hangs from j_kao")
+
+    # A rig from another tool: no state, only the property. Its kinds are kept, by chain number.
+    data = rig_json(armature)
+    data["chains"][0]["kind"] = "ponytail"
+    armature.magic_fit_hair_rig.chains.clear()
+    armature[hairrig.RIG_PROPERTY] = json.dumps(data)
+    renamed = hairrig.sync_rig(bpy.context, armature, hair.RACE)
+    check(not renamed and [kind for kind, _bones in state_chains(armature)]
+          == [chain["kind"] for chain in data["chains"]], "edited rig: with no state, the property's kinds are kept")
+
+
+def test_kind_change_writes_json():
+    _obj, armature, _plans, _bones, _co, _tris, _part, _names = rig_scene()
+    chains = armature.magic_fit_hair_rig.chains
+    check(len(chains) > 1 and chains[1].kind != "back", "kind change: chain 02 isn't back hair yet")
+    chains[1].kind = "back"
+    check(rig_json(armature)["chains"][1]["kind"] == "back" and json_matches_state(armature),
+          "kind change: the rig property follows")
+
+
 def main():
-    for test in (test_long_hair_locks, test_one_piece_long_hair, test_separate_strands, test_crumbs,
-                 test_parted_locks, test_long_hair_chains, test_bangs_chain, test_pivot_at_root, test_even_joints,
-                 test_kinds, test_budget, test_moved_hair):
-        print("==", test.__name__)
-        try:
-            test()
-        except Exception:
-            traceback.print_exc()
-            FAILURES.append(test.__name__ + ": exception")
+    magic_fit.register()
+    try:
+        for test in (test_long_hair_locks, test_one_piece_long_hair, test_separate_strands, test_crumbs,
+                     test_parted_locks, test_long_hair_chains, test_bangs_chain, test_pivot_at_root, test_even_joints,
+                     test_kinds, test_budget, test_moved_hair, test_armature_rig, test_weights_follow_locks,
+                     test_edited_rig_is_kept, test_kind_change_writes_json):
+            print("==", test.__name__)
+            try:
+                test()
+            except Exception:
+                traceback.print_exc()
+                FAILURES.append(test.__name__ + ": exception")
+    finally:
+        magic_fit.unregister()
     print("RESULT:", "FAILED" if FAILURES else "OK", len(FAILURES), "failure(s)")
     sys.stdout.flush()
     os._exit(1 if FAILURES else 0)
