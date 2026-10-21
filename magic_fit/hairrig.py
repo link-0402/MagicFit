@@ -41,7 +41,8 @@ Then it plans a chain of bones down each lock:
 The chains become bones on the hair's armature (`build_armature_rig`), j_ex_hair_01_a and on, hanging from
 j_kao. They are ordinary Blender bones, head on a joint and tail on the next, so they draw along the hair
 and the user can move, delete or add some in Edit Mode; `sync_rig` reads them back as they are and names
-new ones. Each bone's Z axis points away from the head's axis. The armature carries the rig as RIG_PROPERTY,
+new ones; the rig state keeps a hash of the bones (`bones_hash`) to tell whether the user edited them since.
+Each bone's Z axis points away from the head's axis. The armature carries the rig as RIG_PROPERTY,
 written from `Object.magic_fit_hair_rig` after every change, for exporters (Instant Edit) to make the hair
 skeleton. A hair bone points along its X axis in the game and along its Y axis in Blender: ALONG_X turns
 one into the other, here (`custom_rig`) and in the exporter.
@@ -49,6 +50,7 @@ one into the other, here (`custom_rig`) and in the exporter.
 Like `hairing`, nothing here depends on the 3D view.
 """
 
+import hashlib
 import heapq
 import json
 import math
@@ -115,6 +117,8 @@ BONE_PREFIX = "j_ex_hair_"
 BONE_PATTERN = re.compile(r"j_ex_hair_([0-9]{2})_([a-z])")
 # The most chains the names allow.
 MAX_CHAINS = 99
+# Decimals (of metres, and of the bones' Z axes) `bones_hash` rounds the hair's bones to.
+HASH_PRECISION = 6
 # The game's frame of a hair bone from the Blender bone's (rest @ ALONG_X): the game's X (along which a
 # hair bone points) is the bone's +Y (head to tail), the game's Y its -X, and Z stays.
 ALONG_X = np.array(((0.0, -1.0, 0.0, 0.0),
@@ -234,6 +238,13 @@ def _angle(rig, root):
     straight in front (-Y), 180 straight behind, the same on either side."""
     at = rig.model(root)
     return math.degrees(math.atan2(abs(at[0]), -(at[1] - rig.by_name[HEAD].head[1])))
+
+
+def hangs(points, rig, *, hang_start=0.025, hang_length=0.07):
+    """Whether any of hair ``points`` (world space, rest pose) hangs far enough from ``rig``'s head to be in a
+    lock (LOCK_START)."""
+    head = rig.head_distance(np.asarray(points, dtype=np.float64).reshape(-1, 3))
+    return bool((hanging_share(head, hang_start, hang_length) > LOCK_START).any())
 
 
 def find_locks(points, tris, rig, *, hang_start=0.025, hang_length=0.07, weld=None):
@@ -659,11 +670,35 @@ def write_rig_property(armature_object):
         description="The hair's own skeleton: its race and chains. Set by Magic Fit's Hair Weights")
 
 
+def bones_hash(armature_object):
+    """A hash of the rests of the hair's own bones on ``armature_object`` (named BONE_PREFIX, or below one):
+    their names, parents, heads, tails and rolls (their Z axes) in armature space, rounded to HASH_PRECISION.
+    The rig state keeps it (`HairRigState.bones_hash`) to tell whether the user edited the bones since Hair
+    Weights built or read them (`rig_edited`)."""
+    rows = []
+    for bone in sorted(armature_object.data.bones, key=lambda bone: bone.name):
+        if not any(b.name.startswith(BONE_PREFIX) for b in [bone] + list(bone.parent_recursive)):
+            continue
+        rest = np.concatenate((bone.head_local, bone.tail_local, np.array(bone.matrix_local)[:3, 2]))
+        # Adding 0.0 turns -0.0 into 0.0.
+        rows.append([bone.name, bone.parent.name if bone.parent is not None else "",
+                     (np.round(rest, HASH_PRECISION) + 0.0).tolist()])
+    return hashlib.sha1(json.dumps(rows).encode("utf-8")).hexdigest()
+
+
+def rig_edited(armature_object):
+    """Whether the hair's own bones on ``armature_object`` changed since Hair Weights built or read them last
+    (`bones_hash`); so it seems when it has no hash of them."""
+    stored = armature_object.magic_fit_hair_rig.bones_hash
+    return not stored or stored != bones_hash(armature_object)
+
+
 def _fill_state(armature_object, race, chains):
-    """Fill the rig state of ``armature_object`` with ``race`` and ``chains`` ((kind, bone names) each) and
-    write RIG_PROPERTY."""
+    """Fill the rig state of ``armature_object`` with ``race``, ``chains`` ((kind, bone names) each) and the
+    hash of its bones (`bones_hash`), and write RIG_PROPERTY."""
     state = armature_object.magic_fit_hair_rig
     state.race = race
+    state.bones_hash = bones_hash(armature_object)
     state.chains.clear()
     for kind, names in chains:
         chain = state.chains.add()

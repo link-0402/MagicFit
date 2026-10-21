@@ -2471,12 +2471,24 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
             armature = hairing.new_armature(context, "Hair Skeleton", collection)
         built = None   # the hair's own bones, when its chains are built (again)
         renamed = []
+        # Meshes weighted with the rig for the first time: their hair may hang where no chain is.
+        joining = [obj for obj in targets if custom and (not obj.magic_fit_hair.custom
+                                                         or obj.magic_fit_hair.race != race)]
+        unreached = []   # those of them left out of chains the user edited
+        before = armature.magic_fit_hair_rig.bones_hash
         try:
             added = hairing.ensure_bones(context, armature, rig, wanted)
             # A rig without hair bones (nothing hung when it was built, or the user deleted them all) has no
             # edits to keep: it counts as none, so hair added since gets its chains.
             empty = not any(bone.name.startswith(hairrig.BONE_PREFIX) for bone in armature.data.bones)
-            if custom and (self.rebuild or empty or not hairrig.has_rig(armature, race)):
+            have = not empty and hairrig.has_rig(armature, race)
+            # A mesh joining chains built without it gets them built again over the whole hair, unless the
+            # user edited the bones: those are kept, and the mesh hangs from them as they are.
+            again = bool(joining) and have and not hairrig.rig_edited(armature)
+            if custom and joining and have and not again:
+                unreached = [obj for obj, rest in zip(targets, rests) if obj in joining and hairrig.hangs(
+                    rest.co, rig, hang_start=settings.hair_hang_start, hang_length=settings.hair_hang_length)]
+            if custom and (self.rebuild or again or not have):
                 # Built over the whole hair, its other parts too, as the matching sees it.
                 points = np.concatenate([rest.co for rest in whole])
                 starts = np.cumsum([0] + [len(rest.co) for rest in whole[:-1]])
@@ -2502,8 +2514,9 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
         if custom:
             # The hair's own skeleton as it is now on the armature (`sync_rig` read the user's edits back).
             rig = hairrig.custom_rig(armature, race, reference)
-        # The chains changed under the weights of the hair's other parts with its own skeleton.
-        rebuilt = custom and built is not None
+        # The chains changed under the weights of the hair's other parts with its own skeleton: rebuilt on
+        # request, or built anew and not the same as before (a part joining the hair may add none).
+        rebuilt = custom and built is not None and (self.rebuild or armature.magic_fit_hair_rig.bones_hash != before)
         for obj in targets:
             if straighten.deforming_armature(obj) is None:
                 hairing.add_armature_modifier(obj, armature)
@@ -2562,6 +2575,9 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
                     armature.name, len(chains), bone_count))
             if renamed:
                 self.report({'INFO'}, "Renamed {:s}".format(", ".join(renamed)))
+            for obj in unreached:
+                self.report({'WARNING'}, "'{:s}' hangs where no chain may reach: Rebuild Chains to include it "
+                                         "(your bone edits are lost)".format(obj.name))
         if removed:
             self.report({'INFO'}, "Took off the old weights of {:s}".format(
                 ", ".join(removed[:8]) + (" and {:d} more".format(len(removed) - 8) if len(removed) > 8 else "")))

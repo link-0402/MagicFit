@@ -1008,6 +1008,72 @@ def test_custom_parts():
           "own parts: after a rebuild the other part is named")
 
 
+def parts_object(name, wanted):
+    """The parts ``wanted`` of `hair.parts(long=True)` as one mesh, active and the only one selected."""
+    verts, faces = [], []
+    for part, v, f in hair.parts(long=True):
+        if part in wanted:
+            start = len(verts)
+            verts += [tuple(p) for p in v]
+            faces += [tuple(start + i for i in face) for face in f]
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(verts, [], faces)
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    for other in bpy.context.selected_objects:
+        other.select_set(False)
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+    return obj
+
+
+def test_custom_parts_one_after_another():
+    # The cap with the temple locks weighted first, a ponytail in a mesh of its own later: the ponytail
+    # joins the rig, and its chains are built again with it while the bones are as Hair Weights left them.
+    for edited in (False, True):
+        hair.clear_scene()
+        use_settings(hair_skeleton_mode='CUSTOM')
+        first = parts_object("Hair", ("cap", "lock_l", "lock_r"))
+        hair_weights_reports()
+        armature = hair_armature(first)
+        before = rig_chains(armature) if armature is not None else []
+        check(before and not [kind for kind, _bones in before if kind == 'ponytail'],
+              "one after another: the cap and locks have no ponytail chain ({})".format(before))
+        if armature is None or not before:
+            return
+        moved = before[0][1][0]
+        if edited:
+            move_bone_head(first, armature, moved, (0.01, 0.0, 0.0))
+        joint = bone_head(armature, moved)
+        second = parts_object("Ponytail", ("ponytail",))
+        result, reports = hair_weights_reports()
+        check(result == {'FINISHED'} and hair_armature(second) == armature and second.magic_fit_hair.custom,
+              "one after another{:s}: the ponytail joins the hair's armature".format(" (edited)" if edited else ""))
+        warning = "'Ponytail' hangs where no chain may reach: Rebuild Chains to include it (your bone edits are lost)"
+        if edited:
+            check(np.linalg.norm(bone_head(armature, moved) - joint) < 1e-6 and rig_chains(armature) == before,
+                  "one after another (edited): the edited bones are kept")
+            check(warning in reports, "one after another (edited): says the ponytail may hang from no chain")
+            continue
+        check(warning not in reports, "one after another: no warning while the bones are as they were built")
+        chain = next((bones for kind, bones in rig_chains(armature) if kind == 'ponytail'), None)
+        check(chain is not None, "one after another: the chains are built again with a ponytail chain ({})".format(
+            rig_chains(armature)))
+        if chain is None:
+            continue
+        co, _tris = mesh_arrays(second)
+        reference = hairing.Reference.get().rig('c0201', 0)
+        hanging = hairing.hanging_share(reference.head_distance(co), 0.025, 0.07) > hairrig.LOCK_START
+        weights = hair.by_name(second)
+        zero = np.zeros(len(co))
+        own = sum((weights.get(name, zero) for name in chain), zero)[hanging]
+        every = sum((w for name, w in weights.items() if name.startswith(hairrig.BONE_PREFIX)), zero)[hanging]
+        ratio = float((own / np.maximum(every, 1e-12)).mean())
+        check(hanging.any() and ratio > 0.8 and float(own.mean()) > 0.5,
+              "one after another: the ponytail's hanging hair is on its chain ({:.3f} of its chain weight, "
+              "{:.3f} of all)".format(ratio, float(own.mean())))
+
+
 def main():
     magic_fit.register()
     try:
@@ -1015,7 +1081,7 @@ def main():
                      test_existing_armature, test_customize_plus, test_armature_out_of_view_layer, test_parts,
                      test_selected, test_replace, test_masks, test_pick, test_brush, test_readiness,
                      test_custom_button, test_custom_reuses_rig, test_race_change_rebuilds, test_nothing_hangs,
-                     test_custom_brush, test_custom_view_layer, test_custom_parts):
+                     test_custom_brush, test_custom_view_layer, test_custom_parts, test_custom_parts_one_after_another):
             print("==", test.__name__)
             try:
                 test()

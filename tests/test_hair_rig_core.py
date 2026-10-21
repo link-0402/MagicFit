@@ -787,6 +787,32 @@ def test_branch_starts_chain():
           "branch: still every hair bone in exactly one chain")
 
 
+def test_bones_hash():
+    _obj, armature, _plans, bones, _co, _tris, _part, _names = rig_scene()
+    check(armature.magic_fit_hair_rig.bones_hash == hairrig.bones_hash(armature) and not hairrig.rig_edited(armature),
+          "bones hash: the state keeps the hash of the bones built")
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.object.mode_set(mode='OBJECT')
+    check(not hairrig.rig_edited(armature), "bones hash: Edit Mode in and out changes nothing")
+    for change in ("roll", "tail", "parent"):
+        bpy.ops.object.mode_set(mode='EDIT')
+        edit = armature.data.edit_bones[bones[1]]
+        if change == "roll":
+            edit.roll += 0.1
+        elif change == "tail":
+            edit.tail = edit.tail + Vector((0.0, 0.0, 0.001))
+        else:
+            edit.use_connect = False
+            edit.parent = armature.data.edit_bones[hairing.HEAD]
+        bpy.ops.object.mode_set(mode='OBJECT')
+        check(hairrig.rig_edited(armature), "bones hash: a changed {:s} counts as an edit".format(change))
+        hairrig.sync_rig(bpy.context, armature, hair.RACE)
+        check(not hairrig.rig_edited(armature), "bones hash: ...until the rig is read again")
+    armature.magic_fit_hair_rig.bones_hash = ""
+    check(hairrig.rig_edited(armature), "bones hash: no hash counts as edited")
+
+
 def test_kind_change_writes_json():
     _obj, armature, _plans, _bones, _co, _tris, _part, _names = rig_scene()
     chains = armature.magic_fit_hair_rig.chains
@@ -803,7 +829,7 @@ def main():
                      test_parted_locks, test_long_hair_chains, test_bangs_chain, test_pivot_at_root, test_even_joints,
                      test_kinds, test_budget, test_card_hair_kinds, test_card_hair_time, test_moved_hair,
                      test_armature_rig, test_weights_follow_locks,
-                     test_edited_rig_is_kept, test_branch_starts_chain, test_kind_change_writes_json):
+                     test_edited_rig_is_kept, test_branch_starts_chain, test_bones_hash, test_kind_change_writes_json):
             print("==", test.__name__)
             try:
                 test()

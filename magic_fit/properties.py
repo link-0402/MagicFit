@@ -907,6 +907,11 @@ class HairRigState(bpy.types.PropertyGroup):
         default=0,
         min=0,
     )
+    bones_hash: StringProperty(
+        name="Bones Hash",
+        description="A hash of the hair's bones as Hair Weights left them, to tell whether they were edited since",
+        default="",
+    )
 
 
 class BodyFitBrushSettings(bpy.types.PropertyGroup):
