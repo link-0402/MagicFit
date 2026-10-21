@@ -124,13 +124,16 @@ def test_long_hair_locks():
     print("      find_locks: {:.3f} s for {:d} vertices".format(time.perf_counter() - started, len(co)))
     describe(locks, co, model_rig)
     lock_parts = [set(part[lock.vertices].tolist()) for lock in locks]
+    check(all(lock.area >= hairrig.MIN_LOCK_AREA for lock in locks), "long hair: no lock under MIN_LOCK_AREA")
     # The outer bangs strips each hang at two vertices only (a crumb under MIN_LOCK_AREA), and a crumb joins
-    # the lock with the nearest root: the other strip's. Beyond such crumbs, no lock mixes two parts.
+    # the nearest lock (by root) of at least MIN_LOCK_AREA: the temple lock on its side. Beyond such crumbs,
+    # no lock mixes two parts.
     area = hairing.vertex_areas(co, tris)
-    mixed = []
+    mixed, main = [], []
     for lock in locks:
         shares = np.bincount(part[lock.vertices], area[lock.vertices], minlength=len(names))
-        shares[np.argmax(shares)] = 0.0
+        main.append(int(np.argmax(shares)))
+        shares[main[-1]] = 0.0
         mixed.append(float(shares.max()))
     check(max(mixed) < hairrig.MIN_LOCK_AREA, "long hair: no lock mixes two parts beyond crumbs ({}, {})".format(
         [sorted(names[i] for i in p) for p in lock_parts], [round(m, 5) for m in mixed]))
@@ -148,20 +151,25 @@ def test_long_hair_locks():
         length = float(mine[0].distance.max())
         check(0.35 < length < 0.5, "long hair: the ponytail's distance runs down its 42 cm ({:.3f} m)".format(length))
     for index, name in enumerate(names):
-        if name == "bangs":
-            mine = of[index]
-            check(len(mine) <= 1 and all(lock.angle <= 45.0 for lock in mine),
-                  "long hair: bangs strip {:d} gives at most one lock in front ({})".format(
-                      index, [round(lock.angle, 1) for lock in mine]))
-    # Each lock's root lies where its part leaves the head: the part's hanging vertex closest to the head.
-    # The ponytail's root is the middle of the ring where its 7 cm tube leaves the head, and that vertex is
-    # on the ring's side: within the tube's radius.
+        if name != "bangs":
+            continue
+        mine = of[index]
+        check(not any(names[m] == "bangs" for m in main), "long hair: bangs strip {:d} gives no lock of its own".format(
+            index))
+        side = float(np.sign(named[index][1][:, 0].mean()))
+        if side == 0.0:
+            check(not mine, "long hair: the middle bangs strip doesn't hang ({:d} locks)".format(len(mine)))
+        else:
+            temple = "lock_l" if side > 0 else "lock_r"
+            check(len(mine) == 1 and names[main[locks.index(mine[0])]] == temple,
+                  "long hair: bangs strip {:d}'s crumb joins {:s}, the nearest lock ({})".format(
+                      index, temple, [names[main[locks.index(lock)]] for lock in mine]))
+    # Each lock's root lies where its (main) part leaves the head: the part's hanging vertex closest to the
+    # head; crumbs that joined it don't move it. The ponytail's root is the middle of the ring where its 7 cm
+    # tube leaves the head, and that vertex is on the ring's side: within the tube's radius.
     distance = model_rig.head_distance(co)
     hanging = hairing.hanging_share(distance, 0.025, 0.07) > hairrig.LOCK_START
-    for lock, p in zip(locks, lock_parts):
-        if len(p) != 1:
-            continue
-        index = next(iter(p))
+    for lock, index in zip(locks, main):
         candidates = ranges[index][hanging[ranges[index]]]
         leaves = co[candidates[np.argmin(distance[candidates])]]
         gap = float(np.linalg.norm(lock.root - leaves))
@@ -213,6 +221,16 @@ def test_separate_strands():
     check(sorted(min(o) for o in owners if len(o) == 1) == list(range(5)), "strands: one lock per strand")
 
 
+def test_crumbs():
+    # Two tiny pieces of hair (1 x 2 cm) hanging behind the head, nothing else: no lock of 4 cm² to join, so
+    # both are dropped.
+    crumbs = [hair.strip((x, 0.12, 1.47), (x, 0.13, 1.45), 0.01, (1.0, 0.0, 0.0), rows=2) for x in (-0.05, 0.05)]
+    co, tris, _ranges = join(crumbs)
+    hanging = hairing.hanging_share(rig().head_distance(co), 0.025, 0.07) > hairrig.LOCK_START
+    locks = hairrig.find_locks(co, tris, rig())
+    check(hanging.all() and not locks, "crumbs: two tiny hanging crumbs give no lock ({:d})".format(len(locks)))
+
+
 def test_parted_locks():
     model_rig = rig()
     cap, faces, ring, azimuth = back_ring(96)
@@ -251,7 +269,8 @@ def test_parted_locks():
 
 
 def main():
-    for test in (test_long_hair_locks, test_one_piece_long_hair, test_separate_strands, test_parted_locks):
+    for test in (test_long_hair_locks, test_one_piece_long_hair, test_separate_strands, test_crumbs,
+                 test_parted_locks):
         print("==", test.__name__)
         try:
             test()

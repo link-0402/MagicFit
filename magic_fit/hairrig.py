@@ -20,8 +20,10 @@ has a chain. Own Skeleton builds the chains from the mesh. It first splits the h
   its roots are and, at HANG_DIRECTION_WEIGHT, how wide it hangs: hair leaving the head in one piece and
   parting as it falls makes two locks. The cut is a k-means on those two arcs, by area, so the cuts run
   down the hair as hair parts.
-- Locks smaller than MIN_LOCK_AREA join the lock whose root is nearest, and every lock is measured again
-  from its own roots.
+- Locks smaller than MIN_LOCK_AREA (crumbs: a card corner that barely hangs) join the nearest lock (by
+  root) of at least that size, whichever loose part it is, keeping that lock's root; when there is none
+  they are dropped, and their hair goes to the nearest chain. Crumbs never join each other. Every lock is
+  then measured again from its roots.
 
 Like `hairing`, nothing here depends on the 3D view.
 """
@@ -46,7 +48,8 @@ WHOLE_WIDTH = 0.10
 # Weight of where a vertex hangs (its own arc) next to where it left the scalp (its root's arc) when
 # counting and cutting locks.
 HANG_DIRECTION_WEIGHT = 0.5
-# Smaller locks (m²) join the lock with the nearest root.
+# Smaller locks (m²) join the nearest lock (by root) of at least this size, across loose parts if need be;
+# with none, they are dropped (their hair goes to the nearest chain). They never join each other.
 MIN_LOCK_AREA = 0.0004
 # A region that hangs entirely has its roots where it is within this (metres) of its closest point to the
 # head.
@@ -57,9 +60,10 @@ CUT_STEPS = 10
 
 class Lock:
     """A lock of hair: ``vertices`` (indices of the points), ``distance`` (metres along the mesh from the
-    lock's roots, one per vertex; 0 at the roots), ``area`` (m²), ``root`` ((3,), world space: the
-    area-weighted mean of its roots), ``whole`` (a loose part kept whole, see WHOLE_WIDTH) and ``angle``
-    (of the root around the head's vertical axis, degrees: 0 straight in front, 180 straight behind)."""
+    lock's roots, one per vertex; 0 at the roots, a joined crumb's included), ``area`` (m²), ``root`` ((3,),
+    world space: the area-weighted mean of its own roots, not those of crumbs that joined it), ``whole`` (a
+    loose part kept whole, see WHOLE_WIDTH) and ``angle`` (of the root around the head's vertical axis,
+    degrees: 0 straight in front, 180 straight behind)."""
 
     __slots__ = ("vertices", "distance", "area", "root", "whole", "angle")
 
@@ -216,34 +220,30 @@ def find_locks(points, tris, rig, *, hang_start=0.025, hang_length=0.07, weld=No
             own_roots = mine[np.isin(mine, roots)]
             drafts.append((mine, own_roots if len(own_roots) else _closest_to_head(mine, head), False))
 
-    # Small locks join the lock with the nearest root, the smallest first. Each lock's root is kept as the
-    # weighted sum of its roots' positions and their weight.
+    # Small locks (crumbs) join the nearest lock (by root) of at least MIN_LOCK_AREA, across loose parts if
+    # need be, without moving its root; with none to join they are dropped. Crumbs never join each other.
     owner = np.full(count, -1, dtype=np.int64)
     is_lock_root = np.zeros(count, dtype=bool)
     for index, (nodes, roots, _whole) in enumerate(drafts):
         owner[nodes] = index
         is_lock_root[roots] = True
-    alive = np.ones(len(drafts), dtype=bool)
     sizes = np.array([area[nodes].sum() for nodes, _roots, _whole in drafts])
-    root_sum = np.array([(weight[roots, None] * rest[roots]).sum(0) for _nodes, roots, _whole in drafts]).reshape(-1, 3)
-    root_weight = np.array([weight[roots].sum() for _nodes, roots, _whole in drafts])
-    while alive.sum() > 1:
-        small = int(np.argmin(np.where(alive, sizes, np.inf)))
-        if sizes[small] >= MIN_LOCK_AREA:
-            break
-        alive[small] = False
-        at = root_sum / root_weight[:, None]
-        gap = np.linalg.norm(at - at[small], axis=1)
-        into = int(np.argmin(np.where(alive, gap, np.inf)))
-        owner[owner == small] = into
-        sizes[into] += sizes[small]
-        root_sum[into] += root_sum[small]
-        root_weight[into] += root_weight[small]
+    roots_at = np.array([np.average(rest[roots], axis=0, weights=weight[roots]) for _nodes, roots, _whole in drafts])
+    alive = sizes >= MIN_LOCK_AREA
+    target = np.where(alive, np.arange(len(drafts)), -1)
+    if alive.any():
+        for small in np.flatnonzero(~alive):
+            gap = np.linalg.norm(roots_at - roots_at[small], axis=1)
+            into = int(np.argmin(np.where(alive, gap, np.inf)))
+            target[small] = into
+            sizes[into] += sizes[small]
+    owner = np.where(owner >= 0, target[np.maximum(owner, 0)], -1)
 
-    # Every lock measured again from its own roots, along itself; a piece its roots don't reach that way (a
-    # cut runs around it) keeps its distance from the region's roots.
+    # Every lock measured again from its roots (a crumb's own included), along itself; a piece its roots
+    # don't reach that way (a cut runs around it) keeps its distance from the region's roots.
     within = (owner[edges[:, 0]] == owner[edges[:, 1]]) & (owner[edges[:, 0]] >= 0)
-    distance, _source = _dijkstra(count, edges[within], lengths[within], np.flatnonzero(is_lock_root))
+    distance, _source = _dijkstra(count, edges[within], lengths[within],
+                                  np.flatnonzero(is_lock_root & (owner >= 0)))
     distance = np.where(np.isfinite(distance), distance, region_distance)
     point_owner = owner[weld]
     by_owner = np.argsort(point_owner, kind='stable')
@@ -251,7 +251,7 @@ def find_locks(points, tris, rig, *, hang_start=0.025, hang_length=0.07, weld=No
     locks = []
     for index in np.flatnonzero(alive):
         vertices = by_owner[bounds[index]:bounds[index + 1]]
-        root = root_sum[index] / root_weight[index]
+        root = roots_at[index]
         at = rig.model(root)
         angle = math.degrees(math.atan2(abs(at[0]), -(at[1] - axis_y)))
         whole = drafts[index][2]
