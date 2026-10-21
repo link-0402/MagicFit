@@ -1349,7 +1349,8 @@ def stroke_params(settings):
 
 def hair_parts(context, targets, armature, race):
     """The hair's other parts: meshes that aren't ``targets`` but were given hair weights for ``race``
-    before, deformed by ``armature`` or, when the targets have none yet, sharing a collection with them."""
+    before (with a game hair skeleton or the hair's own, see `same_skeleton`), deformed by ``armature`` or,
+    when the targets have none yet, sharing a collection with them."""
     data = {target.data.as_pointer() for target in targets}
     collections = {collection for target in targets for collection in target.users_collection}
     result = []
@@ -1368,6 +1369,16 @@ def hair_parts(context, targets, armature, race):
             continue
         result.append(obj)
     return result
+
+
+def same_skeleton(part, number, custom):
+    """Whether the hair's other ``part`` (`hair_parts`) was weighted with the hair skeleton ``number``, or
+    with the hair's own skeleton when ``custom``: parts with their own skeleton all share the armature's
+    chains, and none of them shares a game hair skeleton (not even none, 0)."""
+    state = part.magic_fit_hair
+    if custom or state.custom:
+        return bool(custom and state.custom)
+    return state.skeleton == number
 
 
 def bone_weights(obj, names):
@@ -1432,20 +1443,38 @@ def tag_est(obj, race, number):
             del obj[key]
 
 
+def _has_state(hair):
+    return hair is not None and hair.race in RACE_NAMES and hair.skeleton >= 0
+
+
 def object_skeleton(obj, settings):
-    """(race, skeleton number) the hair ``obj`` was given, else the settings' race and picked skeleton
-    (None when the settings ask for the best match and the hair has none yet)."""
+    """(race, skeleton number) the hair ``obj`` was given (0 for the hair's own skeleton), else the
+    settings' race and picked skeleton (0 for Own Skeleton; None when the settings ask for the best match
+    and the hair has none yet)."""
     hair = getattr(obj, "magic_fit_hair", None)
-    if hair is not None and hair.race in RACE_NAMES and hair.skeleton >= 0:
+    if _has_state(hair):
         return hair.race, hair.skeleton
     if settings.hair_skeleton_mode == 'PICK':
         return settings.hair_race, settings.hair_skeleton
+    if settings.hair_skeleton_mode == 'CUSTOM':
+        return settings.hair_race, 0
     return settings.hair_race, None
+
+
+def uses_custom_rig(obj, settings):
+    """Whether the hair ``obj`` hangs from its own skeleton (`hairrig`): it was given Hair Weights with it,
+    or it has no hair weights yet and the settings ask for Own Skeleton."""
+    hair = getattr(obj, "magic_fit_hair", None)
+    if _has_state(hair):
+        return bool(hair.custom)
+    return settings.hair_skeleton_mode == 'CUSTOM'
 
 
 def build_stroke(context, obj, settings):
     """A `HairStroke` for the brush on ``obj``, which must have an armature with its hair bones (the Hair
-    Weights button gives it one). Raises `HairError` when it can't be set up."""
+    Weights button gives it one; with the hair's own skeleton, its chains for the race). Raises `HairError`
+    when it can't be set up."""
+    from . import hairrig
     modifier = straighten.deforming_armature(obj)
     if modifier is None:
         raise HairError("Hair needs an Armature modifier: give it Hair Weights first")
@@ -1453,24 +1482,37 @@ def build_stroke(context, obj, settings):
     if number is None:
         raise HairError("Give the hair Hair Weights first, or pick its skeleton")
     reference = Reference.get()
-    if number and not reference.has_skeleton(race, number):
-        raise HairError("{:s} has no hair skeleton {:s}".format(RACE_NAMES[race], skeleton_label(number)))
-    rig = reference.rig(race, number)
-    rig = rig.moved(armature_offset(modifier.object, rig))
-    missing = [bone.name for bone in rig.hair_bones() if modifier.object.data.bones.get(bone.name) is None]
-    if missing:
-        raise HairError("Armature '{:s}' lacks the hair bones of {:s}: give the hair Hair Weights first".format(
-            modifier.object.name, skeleton_label(number)))
+    custom = uses_custom_rig(obj, settings)
+    if custom:
+        # The armature the hair's own bones are on (not a Customize+ rig of it), as Hair Weights left them: no
+        # Edit Mode during a stroke to read the user's edits back (`hairrig.sync_rig`).
+        armature = weighted_armature(obj)
+        if not hairrig.has_rig(armature, race):
+            raise HairError("Give the hair Hair Weights first")
+        rig = hairrig.custom_rig(armature, race, reference)
+    else:
+        if number and not reference.has_skeleton(race, number):
+            raise HairError("{:s} has no hair skeleton {:s}".format(RACE_NAMES[race], skeleton_label(number)))
+        rig = reference.rig(race, number)
+        rig = rig.moved(armature_offset(modifier.object, rig))
+        missing = [bone.name for bone in rig.hair_bones() if modifier.object.data.bones.get(bone.name) is None]
+        if missing:
+            raise HairError("Armature '{:s}' lacks the hair bones of {:s}: give the hair Hair Weights first".format(
+                modifier.object.name, skeleton_label(number)))
     params = stroke_params(settings)
     parts = []
     if params["layer_range"] > 0.0:
         parts = [part for part in hair_parts(context, (obj,), weighted_armature(obj), race)
-                 if part.magic_fit_hair.skeleton == number]
+                 if same_skeleton(part, number, custom)]
     # Read together: each read puts posed armatures in their rest position and back, evaluating the scene twice.
     rest, *part_rests = straighten.rest_geometry(context, [obj] + parts, ('INDEXED',) * (1 + len(parts)))
     fixed = fixed_parts(part_rests, parts, [bone.name for bone in rig.bones]) if parts else None
     weight_kwargs = weight_params(settings)
-    key = (obj.data.as_pointer(), race, number, tuple(rig.offset.tolist()), tuple(sorted(weight_kwargs.items())))
+    # The hair's own bones can be moved, deleted or added in Edit Mode: where they are is part of the key.
+    own = tuple((bone.name, bone.parent, tuple(bone.rest.ravel().tolist())) for bone in rig.skeleton_bones()) \
+        if custom else ()
+    key = (obj.data.as_pointer(), race, number, custom, own, tuple(rig.offset.tolist()),
+           tuple(sorted(weight_kwargs.items())))
     arrays = [rest.co, rest.tris] + (list(fixed) if fixed is not None else [])
     weights = _brush_weights(key, arrays, lambda: hair_weights(rest.co, rest.tris, rig, fixed=fixed, **weight_kwargs))
     return HairStroke(obj, rest.co, rest.tris, rig, weights=weights, **params)

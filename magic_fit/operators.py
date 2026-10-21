@@ -14,9 +14,9 @@ from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 from mathutils.geometry import intersect_line_line, intersect_line_plane
 
-from . import (api, connecting, earring, facedata, facing, fitting, goals, hairing, hairlineup, heeling, lineup, mending, moving,
-               painting, refining, relaxing, resizing, sizing, skirting, sliders, smoothing, squishing, straighten,
-               tabs)
+from . import (api, connecting, earring, facedata, facing, fitting, goals, hairing, hairlineup, hairrig, heeling, lineup,
+               mending, moving, painting, refining, relaxing, resizing, sizing, skirting, sliders, smoothing, squishing,
+               straighten, tabs)
 from .cplus import rig as cplus_rig
 from .properties import COMING_MODES, SQUISH_PRESETS, sync_sizes
 
@@ -181,13 +181,18 @@ def check_hair_ready(obj, settings):
     reference = _hair_reference()
     if reference is None:
         return "The hair reference data (hair_reference.npz) is missing: reinstall the add-on"
-    if number and not reference.has_skeleton(race, number):
-        return "{:s} has no hair skeleton {:s}".format(hairing.RACE_NAMES[race], hairing.skeleton_label(number))
     armature = modifier.object
-    bones = armature.data.bones
-    if any(bones.get(bone.name) is None for bone in reference.rig(race, number).hair_bones()):
-        return "Armature '{:s}' lacks the hair bones of {:s}: give the hair Hair Weights".format(
-            armature.name, hairing.skeleton_label(number))
+    if hairing.uses_custom_rig(obj, settings):
+        # The hair's own chains for the race, on the armature (not on a Customize+ rig of it).
+        if not hairrig.has_rig(hairing.weighted_armature(obj), race):
+            return "Give the hair Hair Weights first"
+    else:
+        if number and not reference.has_skeleton(race, number):
+            return "{:s} has no hair skeleton {:s}".format(hairing.RACE_NAMES[race], hairing.skeleton_label(number))
+        bones = armature.data.bones
+        if any(bones.get(bone.name) is None for bone in reference.rig(race, number).hair_bones()):
+            return "Armature '{:s}' lacks the hair bones of {:s}: give the hair Hair Weights".format(
+                armature.name, hairing.skeleton_label(number))
     if settings.group_mode == 'ACTIVE':
         group = obj.vertex_groups.active
         if group is None:
@@ -441,6 +446,10 @@ def check_hair_weights_ready(context):
     for armature in armatures:
         if armature.library is not None or armature.data.library is not None:
             return "Armature '{:s}' is linked from another file".format(armature.name)
+        # Own Skeleton reads the user's bone edits back in Edit Mode every time, which needs the armature
+        # in the view layer.
+        if settings.hair_skeleton_mode == 'CUSTOM' and context.view_layer.objects.get(armature.name) is None:
+            return "Armature '{:s}' is not in the view layer: Own Skeleton edits its bones".format(armature.name)
     if settings.group_mode == 'ACTIVE':
         return "Hair Weights gives all bone weights: set Groups to All Groups (Current Group is for the brush)"
     return None
@@ -2353,9 +2362,12 @@ def hair_skeleton_text(reference, race, number):
     return "hair skeleton {:s} (EST entry {:d}{:s})".format(hairing.skeleton_label(number), number, used)
 
 
+REBUILD_DESCRIPTION = "Build the hair's bone chains again from its shape. Your bone edits are lost"
+
+
 class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
-    """Replace the hair's weights with FFXIV hair bone weights. Uses the best-fitting hair skeleton (or the
-    picked one) and adds its bones to the hair's armature, or to a new one"""
+    """Replace the hair's weights with FFXIV hair bone weights. Uses the best-fitting hair skeleton, the
+    picked one or the hair's own, and adds its bones to the hair's armature, or to a new one"""
     bl_idname = "magic_fit.hair_weights"
     bl_label = "Hair Weights"
     bl_options = {'REGISTER', 'UNDO'}
@@ -2367,9 +2379,17 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
         min=-1,
         options={'HIDDEN', 'SKIP_SAVE'},
     )
+    rebuild: BoolProperty(
+        name="Rebuild Chains",
+        description=REBUILD_DESCRIPTION,
+        default=False,
+        options={'HIDDEN', 'SKIP_SAVE'},
+    )
 
     @classmethod
     def description(cls, _context, properties):
+        if properties.rebuild:
+            return REBUILD_DESCRIPTION
         if properties.skeleton >= 0:
             return "Weight the hair with this hair skeleton instead, and keep it picked"
         return cls.__doc__
@@ -2387,6 +2407,10 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
         targets = hair_targets(context, settings)
         reference = hairing.Reference.get()
         race = settings.hair_race
+        if self.rebuild and self.skeleton < 0:
+            settings.hair_skeleton_mode = 'CUSTOM'
+        # Own Skeleton: chains built from the hair's shape on its armature, kept as the user edits them.
+        custom = self.skeleton < 0 and settings.hair_skeleton_mode == 'CUSTOM'
         armature = next((found for found in map(hairing.weighted_armature, targets) if found is not None), None)
         # One hair has one EST entry: parts of it weighted before (on its armature, or in its collection
         # while this part has none yet) are matched along, and lend it their armature.
@@ -2395,17 +2419,18 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
             armature = hairing.weighted_armature(parts[0])
         offset = hairing.armature_offset(armature, reference.rig(race, 0))
         matches = None
-        best = self.skeleton < 0 and settings.hair_skeleton_mode != 'PICK'
+        best = not custom and self.skeleton < 0 and settings.hair_skeleton_mode != 'PICK'
         # A picked skeleton still gets the best matches, for the panel to suggest, unless the hair has them.
-        matching = best or any(target.magic_fit_hair.race != race or not target.magic_fit_hair.matches
-                               for target in targets)
-        # The other parts are read only to be matched along or held to, together with the targets: each read puts
-        # posed armatures in their rest position and back, evaluating the scene twice.
-        read = parts if matching or settings.hair_layer_range > 0.0 else []
+        matching = not custom and (best or any(target.magic_fit_hair.race != race or not target.magic_fit_hair.matches
+                                               for target in targets))
+        # The other parts are read only to be matched along (or have chains built over them) or held to,
+        # together with the targets: each read puts posed armatures in their rest position and back, evaluating
+        # the scene twice.
+        read = parts if custom or matching or settings.hair_layer_range > 0.0 else []
         rests = straighten.rest_geometry(context, targets + read, ('INDEXED',) * (len(targets) + len(read)))
         rests, part_rests = rests[:len(targets)], rests[len(targets):]
+        whole = rests + part_rests
         if matching:
-            whole = rests + part_rests
             points = np.concatenate([rest.co for rest in whole])
             starts = np.cumsum([0] + [len(rest.co) for rest in whole[:-1]])
             tris = np.concatenate([rest.tris + start for rest, start in zip(whole, starts)])
@@ -2417,7 +2442,9 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
                 if best:
                     self.report({'ERROR'}, str(error))
                     return {'CANCELLED'}
-        if self.skeleton >= 0:
+        if custom:
+            number = 0
+        elif self.skeleton >= 0:
             number = self.skeleton
             if number and not reference.has_skeleton(race, number):
                 self.report({'ERROR'}, "{:s} has no hair skeleton {:s}".format(
@@ -2433,23 +2460,47 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
                 self.report({'INFO'}, "Matched together with the hair's other part{:s}: {:s}".format(
                     "s" if len(parts) > 1 else "", ", ".join("'{:s}'".format(part.name) for part in parts)))
         rig = reference.rig(race, number).moved(offset)
-        wanted = [hairing.HEAD, hairing.NECK, hairing.UPPER_BACK] + [bone.name for bone in rig.hair_bones()]
+        wanted = [hairing.HEAD, hairing.NECK, hairing.UPPER_BACK]
+        if not custom:
+            wanted += [bone.name for bone in rig.hair_bones()]
         if race in hairing.EAR_RACES and settings.hair_ears:
             wanted += list(hairing.EARS)
         new = armature is None
         if new:
             collection = targets[0].users_collection[0] if targets[0].users_collection else context.scene.collection
             armature = hairing.new_armature(context, "Hair Skeleton", collection)
+        built = None   # the hair's own bones, when its chains are built (again)
+        renamed = []
         try:
             added = hairing.ensure_bones(context, armature, rig, wanted)
-        except RuntimeError as error:
-            self.report({'ERROR'}, "Couldn't add the hair bones to '{:s}': {:s}".format(armature.name, str(error)))
+            if custom and (self.rebuild or not hairrig.has_rig(armature, race)):
+                # Built over the whole hair, its other parts too, as the matching sees it.
+                points = np.concatenate([rest.co for rest in whole])
+                starts = np.cumsum([0] + [len(rest.co) for rest in whole[:-1]])
+                tris = np.concatenate([np.asarray(rest.tris, dtype=np.int64).reshape(-1, 3) + start
+                                       for rest, start in zip(whole, starts)])
+                plans = hairrig.plan_rig(points, tris, rig, hang_start=settings.hair_hang_start,
+                                         hang_length=settings.hair_hang_length)
+                built = hairrig.build_armature_rig(context, armature, plans, race)
+            elif custom:
+                # The chains as the user left them: moved, deleted or added bones; new ones get names.
+                renamed = hairrig.sync_rig(context, armature, race)
+        except (RuntimeError, hairing.HairError) as error:
+            if isinstance(error, hairing.HairError):
+                self.report({'ERROR'}, str(error))
+            else:
+                self.report({'ERROR'}, "Couldn't add the hair bones to '{:s}': {:s}".format(armature.name, str(error)))
             if new:
                 # Cancelling leaves no undo step to take it away.
                 data = armature.data
                 bpy.data.objects.remove(armature)
                 bpy.data.armatures.remove(data)
             return {'CANCELLED'}
+        if custom:
+            # The hair's own skeleton as it is now on the armature (`sync_rig` read the user's edits back).
+            rig = hairrig.custom_rig(armature, race, reference)
+        # The chains changed under the weights of the hair's other parts with its own skeleton.
+        rebuilt = custom and built is not None
         for obj in targets:
             if straighten.deforming_armature(obj) is None:
                 hairing.add_armature_modifier(obj, armature)
@@ -2462,7 +2513,7 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
                                for rest, start in zip(rests, starts)])
         fixed = None
         if settings.hair_layer_range > 0.0:
-            same = [k for k, part in enumerate(parts) if part.magic_fit_hair.skeleton == number]
+            same = [k for k, part in enumerate(parts) if hairing.same_skeleton(part, number, custom) and not rebuilt]
             fixed = hairing.fixed_parts([part_rests[k] for k in same], [parts[k] for k in same],
                                         [bone.name for bone in rig.bones])
         names, weights = hairing.hair_weights(points, tris, rig, fixed=fixed, **hairing.weight_params(settings))
@@ -2484,30 +2535,46 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
             state = obj.magic_fit_hair
             state.race = race
             state.skeleton = number
-            if matches is not None:
+            state.custom = custom
+            if custom:
+                state.matches = ""
+            elif matches is not None:
                 state.matches = _match_text(matches)
+            # The hair's own skeleton takes the place of a game hair skeleton's EST entry: no tag.
             hairing.tag_est(obj, race, number)
         if new:
             self.report({'INFO'}, "Made armature '{:s}' with the game's bones for the hair".format(armature.name))
         elif added:
             self.report({'INFO'}, "Added {:d} bone(s) to '{:s}': {:s}".format(
                 len(added), armature.name, ", ".join(added)))
+        if custom:
+            chains = armature.magic_fit_hair_rig.chains
+            bone_count = sum(len([name for name in chain.bones.split(",") if name]) for chain in chains)
+            if built is not None and not len(chains):
+                self.report({'INFO'}, "Nothing hangs far enough from the head to swing: no chains built")
+            elif built is not None:
+                self.report({'INFO'}, "Built {:d} chains with {:d} bones for the hair".format(len(chains), bone_count))
+            else:
+                self.report({'INFO'}, "Used the hair's own skeleton on '{:s}': {:d} chains, {:d} bones".format(
+                    armature.name, len(chains), bone_count))
+            if renamed:
+                self.report({'INFO'}, "Renamed {:s}".format(", ".join(renamed)))
         if removed:
             self.report({'INFO'}, "Took off the old weights of {:s}".format(
                 ", ".join(removed[:8]) + (" and {:d} more".format(len(removed) - 8) if len(removed) > 8 else "")))
-        what = hair_skeleton_text(reference, race, number)
+        what = "the hair's own skeleton" if custom else hair_skeleton_text(reference, race, number)
         self.report({'INFO'}, "Gave {:d} mesh(es) hair weights with {:s}".format(changed, what) if changed else
                     "Nothing changed: the hair has these hair weights already ({:s})".format(what))
         if number:
             self.report({'INFO'}, "Tagged the hair with its EST entry {:d} (custom property {:s}) for export".format(
                 number, hairing.EST_PROPERTY))
-        other = [part for part in parts if part.magic_fit_hair.skeleton != number]
+        other = [part for part in parts if not hairing.same_skeleton(part, number, custom) or rebuilt]
         if other:
             self.report({'WARNING'}, "The hair's other part{:s} {:s} still use{:s} another hair skeleton: give {:s} "
                         "Hair Weights with {:s} too (or select all parts and use the arrow)".format(
                             "s" if len(other) > 1 else "", ", ".join("'{:s}'".format(part.name) for part in other),
                             "" if len(other) > 1 else "s", "them" if len(other) > 1 else "it",
-                            hairing.skeleton_label(number)))
+                            "Own Skeleton" if custom else hairing.skeleton_label(number)))
         if race in hairing.EAR_RACES and settings.hair_ears:
             ears = any(hairing.ear_shares(rig.model(rest.co), rest.tris, rig) for rest in rests)
             self.report({'INFO'}, "The hair's cat ears follow the ear bones" if ears else

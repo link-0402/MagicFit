@@ -4,13 +4,16 @@ Run from the repository root:
     blender -b --factory-startup --python tests/test_hair_core.py
 """
 
+import json
 import math
 import os
+import re
 import sys
 import traceback
 
 import bpy
 import numpy as np
+from mathutils import Vector
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -19,7 +22,7 @@ sys.path.insert(0, os.path.join(ROOT, "tests"))
 import cplus as cplus_fixture  # noqa: E402
 import hair  # noqa: E402
 import magic_fit  # noqa: E402
-from magic_fit import goals, hairing, operators  # noqa: E402
+from magic_fit import goals, hairing, hairrig, operators  # noqa: E402
 from magic_fit.cplus import rig as cplus_rig, solver  # noqa: E402
 from magic_fit.cplus.template import BoneEdit, Template  # noqa: E402
 
@@ -713,12 +716,278 @@ def test_readiness():
           "picker: lists none and the race's skeletons with the game's hairs using them")
 
 
+class _HairWeightsRun:
+    """Stands in for the Hair Weights operator's ``self``, to read what it reports."""
+
+    def __init__(self, skeleton=-1, rebuild=False):
+        self.skeleton = skeleton
+        self.rebuild = rebuild
+        self.reports = []
+
+    def report(self, _kinds, text):
+        self.reports.append(text)
+
+
+def hair_weights_reports(**props):
+    """Run Hair Weights (its execute, after its readiness check): (result, the texts it reported)."""
+    problem = operators.check_hair_weights_ready(bpy.context)
+    if problem is not None:
+        return {'CANCELLED'}, [problem]
+    run = _HairWeightsRun(**props)
+    result = operators.MAGIC_FIT_OT_hair_weights.execute(run, bpy.context)
+    print("      reports:", run.reports)
+    return result, run.reports
+
+
+def own_skeleton_hair(**values):
+    """The long hair (`hair.build`), active and selected, with Own Skeleton in the settings."""
+    hair.clear_scene()
+    obj, parts = hair.build()
+    settings = use_settings(hair_skeleton_mode='CUSTOM', **values)
+    return obj, parts, settings
+
+
+def hair_armature(obj):
+    modifier = next((m for m in obj.modifiers if m.type == 'ARMATURE'), None)
+    return modifier.object if modifier is not None else None
+
+
+def rig_chains(armature):
+    """(kind, bone names) of each chain in the armature's rig state."""
+    return [(chain.kind, [name for name in chain.bones.split(",") if name])
+            for chain in armature.magic_fit_hair_rig.chains]
+
+
+def own_bones(armature):
+    return sorted(bone.name for bone in armature.data.bones if bone.name.startswith(hairrig.BONE_PREFIX))
+
+
+def bone_head(armature, name):
+    return np.array(armature.matrix_world @ armature.data.bones[name].head_local)
+
+
+def ponytail_root(armature):
+    """The first bone of the armature's ponytail chain, or None."""
+    return next((bones[0] for kind, bones in rig_chains(armature) if kind == 'ponytail' and bones), None)
+
+
+def move_bone_head(obj, armature, name, offset):
+    """Move bone ``name``'s head by ``offset`` in Edit Mode, then make ``obj`` active again."""
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='EDIT')
+    edit = armature.data.edit_bones[name]
+    edit.head = edit.head + Vector(offset)
+    bpy.ops.object.mode_set(mode='OBJECT')
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+
+
+VANILLA_HAIR_BONE = re.compile(r"j_ex_h[0-9]{4}_")
+
+
+def test_custom_button():
+    obj, parts, _settings = own_skeleton_hair()
+    obj[hairing.EST_PROPERTY] = 210
+    obj[hairing.EST_RACE_PROPERTY] = 'c0201'
+    check(operators.check_hair_weights_ready(bpy.context) is None, "own skeleton: ready for a mesh without armature")
+    result, reports = hair_weights_reports()
+    armature = hair_armature(obj)
+    check(result == {'FINISHED'} and armature is not None and armature.name == "Hair Skeleton",
+          "own skeleton: made the armature 'Hair Skeleton'")
+    if armature is None:
+        return
+    bones = armature.data.bones
+    own = own_bones(armature)
+    check(all(bones.get(name) for name in (hairing.HEAD, hairing.NECK, hairing.UPPER_BACK)) and len(own) >= 4,
+          "own skeleton: j_kao, j_kubi, j_sebo_c and the hair's own bones ({:d})".format(len(own)))
+    data = json.loads(armature.get(hairrig.RIG_PROPERTY, "{}"))
+    chains = data.get("chains", [])
+    check(data.get("race") == 'c0201' and sorted(name for chain in chains for name in chain["bones"]) == own,
+          "own skeleton: the rig property lists c0201 and every chain bone")
+    groups = {group.name for group in obj.vertex_groups}
+    check(groups and all(bones.get(name) for name in groups),
+          "own skeleton: the mesh has groups only for the armature's bones ({:s})".format(", ".join(sorted(groups))))
+    check(not [name for name in groups if name.startswith("j_kami_") or VANILLA_HAIR_BONE.match(name)],
+          "own skeleton: no j_kami_* and no vanilla hair skeleton groups")
+    weights = hair.by_name(obj)
+    total = sum(weights.values())
+    check(float(np.abs(total - 1.0).max()) < 1e-4, "own skeleton: every vertex's weights add up to 1")
+    tip = parts['ponytail'][-12:]
+    chain_weight = sum(w[tip] for name, w in weights.items() if name.startswith(hairrig.BONE_PREFIX))
+    check(float(chain_weight.mean()) > 0.9,
+          "own skeleton: the ponytail's tip hangs from its chain ({:.3f})".format(float(chain_weight.mean())))
+    check(weights[hairing.HEAD][parts['cap']].mean() > 0.97, "own skeleton: the scalp follows the head")
+    state = obj.magic_fit_hair
+    check(state.custom and state.skeleton == 0 and state.race == 'c0201' and state.matches == "",
+          "own skeleton: the hair remembers its own skeleton (skeleton 0, no matches)")
+    check(hairing.EST_PROPERTY not in obj and hairing.EST_RACE_PROPERTY not in obj,
+          "own skeleton: the EST tags are taken off")
+    expected = "Built {:d} chains with {:d} bones for the hair".format(len(chains), len(own))
+    check(expected in reports, "own skeleton: reports '{:s}'".format(expected))
+    # A picked skeleton afterwards: the hair no longer uses its own.
+    use_settings(hair_skeleton_mode='PICK', hair_skeleton=210)
+    bpy.ops.magic_fit.hair_weights()
+    check(not obj.magic_fit_hair.custom and obj.magic_fit_hair.skeleton == 210 and obj.get(hairing.EST_PROPERTY) == 210,
+          "own skeleton: a picked skeleton afterwards clears it and tags the EST entry")
+
+
+def test_custom_reuses_rig():
+    obj, _parts, _settings = own_skeleton_hair()
+    hair_weights_reports()
+    armature = hair_armature(obj)
+    name = ponytail_root(armature) if armature is not None else None
+    check(name is not None, "reuse: the hair has a ponytail chain ({})".format(
+        rig_chains(armature) if armature is not None else None))
+    if name is None:
+        return
+    joint = bone_head(armature, name)
+    count = len(own_bones(armature))
+    chains = len(armature.magic_fit_hair_rig.chains)
+    before = hair.by_name(obj)
+    move_bone_head(obj, armature, name, (0.01, 0.0, 0.0))
+    result, reports = hair_weights_reports()
+    moved = bone_head(armature, name)
+    check(result == {'FINISHED'} and np.linalg.norm(moved - joint - (0.01, 0.0, 0.0)) < 1e-5,
+          "reuse: Hair Weights again keeps the bone where it was moved")
+    after = hair.by_name(obj)
+    change = max(float(np.abs(after.get(k, 0.0) - before.get(k, 0.0)).max()) for k in set(before) | set(after))
+    check(change > 1e-3, "reuse: ...and the weights follow it ({:.4f})".format(change))
+    expected = "Used the hair's own skeleton on '{:s}': {:d} chains, {:d} bones".format(armature.name, chains, count)
+    check(expected in reports, "reuse: reports '{:s}'".format(expected))
+    check(not [text for text in reports if text.startswith("Built ")], "reuse: builds no chains")
+    result = bpy.ops.magic_fit.hair_weights(rebuild=True)
+    check(result == {'FINISHED'} and np.linalg.norm(bone_head(armature, name) - joint) < 1e-5,
+          "reuse: Rebuild puts the bone back on its joint")
+
+
+def test_race_change_rebuilds():
+    obj, _parts, _settings = own_skeleton_hair()
+    hair_weights_reports()
+    armature = hair_armature(obj)
+    name = ponytail_root(armature) if armature is not None else None
+    check(name is not None, "race change: a ponytail chain for c0201")
+    if name is None:
+        return
+    before = bone_head(armature, name)
+    use_settings(hair_skeleton_mode='CUSTOM', hair_race='c0801')
+    result, reports = hair_weights_reports()
+    data = json.loads(armature.get(hairrig.RIG_PROPERTY, "{}"))
+    check(result == {'FINISHED'} and data.get("race") == 'c0801' and armature.magic_fit_hair_rig.race == 'c0801'
+          and obj.magic_fit_hair.race == 'c0801', "race change: the rig is for c0801 now")
+    check(any(text.startswith("Built ") for text in reports), "race change: the chains are built again")
+    name = ponytail_root(armature)
+    gap = float(np.linalg.norm(bone_head(armature, name) - before)) if name is not None else 0.0
+    check(gap > 0.001, "race change: the ponytail's first joint is placed for c0801's head ({:.4f} m away)".format(gap))
+
+
+def test_nothing_hangs():
+    hair.clear_scene()
+    use_settings(hair_skeleton_mode='CUSTOM')
+    obj = strips_object("Cap", hair.cap())
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+    result, reports = hair_weights_reports()
+    armature = hair_armature(obj)
+    check(result == {'FINISHED'} and armature is not None and not own_bones(armature),
+          "nothing hangs: no hair bones of its own")
+    if armature is None:
+        return
+    data = json.loads(armature.get(hairrig.RIG_PROPERTY, "{}"))
+    check(data == {"race": 'c0201', "chains": []}, "nothing hangs: the rig property lists no chains ({})".format(data))
+    check("Nothing hangs far enough from the head to swing: no chains built" in reports,
+          "nothing hangs: says so")
+    custom = hair.by_name(obj)
+    hair.clear_scene()
+    use_settings(hair_skeleton_mode='PICK', hair_skeleton=0)
+    obj = strips_object("Cap", hair.cap())
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+    bpy.ops.magic_fit.hair_weights()
+    none = hair.by_name(obj)
+    same = set(custom) == set(none) and all(np.abs(custom[k] - none[k]).max() < 1e-5 for k in custom)
+    check(same, "nothing hangs: the weights are as with no hair skeleton ({} vs {})".format(
+        sorted(custom), sorted(none)))
+
+
+def test_custom_brush():
+    obj, _parts, settings = own_skeleton_hair()
+    check(hairing.uses_custom_rig(obj, settings), "own brush: a new hair uses its own skeleton in Own Skeleton mode")
+    problem = operators.check_hair_ready(obj, settings)
+    check(problem is not None and "Hair Weights" in problem, "own brush: a hair without weights asks for Hair Weights")
+    bpy.ops.magic_fit.hair_weights()
+    armature = hair_armature(obj)
+    check(operators.check_hair_ready(obj, settings) is None, "own brush: ready once the hair has its weights")
+    stroke = hairing.build_stroke(bpy.context, obj, settings)
+    check(stroke.rig.custom and sorted(stroke.rig.skeleton) == own_bones(armature),
+          "own brush: the stroke paints with the hair's own skeleton")
+    before = hair.by_name(obj)
+    count = len(obj.data.vertices)
+    stroke.apply(list(range(count)), [1.0] * count)
+    obj.data.update()
+    after = hair.by_name(obj)
+    check(max(float(np.abs(after[k] - before[k]).max()) for k in before) < 1e-4,
+          "own brush: painting the goal again changes nothing")
+    # Best Match in the settings: the hair still paints with its own skeleton.
+    settings = use_settings()
+    check(hairing.uses_custom_rig(obj, settings) and hairing.build_stroke(bpy.context, obj, settings).rig.custom,
+          "own brush: the hair keeps its own skeleton whatever the settings")
+    # A moved bone: the brush works the weights out again.
+    move_bone_head(obj, armature, ponytail_root(armature), (0.01, 0.0, 0.0))
+    moved = hairing.build_stroke(bpy.context, obj, settings)
+    check(not np.array_equal(moved.goal_weights, stroke.goal_weights), "own brush: a moved bone moves the goal")
+    del armature[hairrig.RIG_PROPERTY]
+    problem = operators.check_hair_ready(obj, settings)
+    check(problem == "Give the hair Hair Weights first",
+          "own brush: no rig for the race asks for Hair Weights ({})".format(problem))
+    try:
+        hairing.build_stroke(bpy.context, obj, settings)
+        refused = False
+    except hairing.HairError:
+        refused = True
+    check(refused, "own brush: ...and the stroke refuses")
+
+
+def test_custom_parts():
+    # One part with a vanilla skeleton, the other with the hair's own: each warns about the other.
+    hair.clear_scene()
+    use_settings(hair_skeleton_mode='PICK', hair_skeleton=210)
+    first, _parts = hair.build()
+    bpy.ops.magic_fit.hair_weights()
+    second = bangs_mesh()
+    first.select_set(False)
+    bpy.context.view_layer.objects.active = second
+    second.select_set(True)
+    use_settings(hair_skeleton_mode='CUSTOM')
+    result, reports = hair_weights_reports()
+    armature = hair_armature(second)
+    check(result == {'FINISHED'} and armature == hair_armature(first) and second.magic_fit_hair.custom,
+          "own parts: the second part joins the hair's armature with its own skeleton")
+    check(armature is not None and ponytail_root(armature) is not None,
+          "own parts: the chains are built over the whole hair (the first part's ponytail too)")
+    check(any(text.startswith("The hair's other part 'Hair' still uses another hair skeleton") for text in reports),
+          "own parts: the part with a vanilla skeleton is named")
+    # The first part with the same own skeleton: nothing to warn about.
+    second.select_set(False)
+    bpy.context.view_layer.objects.active = first
+    first.select_set(True)
+    result, reports = hair_weights_reports()
+    check(result == {'FINISHED'} and first.magic_fit_hair.custom
+          and not [text for text in reports if text.startswith("The hair's other part")],
+          "own parts: parts with the hair's own skeleton match")
+    # Rebuilt, the chains change under the other part's weights.
+    result, reports = hair_weights_reports(rebuild=True)
+    check(any(text.startswith("The hair's other part 'Bangs' still uses another hair skeleton") for text in reports),
+          "own parts: after a rebuild the other part is named")
+
+
 def main():
     magic_fit.register()
     try:
         for test in (test_reference, test_weights, test_chains, test_layers, test_ears, test_matching, test_button,
                      test_existing_armature, test_customize_plus, test_armature_out_of_view_layer, test_parts,
-                     test_selected, test_replace, test_masks, test_pick, test_brush, test_readiness):
+                     test_selected, test_replace, test_masks, test_pick, test_brush, test_readiness,
+                     test_custom_button, test_custom_reuses_rig, test_race_change_rebuilds, test_nothing_hangs,
+                     test_custom_brush, test_custom_parts):
             print("==", test.__name__)
             try:
                 test()

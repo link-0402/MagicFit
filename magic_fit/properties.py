@@ -507,6 +507,8 @@ class MagicFitSettings(bpy.types.PropertyGroup):
              "Use the race's hair skeleton that fits the hair best"),
             ('PICK', "Pick", "Use the EST entry picked below. Type its number, or search by number or by the "
                              "game's hairstyles that use it"),
+            ('CUSTOM', "Own Skeleton", "Build bone chains from the hair's shape, as its own hair skeleton. Instant "
+                                       "Edit's export writes the skeleton and its physics"),
         ),
         default='AUTO',
     )
@@ -853,6 +855,11 @@ class HairWeightsState(bpy.types.PropertyGroup):
         name="Best Matches",
         description="The hair skeletons that fit the hair best, best first (number:score)",
         default="",
+    )
+    custom: BoolProperty(
+        name="Own Skeleton",
+        description="The hair uses its own skeleton, built by Hair Weights",
+        default=False,
     )
 
 
