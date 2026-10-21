@@ -474,6 +474,26 @@ def test_budget():
               [round(side, 3) for side in sideways]))
 
 
+def card_hair(count, seed=0):
+    """`hair.cards` as one mesh: (points, triangles)."""
+    co, tris, _ranges = join(hair.cards(count, seed=seed))
+    return co, tris
+
+
+def test_card_hair_time():
+    # Card hair of 3000 cards (66,000 vertices): about 2950 budget merges, each measuring only the locks it
+    # merges, not the whole hair.
+    model_rig = rig()
+    co, tris = card_hair(3000)
+    started = time.perf_counter()
+    chains = hairrig.plan_rig(co, tris, model_rig)
+    took = time.perf_counter() - started
+    print("      plan_rig: {:.3f} s for 3000 cards, {:d} vertices".format(took, len(co)))
+    check(chains and sum(len(chain.joints) for chain in chains) <= hairrig.MAX_HAIR_BONES,
+          "card hair time: the cards fit the budget ({:d} chains)".format(len(chains)))
+    check(took < 5.0, "card hair time: 3000 cards planned in under 5 s ({:.2f} s)".format(took))
+
+
 def test_moved_hair():
     model_rig = rig()
     co, tris, _part, _names = long_hair()
@@ -755,7 +775,7 @@ def main():
     try:
         for test in (test_long_hair_locks, test_one_piece_long_hair, test_separate_strands, test_crumbs,
                      test_parted_locks, test_long_hair_chains, test_bangs_chain, test_pivot_at_root, test_even_joints,
-                     test_kinds, test_budget, test_moved_hair, test_armature_rig, test_weights_follow_locks,
+                     test_kinds, test_budget, test_card_hair_time, test_moved_hair, test_armature_rig, test_weights_follow_locks,
                      test_edited_rig_is_kept, test_branch_starts_chain, test_kind_change_writes_json):
             print("==", test.__name__)
             try:

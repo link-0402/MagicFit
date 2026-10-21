@@ -123,6 +123,26 @@ def tube(top, bottom, radius, rings=20, segments=12, bend=(0.0, 0.04, 0.0)):
     return np.array(verts), faces
 
 
+def cards(count=300, seed=0, rows=10, width=0.012, lengths=(0.30, 0.40), polar=(80.0, 100.0), race=RACE):
+    """Card hair: ``count`` narrow strips (``width`` wide, ``lengths`` long, ``rows`` rows) around the back half
+    of the head, each its own loose part, as (vertices, faces) each. Their tops are 1 cm off the head, spread
+    evenly around the back (azimuth -90 to 90 degrees, 0 straight behind) at random heights (``polar``,
+    degrees from the top); each card leans 6 cm out from the head as it falls. The same ``seed`` gives the
+    same cards."""
+    rng = np.random.default_rng(seed)
+    azimuth = np.radians(np.linspace(-90.0, 90.0, count) + rng.uniform(-0.5, 0.5, count) * 180.0 / count)
+    p = np.radians(rng.uniform(polar[0], polar[1], count))
+    directions = np.column_stack((np.sin(p) * np.sin(azimuth), np.sin(p) * np.cos(azimuth), np.cos(p)))
+    tops, _reach = _onto_head(directions, 0.01, race)
+    result = []
+    for top, a, length in zip(tops, azimuth, rng.uniform(lengths[0], lengths[1], count)):
+        out = np.array((math.sin(a), math.cos(a), 0.0))
+        side = np.array((math.cos(a), -math.sin(a), 0.0))
+        down = out * 0.06 - np.array((0.0, 0.0, length))
+        result.append(strip(top, top + down * (length / np.linalg.norm(down)), width, side, rows))
+    return result
+
+
 def parts(long=True):
     """(name, vertices, faces) of each loose part; ``long`` adds the locks and the ponytail."""
     result = [("cap",) + cap()]

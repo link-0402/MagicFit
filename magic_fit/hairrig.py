@@ -126,11 +126,13 @@ class Lock:
     root around the head's vertical axis, degrees: 0 straight in front, 180 straight behind) and ``joined``
     (bool per vertex: it came from a crumb that joined the lock, see MIN_LOCK_AREA). The chain's spine
     skips the ``joined`` vertices; they only take its weights. ``areas`` (m² per vertex, a welded vertex's
-    area shared among its points) weighs the spine; None weighs every vertex alike."""
+    area shared among its points) weighs the spine; None weighs every vertex alike. ``measured`` (bool per
+    vertex) marks the vertices whose distance was measured along the lock from its roots, the others being
+    joined or out of their reach; None when that isn't known."""
 
-    __slots__ = ("vertices", "distance", "area", "root", "whole", "angle", "joined", "areas")
+    __slots__ = ("vertices", "distance", "area", "root", "whole", "angle", "joined", "areas", "measured")
 
-    def __init__(self, vertices, distance, area, root, whole, angle, joined, areas=None):
+    def __init__(self, vertices, distance, area, root, whole, angle, joined, areas=None, measured=None):
         self.vertices = vertices
         self.distance = distance
         self.area = area
@@ -139,6 +141,7 @@ class Lock:
         self.angle = angle
         self.joined = joined
         self.areas = areas
+        self.measured = measured
 
 
 def _dijkstra(count, edges, lengths, sources):
@@ -335,7 +338,8 @@ def find_locks(points, tris, rig, *, hang_start=0.025, hang_length=0.07, weld=No
     within = (owner[edges[:, 0]] == owner[edges[:, 1]]) & (owner[edges[:, 0]] >= 0) & ~joined[edges[:, 0]] \
         & ~joined[edges[:, 1]]
     distance, _source = _dijkstra(count, edges[within], lengths[within], np.flatnonzero(is_lock_root))
-    distance = np.where(np.isfinite(distance), distance, region_distance)
+    measured = np.isfinite(distance)
+    distance = np.where(measured, distance, region_distance)
     point_owner = owner[weld]
     by_owner = np.argsort(point_owner, kind='stable')
     bounds = np.searchsorted(point_owner[by_owner], np.arange(len(drafts) + 1))
@@ -349,7 +353,7 @@ def find_locks(points, tris, rig, *, hang_start=0.025, hang_length=0.07, weld=No
         angle = _angle(rig, root)
         whole = drafts[index][2]
         locks.append(Lock(vertices, lock_distance, float(sizes[index]), root, whole, angle, crumb,
-                          point_area[vertices]))
+                          point_area[vertices], measured[weld[vertices]] & ~crumb))
     # Mirrored locks have the same angle but for float noise, which mustn't decide their order (chain names
     # come from it): the lower root X first.
     locks.sort(key=lambda lock: (round(lock.angle, 6), lock.root[0]))
@@ -452,13 +456,42 @@ def _roots(lock):
     return roots if len(roots) else own[[int(np.argmin(lock.distance[own]))]]
 
 
-def _merge(target, small, mesh, points, rig):
-    """The lock ``small`` merged into ``target`` (`Lock`s) on ``mesh`` (`_welded`): both locks' vertices
-    and area, the target's kind of lock (``whole``). The roots of both are the merged lock's roots: its root
-    is their area-weighted mean, and its distances are measured again from them along the hair of both. The
-    target's own vertices they don't reach keep their distance, as find_locks measured it; the small lock's
-    (another loose part) join like a crumb. Crumbs are measured in a straight line from the new root."""
+def _graph(mesh):
+    """The edges of ``mesh`` (`_welded`) by node: (ptr, to, edge), node v's neighbours being to[ptr[v]:ptr[v + 1]]
+    along the mesh's edges edge[ptr[v]:ptr[v + 1]]."""
+    _weld, count, _rest, _tris, edges = mesh
+    a = np.concatenate((edges[:, 0], edges[:, 1]))
+    order = np.argsort(a, kind='stable')
+    to = np.concatenate((edges[:, 1], edges[:, 0]))[order]
+    edge = np.concatenate((np.arange(len(edges)), np.arange(len(edges))))[order]
+    return np.searchsorted(a[order], np.arange(count + 1)), to, edge
+
+
+def _edges_from(graph, nodes, inside):
+    """The numbers of the edges (`_graph`) from ``nodes`` (unique) to nodes where ``inside`` (bool per node)
+    is set, in no order; an edge between two of ``nodes`` comes twice."""
+    ptr, to, edge = graph
+    starts = ptr[nodes]
+    counts = ptr[nodes + 1] - starts
+    at = np.repeat(starts - np.cumsum(counts) + counts, counts) + np.arange(int(counts.sum()))
+    return edge[at[inside[to[at]]]]
+
+
+def _merge(target, small, mesh, points, rig, graph=None):
+    """The lock ``small`` merged into ``target`` (`Lock`s) on ``mesh`` (`_welded`, with its `_graph`, found
+    here when None): both locks' vertices and area, the target's kind of lock (``whole``). The roots of both
+    are the merged lock's roots: its root is their area-weighted mean, and its distances are measured again
+    from them along the hair of both, so the small lock's own vertices are measured from its own roots when
+    it is another loose part. Vertices of the target those roots don't reach keep their distance, as
+    find_locks measured it; those of the small lock join like a crumb. Crumbs are measured in a straight line
+    from the new root.
+
+    When the two locks share no edge (separate loose parts), each one's distances from its own roots stand
+    as they are; otherwise they are measured again on the merged lock's own part of the mesh, not the whole
+    mesh. Both give the same distances: a merge runs in time with the size of the locks, not of the hair."""
     weld, count, rest, _tris, edges = mesh
+    if graph is None:
+        graph = _graph(mesh)
     vertices = np.concatenate((target.vertices, small.vertices))
     order = np.argsort(vertices, kind='stable')
     vertices = vertices[order]
@@ -472,17 +505,30 @@ def _merge(target, small, mesh, points, rig):
     weight = (np.ones(len(vertices)) if areas is None else areas)[roots] + 1e-12
     root = np.average(points[vertices[roots]], axis=0, weights=weight)
     nodes = weld[vertices]
-    free = np.zeros(count, dtype=bool)
-    free[nodes[~joined]] = True
-    inside = free[edges[:, 0]] & free[edges[:, 1]]
-    lengths = np.linalg.norm(rest[edges[inside, 0]] - rest[edges[inside, 1]], axis=1)
-    measured, _source = _dijkstra(count, edges[inside], lengths, np.unique(nodes[roots]))
-    measured = measured[nodes]
-    reached = ~joined & np.isfinite(measured)
-    distance[reached] = measured[reached]
+    own = ~joined
+    target_free = np.zeros(count, dtype=bool)
+    target_free[weld[target.vertices[~target.joined]]] = True
+    small_free = np.unique(weld[small.vertices[~small.joined]])
+    if target.measured is not None and small.measured is not None \
+            and not len(_edges_from(graph, small_free, target_free)):
+        # Nothing joins the two: measured from the roots of both, each keeps its distances from its own.
+        reached = np.concatenate((target.measured, small.measured))[order] & own
+    else:
+        free_nodes = np.unique(nodes[own])
+        free = target_free
+        free[small_free] = True
+        sub = np.unique(_edges_from(graph, free_nodes, free))
+        lengths = np.linalg.norm(rest[edges[sub, 0]] - rest[edges[sub, 1]], axis=1)
+        local, _source = _dijkstra(len(free_nodes), np.searchsorted(free_nodes, edges[sub]).reshape(-1, 2), lengths,
+                                   np.searchsorted(free_nodes, np.unique(nodes[roots])))
+        measured = np.full(len(vertices), math.inf)
+        measured[own] = local[np.searchsorted(free_nodes, nodes[own])]
+        reached = own & np.isfinite(measured)
+        distance[reached] = measured[reached]
     joined = joined | (from_small & ~reached)
     distance[joined] = np.linalg.norm(points[vertices[joined]] - root, axis=1)
-    return Lock(vertices, distance, target.area + small.area, root, target.whole, _angle(rig, root), joined, areas)
+    return Lock(vertices, distance, target.area + small.area, root, target.whole, _angle(rig, root), joined, areas,
+                reached)
 
 
 def plan_rig(points, tris, rig, *, hang_start=0.025, hang_length=0.07, weld=None, max_bones=MAX_HAIR_BONES):
@@ -498,16 +544,34 @@ def plan_rig(points, tris, rig, *, hang_start=0.025, hang_length=0.07, weld=None
     locks = find_locks(points, tris, rig, hang_start=hang_start, hang_length=hang_length, weld=mesh[0])
     planned = [(lock, plan_chain(points, lock)) for lock in locks]
     planned = [(lock, chain) for lock, chain in planned if chain is not None]
-    while len(planned) > 1 and sum(len(chain.joints) for _lock, chain in planned) > max_bones:
-        small = int(np.argmin([lock.area for lock, _chain in planned]))
-        roots = np.array([lock.root for lock, _chain in planned])
+    # The locks stay in their places in ``planned``, the merged ones marked gone (not ``alive``), so the
+    # smallest and the nearest are the first ones in the same order as among the locks left.
+    alive = np.ones(len(planned), dtype=bool)
+    areas = np.array([lock.area for lock, _chain in planned], dtype=np.float64)
+    roots = np.array([lock.root for lock, _chain in planned], dtype=np.float64).reshape(-1, 3)
+    left = len(planned)
+    bones = sum(len(chain.joints) for _lock, chain in planned)
+    graph = _graph(mesh) if left > 1 and bones > max_bones else None
+    while left > 1 and bones > max_bones:
+        small = int(np.argmin(np.where(alive, areas, math.inf)))
         gap = np.linalg.norm(roots - roots[small], axis=1)
         gap[small] = math.inf
+        gap[~alive] = math.inf
         into = int(np.argmin(gap))
-        merged = _merge(planned[into][0], planned[small][0], mesh, points, rig)
-        planned[into] = (merged, plan_chain(points, merged))
-        del planned[small]
-        planned = [(lock, chain) for lock, chain in planned if chain is not None]
+        merged = _merge(planned[into][0], planned[small][0], mesh, points, rig, graph)
+        chain = plan_chain(points, merged)
+        bones -= len(planned[into][1].joints) + len(planned[small][1].joints)
+        planned[into] = (merged, chain)
+        alive[small] = False
+        left -= 1
+        if chain is None:
+            alive[into] = False
+            left -= 1
+        else:
+            bones += len(chain.joints)
+            areas[into] = merged.area
+            roots[into] = merged.root
+    planned = [pair for pair, keep in zip(planned, alive) if keep]
     # A merged lock's root moved: back in name order, as find_locks sorts.
     planned.sort(key=lambda pair: (round(pair[0].angle, 6), pair[0].root[0]))
     return [chain for _lock, chain in planned]
