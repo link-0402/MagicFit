@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Headless tests for the hair rig Hair Weights builds for the hair itself (Own Skeleton): its locks.
+"""Headless tests for the hair rig Hair Weights builds for the hair itself (Own Skeleton): its locks, and the
+chains planned on them (kinds, joints, the bone budget).
 
 Run from the repository root:
     blender -b --factory-startup --python tests/test_hair_rig_core.py
@@ -83,6 +84,60 @@ def one_piece_long_hair():
                                np.full(len(tops), tops[:, 2].mean() - 0.40)))
     co, tris, (cap_ids, sheet_ids) = join([(cap, faces), sheet(tops, bottoms)])
     return co, tris, {"cap": cap_ids, "sheet": sheet_ids}
+
+
+def long_hair():
+    """`hair.parts(long=True)` as one mesh: (points, triangles, part index of each point, part names)."""
+    named = hair.parts(long=True)
+    co, tris, ranges = join([(verts, faces) for _name, verts, faces in named])
+    part = np.zeros(len(co), dtype=np.int64)
+    for index, indices in enumerate(ranges):
+        part[indices] = index
+    return co, tris, part, [name for name, _verts, _faces in named]
+
+
+def bangs_hair():
+    """The scalp cap and one 4 cm bangs strip from the forehead's hairline, hanging forward and down 12 cm,
+    clear of the forehead (its hanging share passes LOCK_START 2 cm down and is 0.57 at the end):
+    (points, triangles, {"cap": indices, "bangs": indices})."""
+    co, tris, (cap_ids, bangs_ids) = join([hair.cap(), hair.strip((0.0, -0.10, 1.625), (0.0, -0.19, 1.54), 0.04,
+                                                                   (1.0, 0.0, 0.0))])
+    return co, tris, {"cap": cap_ids, "bangs": bangs_ids}
+
+
+def spine_length(co, lock):
+    line = hairrig.spine(co, lock)
+    return float(np.linalg.norm(np.diff(line, axis=0), axis=1).sum())
+
+
+def lock_of(chain, locks):
+    """The lock (of `find_locks`) a chain was planned from: the one with its vertices."""
+    return next((lock for lock in locks if np.array_equal(lock.vertices, chain.vertices)), None)
+
+
+def along(line, point):
+    """How far along the polyline ``line`` its closest point to ``point`` is."""
+    a, b = line[:-1], line[1:]
+    seg = b - a
+    lengths = np.linalg.norm(seg, axis=1)
+    t = np.clip(((point - a) * seg).sum(1) / np.maximum(lengths ** 2, 1e-18), 0.0, 1.0)
+    gap = np.linalg.norm(a + seg * t[:, None] - point, axis=1)
+    best = int(np.argmin(gap))
+    return float(np.concatenate(([0.0], np.cumsum(lengths)))[best] + t[best] * lengths[best])
+
+
+def main_part(chain, part, area):
+    """The part holding most of a chain's area."""
+    return int(np.argmax(np.bincount(part[chain.vertices], area[chain.vertices])))
+
+
+def describe_chains(chains, co, locks):
+    for chain in chains:
+        lock = lock_of(chain, locks)
+        print("      chain: {:9s} {:d} bones, angle {:5.1f}, area {:.4f} m2, whole {!s:5}, spine {:s}, root {}, "
+              "tip {}".format(chain.kind, len(chain.joints), chain.angle, chain.area, chain.whole,
+                              "{:.3f} m".format(spine_length(co, lock)) if lock is not None else "(merged)",
+                              np.round(chain.joints[0], 3), np.round(chain.tip, 3)))
 
 
 def phi(points, model_rig):
@@ -283,9 +338,147 @@ def test_parted_locks():
             "hanging straight down" if spread is None else "parting left and right", expected, len(locks)))
 
 
+def test_long_hair_chains():
+    model_rig = rig()
+    co, tris, part, names = long_hair()
+    started = time.perf_counter()
+    chains = hairrig.plan_rig(co, tris, model_rig)
+    print("      plan_rig: {:.3f} s for {:d} vertices".format(time.perf_counter() - started, len(co)))
+    locks = hairrig.find_locks(co, tris, model_rig)
+    describe_chains(chains, co, locks)
+    check(all(lock_of(chain, locks) is not None for chain in chains),
+          "long hair chains: each from one lock (nothing over the budget to merge)")
+    planned = [lock for lock in locks if lock_of(lock, chains) is not None]
+    check([lock_of(chain, locks) for chain in chains] == planned, "long hair chains: in the locks' order")
+    area = hairing.vertex_areas(co, tris)
+    mains = [names[main_part(chain, part, area)] for chain in chains]
+    for name in ("lock_l", "lock_r"):
+        mine = [chain for chain, m in zip(chains, mains) if m == name]
+        length = spine_length(co, lock_of(mine[0], locks)) if len(mine) == 1 else math.nan
+        check(len(mine) == 1 and mine[0].kind == "side" and 0.20 <= length <= 0.26 and len(mine[0].joints) == 3,
+              "long hair chains: {:s} is one side chain, its spine 0.20-0.26 m, 3 bones ({})".format(
+                  name, [(chain.kind, len(chain.joints)) for chain in mine] + [round(length, 3)]))
+    mine = [chain for chain, m in zip(chains, mains) if m == "ponytail"]
+    length = spine_length(co, lock_of(mine[0], locks)) if len(mine) == 1 else math.nan
+    check(len(mine) == 1 and mine[0].kind == "ponytail" and length >= 0.36 and len(mine[0].joints) in (4, 5),
+          "long hair chains: the ponytail is one ponytail chain, its spine 0.36 m or more, 4 or 5 bones ({})".format(
+              [(chain.kind, len(chain.joints)) for chain in mine] + [round(length, 3)]))
+    # The fixture's bangs barely hang: their crumbs join the temple locks (test_long_hair_locks), so there
+    # are no others here; test_bangs_chain has bangs that hang.
+    others = [(m, chain.kind, len(chain.joints)) for chain, m in zip(chains, mains)
+              if m not in ("lock_l", "lock_r", "ponytail")]
+    check(all(other == ("bangs", "bangs", 2) for other in others),
+          "long hair chains: every other chain is a bangs strip's, bangs with 2 bones ({})".format(others))
+
+
+def test_bangs_chain():
+    model_rig = rig()
+    co, tris, parts = bangs_hair()
+    chains = hairrig.plan_rig(co, tris, model_rig)
+    describe_chains(chains, co, hairrig.find_locks(co, tris, model_rig))
+    check(len(chains) == 1 and chains[0].kind == "bangs" and len(chains[0].joints) == 2,
+          "bangs: a strip hanging over the forehead is one bangs chain of 2 bones ({})".format(
+              [(chain.kind, len(chain.joints)) for chain in chains]))
+    check(len(chains) == 1 and np.isin(chains[0].vertices, parts["bangs"]).all(), "bangs: ...made of the strip")
+
+
+def chain_fixtures():
+    """(name, points, triangles) of the hair the chain tests plan."""
+    co, tris, _part, _names = long_hair()
+    one_co, one_tris, _parts = one_piece_long_hair()
+    bangs_co, bangs_tris, _parts = bangs_hair()
+    return (("long hair", co, tris), ("one piece", one_co, one_tris), ("bangs", bangs_co, bangs_tris))
+
+
+def test_pivot_at_root():
+    model_rig = rig()
+    for name, co, tris in chain_fixtures():
+        locks = hairrig.find_locks(co, tris, model_rig)
+        chains = hairrig.plan_rig(co, tris, model_rig)
+        gaps = []
+        for chain in chains:
+            lock = lock_of(chain, locks)
+            first = chain.joints[0]
+            gaps.append((float(np.linalg.norm(first - lock.root)), abs(float(first[2] - lock.root[2])))
+                        if lock is not None else (math.inf, math.inf))
+        check(chains and all(gap <= 0.02 and height <= 0.02 for gap, height in gaps),
+              "pivot: {:s}: every chain's first joint at its lock's root, at its height ({})".format(
+                  name, [(round(gap, 4), round(height, 4)) for gap, height in gaps]))
+
+
+def test_even_joints():
+    model_rig = rig()
+    for name, co, tris in chain_fixtures():
+        locks = hairrig.find_locks(co, tris, model_rig)
+        chains = hairrig.plan_rig(co, tris, model_rig)
+        spreads, short = [], []
+        for chain in chains:
+            lock = lock_of(chain, locks)
+            if lock is None:
+                spreads.append(math.inf)
+                continue
+            line = hairrig.spine(co, lock)
+            length = float(np.linalg.norm(np.diff(line, axis=0), axis=1).sum())
+            at = [along(line, joint) for joint in chain.joints] + [along(line, chain.tip)]
+            gaps = np.diff(at)
+            spreads.append(float((gaps.max() - gaps.min()) / gaps.max()))
+            short.append(bool(at[-2] < length - 1e-6 and np.linalg.norm(chain.tip - line[-1]) < 1e-9
+                              and np.linalg.norm(chain.tip - chain.joints[-1]) > 0.01))
+        check(chains and all(spread < 0.25 for spread in spreads) and all(short),
+              "even joints: {:s}: joint gaps along the spine within 25 %, the last joint short of the tip ({}, {})"
+              .format(name, [round(spread, 3) for spread in spreads], short))
+
+
+def test_kinds():
+    for angle, length, whole, kind in ((10, 0.1, False, "bangs"), (10, 0.3, False, "side"), (80, 0.5, False, "side"),
+                                       (150, 0.4, True, "ponytail"), (150, 0.4, False, "back"),
+                                       (150, 0.2, True, "back")):
+        got = hairrig.chain_kind(angle, length, whole)
+        check(got == kind, "kinds: ({}, {}, {}) is {:s} ({:s})".format(angle, length, whole, kind, got))
+    check(set(hairrig.KINDS) == {"bangs", "side", "back", "ponytail"}, "kinds: the four kinds")
+
+
+def test_budget():
+    model_rig = rig()
+    co, tris, _parts = one_piece_long_hair()
+    free = hairrig.plan_rig(co, tris, model_rig)
+    chains = hairrig.plan_rig(co, tris, model_rig, max_bones=8)
+    describe_chains(chains, co, hairrig.find_locks(co, tris, model_rig))
+    total = sum(len(chain.joints) for chain in chains)
+    check(sum(len(chain.joints) for chain in free) > 8, "budget: the sheet takes more than 8 bones unbudgeted ({:d})"
+          .format(sum(len(chain.joints) for chain in free)))
+    check(chains and total <= 8 and all(len(chain.joints) >= 2 for chain in chains),
+          "budget: at most 8 bones, at least 2 per chain ({})".format([len(chain.joints) for chain in chains]))
+    check(np.array_equal(np.sort(np.concatenate([chain.vertices for chain in chains])),
+                         np.sort(np.concatenate([chain.vertices for chain in free]))),
+          "budget: merged chains keep every vertex of the hair")
+    check(len(set(np.concatenate([chain.vertices for chain in chains]).tolist()))
+          == sum(len(chain.vertices) for chain in chains), "budget: no vertex in two chains")
+    keys = [(round(chain.angle, 6), chain.joints[0][0]) for chain in chains]
+    check(keys == sorted(keys), "budget: the chains stay in name order")
+    check(abs(sum(chain.area for chain in chains) - sum(chain.area for chain in free)) <= 1e-9,
+          "budget: merged chains keep the hair's area")
+
+
+def test_moved_hair():
+    model_rig = rig()
+    co, tris, _part, _names = long_hair()
+    offset = np.array((0.3, 0.1, 0.05))
+    chains = hairrig.plan_rig(co, tris, model_rig)
+    moved = hairrig.plan_rig(co + offset, tris, model_rig.moved(offset))
+    check(chains and len(moved) == len(chains) and all(
+        a.kind == b.kind and len(a.joints) == len(b.joints)
+        and np.allclose(a.joints, b.joints + offset, rtol=0.0, atol=1e-6)
+        and np.allclose(a.tip, b.tip + offset, rtol=0.0, atol=1e-6) for a, b in zip(moved, chains)),
+        "moved hair: the same kinds and bone counts, the joints moved by the offset ({} vs {})".format(
+            [(chain.kind, len(chain.joints)) for chain in moved],
+            [(chain.kind, len(chain.joints)) for chain in chains]))
+
+
 def main():
     for test in (test_long_hair_locks, test_one_piece_long_hair, test_separate_strands, test_crumbs,
-                 test_parted_locks):
+                 test_parted_locks, test_long_hair_chains, test_bangs_chain, test_pivot_at_root, test_even_joints,
+                 test_kinds, test_budget, test_moved_hair):
         print("==", test.__name__)
         try:
             test()
