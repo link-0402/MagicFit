@@ -1015,7 +1015,7 @@ class MAGIC_FIT_UL_hair_chains(bpy.types.UIList):
         parsed = hairrig._parse(bones[0]) if bones else None
         number = parsed[0] if parsed is not None else index + 1
         split = layout.split(factor=0.55)
-        split.label(text="Chain {:02d}  {:d} bones".format(number, len(bones)))
+        split.label(text="Chain {:02d}  {:s}".format(number, hairrig.counted(len(bones), "bone")))
         split.prop(item, "kind", text="", emboss=True)
 
 
@@ -1115,8 +1115,9 @@ class VIEW3D_PT_hair_weights_sidebar(tabs.TabPanel, bpy.types.Panel):
         rig_state = armature.magic_fit_hair_rig
         bones = sum(len(_chain_bones(chain)) for chain in rig_state.chains)
         box = layout.box().column()
-        box.label(text="{:d} chains, {:d} bones (at most {:d})".format(
-            len(rig_state.chains), bones, hairrig.MAX_HAIR_BONES), icon='ARMATURE_DATA')
+        box.label(text="{:s}, {:s} (at most {:d})".format(
+            hairrig.counted(len(rig_state.chains), "chain"), hairrig.counted(bones, "bone"), hairrig.MAX_HAIR_BONES),
+            icon='ARMATURE_DATA')
         box.template_list("MAGIC_FIT_UL_hair_chains", "", rig_state, "chains", rig_state, "active", rows=4)
         op = box.operator(MAGIC_FIT_OT_hair_weights.bl_idname, text="Rebuild Chains", icon='FILE_REFRESH')
         op.rebuild = True

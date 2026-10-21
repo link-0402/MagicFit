@@ -2476,6 +2476,7 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
                                                          or obj.magic_fit_hair.race != race)]
         unreached = []   # those of them left out of chains the user edited
         before = armature.magic_fit_hair_rig.bones_hash
+        old_bones = {bone.name for bone in armature.data.bones if bone.name.startswith(hairrig.BONE_PREFIX)}
         try:
             added = hairing.ensure_bones(context, armature, rig, wanted)
             # A rig without hair bones (nothing hung when it was built, or the user deleted them all) has no
@@ -2569,10 +2570,11 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
             if built is not None and not len(chains):
                 self.report({'INFO'}, "Nothing hangs far enough from the head to swing: no chains built")
             elif built is not None:
-                self.report({'INFO'}, "Built {:d} chains with {:d} bones for the hair".format(len(chains), bone_count))
+                self.report({'INFO'}, "Built {:s} with {:s} for the hair".format(
+                    hairrig.counted(len(chains), "chain"), hairrig.counted(bone_count, "bone")))
             else:
-                self.report({'INFO'}, "Used the hair's own skeleton on '{:s}': {:d} chains, {:d} bones".format(
-                    armature.name, len(chains), bone_count))
+                self.report({'INFO'}, "Used the hair's own skeleton on '{:s}': {:s}, {:s}".format(
+                    armature.name, hairrig.counted(len(chains), "chain"), hairrig.counted(bone_count, "bone")))
             if renamed:
                 self.report({'INFO'}, "Renamed {:s}".format(", ".join(renamed)))
             for obj in unreached:
@@ -2587,7 +2589,20 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
         if number:
             self.report({'INFO'}, "Tagged the hair with its EST entry {:d} (custom property {:s}) for export".format(
                 number, hairing.EST_PROPERTY))
-        other = [part for part in parts if not hairing.same_skeleton(part, number, custom) or rebuilt]
+        other = [part for part in parts if not hairing.same_skeleton(part, number, custom)]
+        # Parts with the hair's own skeleton whose chains were built again under their weights.
+        stale = [part for part in parts if hairing.same_skeleton(part, number, custom) and rebuilt]
+        if stale:
+            self.report({'WARNING'}, "The chains were rebuilt: give {:s} Hair Weights again".format(
+                ", ".join("'{:s}'".format(part.name) for part in stale)))
+        if built is not None:
+            # Building the chains for this race takes away the bones of parts weighted for another one.
+            lost = [part for part in hairing.other_race_parts(context, targets, armature, race)
+                    if any(group.name in old_bones for group in part.vertex_groups)]
+            if lost:
+                self.report({'WARNING'}, "{:s} used this armature's own skeleton for another race: give {:s} Hair "
+                            "Weights again".format(", ".join("'{:s}'".format(part.name) for part in lost),
+                                                   "them" if len(lost) > 1 else "it"))
         if other:
             self.report({'WARNING'}, "The hair's other part{:s} {:s} still use{:s} another hair skeleton: give {:s} "
                         "Hair Weights with {:s} too (or select all parts and use the arrow)".format(

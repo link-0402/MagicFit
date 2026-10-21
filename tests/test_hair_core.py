@@ -907,6 +907,8 @@ def test_nothing_hangs():
     check(result == {'FINISHED'} and own_bones(armature) and chains
           and any(text.startswith("Built ") for text in reports),
           "nothing hangs: hair hanging later gets chains without Rebuild ({:d} bones)".format(len(own_bones(armature))))
+    expected = "Built 1 chain with {:d} bones for the hair".format(len(own_bones(armature)))
+    check(chains and len(chains) == 1 and expected in reports, "nothing hangs: reports '{:s}'".format(expected))
     hair.clear_scene()
     use_settings(hair_skeleton_mode='PICK', hair_skeleton=0)
     obj = strips_object("Cap", hair.cap())
@@ -1004,8 +1006,34 @@ def test_custom_parts():
           "own parts: parts with the hair's own skeleton match")
     # Rebuilt, the chains change under the other part's weights.
     result, reports = hair_weights_reports(rebuild=True)
-    check(any(text.startswith("The hair's other part 'Bangs' still uses another hair skeleton") for text in reports),
-          "own parts: after a rebuild the other part is named")
+    check("The chains were rebuilt: give 'Bangs' Hair Weights again" in reports
+          and not [text for text in reports if text.startswith("The hair's other part")],
+          "own parts: after a rebuild the other part is asked to get Hair Weights again")
+
+
+def test_custom_other_race_parts():
+    # A part weighted with the armature's own skeleton for c0201, another part on the same armature for
+    # c0801: the chains are built for c0801, taking the first part's bones away. It is named.
+    obj, _parts, _settings = own_skeleton_hair()
+    hair_weights_reports()
+    armature = hair_armature(obj)
+    if armature is None:
+        check(False, "other race: the hair got an armature")
+        return
+    second = bangs_mesh()
+    hairing.add_armature_modifier(second, armature)
+    obj.select_set(False)
+    bpy.context.view_layer.objects.active = second
+    second.select_set(True)
+    use_settings(hair_skeleton_mode='CUSTOM', hair_race='c0801')
+    result, reports = hair_weights_reports()
+    check(result == {'FINISHED'} and hair_armature(second) == armature and armature.magic_fit_hair_rig.race == 'c0801',
+          "other race: the second part's chains are built for c0801 on the same armature")
+    check("'Hair' used this armature's own skeleton for another race: give it Hair Weights again" in reports,
+          "other race: the part weighted for c0201 is named")
+    # Weighted again for c0801, nobody else uses the skeleton for another race: nothing to say.
+    result, reports = hair_weights_reports()
+    check(not [text for text in reports if "for another race" in text], "other race: ...once only")
 
 
 def parts_object(name, wanted):
@@ -1056,6 +1084,8 @@ def test_custom_parts_one_after_another():
             check(warning in reports, "one after another (edited): says the ponytail may hang from no chain")
             continue
         check(warning not in reports, "one after another: no warning while the bones are as they were built")
+        check("The chains were rebuilt: give 'Hair' Hair Weights again" in reports,
+              "one after another: the first part is asked to get Hair Weights again")
         chain = next((bones for kind, bones in rig_chains(armature) if kind == 'ponytail'), None)
         check(chain is not None, "one after another: the chains are built again with a ponytail chain ({})".format(
             rig_chains(armature)))
@@ -1081,7 +1111,8 @@ def main():
                      test_existing_armature, test_customize_plus, test_armature_out_of_view_layer, test_parts,
                      test_selected, test_replace, test_masks, test_pick, test_brush, test_readiness,
                      test_custom_button, test_custom_reuses_rig, test_race_change_rebuilds, test_nothing_hangs,
-                     test_custom_brush, test_custom_view_layer, test_custom_parts, test_custom_parts_one_after_another):
+                     test_custom_brush, test_custom_view_layer, test_custom_parts, test_custom_parts_one_after_another,
+                     test_custom_other_race_parts):
             print("==", test.__name__)
             try:
                 test()

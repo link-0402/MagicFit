@@ -305,8 +305,16 @@ def steps():
     bones = sum(len([name for name in chain.bones.split(",") if name]) for chain in rig_state.chains) if count else 0
     check("{:d} chains, {:d} bones (at most 48)".format(count, bones) in texts,
           "own skeleton: the box counts the chains and bones")
-    check(any(text.startswith("Chain 01  ") and text.endswith(" bones") for text in texts),
+    first_bones = len([name for name in rig_state.chains[0].bones.split(",") if name]) if count else 0
+    check("Chain 01  {:d} bones".format(first_bones) in texts,
           "own skeleton: the list's first row is Chain 01 with its bones")
+    # A chain the user left one bone in.
+    single = []
+    tool.MAGIC_FIT_UL_hair_chains.draw_item(SimpleNamespace(layout_type='DEFAULT'), bpy.context, Recorder(single),
+                                            rig_state, SimpleNamespace(bones="j_ex_hair_07_a", kind='back'), 0,
+                                            rig_state, "active", 0)
+    check("Chain 07  1 bone" in [text for _call, text, _args, _item in single if text],
+          "own skeleton: a chain of one bone reads 1 bone")
     check(any(call == 'prop' and args[1:] == ("kind",) for call, _text, args, _item in drawn),
           "own skeleton: the row has the kind dropdown")
     check(any(call == 'template_list' and args[0] == "MAGIC_FIT_UL_hair_chains" for call, _text, args, _item in drawn),

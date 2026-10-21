@@ -1371,6 +1371,22 @@ def hair_parts(context, targets, armature, race):
     return result
 
 
+def other_race_parts(context, targets, armature, race):
+    """Meshes other than ``targets`` given Hair Weights with ``armature``'s own skeleton (`hairrig`) for a
+    race other than ``race``: building the armature's chains for ``race`` takes their bones away."""
+    data = {target.data.as_pointer() for target in targets}
+    result = []
+    for obj in context.scene.objects:
+        if obj.type != 'MESH' or obj.data.as_pointer() in data:
+            continue
+        state = getattr(obj, "magic_fit_hair", None)
+        if state is None or not state.custom or state.skeleton < 0 or not state.race or state.race == race:
+            continue
+        if weighted_armature(obj) == armature:
+            result.append(obj)
+    return result
+
+
 def same_skeleton(part, number, custom):
     """Whether the hair's other ``part`` (`hair_parts`) was weighted with the hair skeleton ``number``, or
     with the hair's own skeleton when ``custom``: parts with their own skeleton all share the armature's

@@ -693,6 +693,11 @@ def rig_edited(armature_object):
     return not stored or stored != bones_hash(armature_object)
 
 
+def counted(count, word):
+    """``count`` ``word``s, as UI and report texts count chains and bones: "1 chain", "2 chains"."""
+    return "{:d} {:s}{:s}".format(count, word, "" if count == 1 else "s")
+
+
 def _fill_state(armature_object, race, chains):
     """Fill the rig state of ``armature_object`` with ``race``, ``chains`` ((kind, bone names) each) and the
     hash of its bones (`bones_hash`), and write RIG_PROPERTY."""
