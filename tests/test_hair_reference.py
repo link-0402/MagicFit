@@ -103,6 +103,20 @@ def test_scalp_symmetric():
           "scalp: c0801 symmetric left to right (differs by {:.3f} at most)".format(difference))
 
 
+def test_scalp_floor():
+    """Nothing lower than the scalp goes in its direction is scalp: below the lowest scalp head point of its bin
+    (by more than SCALP_BELOW) a point's share is 0, however its nearest head points score."""
+    head = hairing.Reference.get().head("c0801")
+    on = head.scalp_share >= hairing.SCALP_HALF
+    lowest = np.flatnonzero(on)[np.argmin(head.surface[on, 2])]
+    point = head.surface[lowest]
+    check(head.scalp(point[None])[0] > 0.0 and head.scalp((point - (0.0, 0.0, 0.005))[None])[0] > 0.0,
+          "scalp floor: the lowest scalp point keeps its share, and so does 5 mm below it")
+    check(head.scalp((point - (0.0, 0.0, 0.02))[None])[0] == 0.0, "scalp floor: 2 cm below it, none")
+    check(np.allclose(head.axis, rig("c0801").by_name[hairing.HEAD].head[:2]),
+          "scalp floor: measured around the head bone's vertical axis")
+
+
 def test_maeve_must_haves():
     """On the real test hair: the fringe hangs, the cap and the back and side hairlines stay, and what lies on
     the neck hangs; by rows of the hair, each its area-weighted share hanging."""
@@ -162,7 +176,8 @@ def test_maeve_must_haves():
 def main():
     magic_fit.register()
     try:
-        for test in (test_decode, test_scalp_supported_races, test_scalp_symmetric, test_maeve_must_haves):
+        for test in (test_decode, test_scalp_supported_races, test_scalp_symmetric, test_scalp_floor,
+                     test_maeve_must_haves):
             print("==", test.__name__)
             try:
                 test()

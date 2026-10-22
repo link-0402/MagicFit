@@ -4,7 +4,7 @@ The head is the one Hair Weights uses (magic_fit/hair_reference.npz), so the hai
 real hair would: a scalp cap 1 cm off the head, bangs in front of the forehead, a lock at each temple
 hanging 25 cm, and a ponytail tube hanging 42 cm down the back. Each part is a loose part of one mesh,
 as game hair is. The mesh has no weights and no armature. `cap` and `ear` also make scalps and cat ears
-for other races' heads.
+for other races' heads, `patch` hair lying on them and `down_neck` hair hanging down their necks.
 """
 
 import math
@@ -44,12 +44,70 @@ def _onto_head(directions, gap, race=RACE):
     return middle + directions * hi[:, None], hi
 
 
-def cap(rings=10, segments=24, gap=0.01, race=RACE, reach=None):
-    """The scalp: the top of the head down to the ears, open over the face. With ``reach``, what stands
-    farther out from the skull's middle is left out (a Miqo'te head's cat ears)."""
+def top(race=RACE, x=0.0, y=0.0):
+    """The height of the top of the head of ``race`` at (``x``, ``y``) (bisection on the head's distance)."""
+    field = head(race)
+    lo, hi = center(race)[2], center(race)[2] + 0.3
+    for _ in range(40):
+        mid = 0.5 * (lo + hi)
+        if field.distance(np.array(((x, y, mid),)))[0] > 0.0:
+            hi = mid
+        else:
+            lo = mid
+    return hi
+
+
+def patch(polars, azimuths, gap, race=RACE):
+    """A sheet of hair lying ``gap`` off the head: a row per polar angle (degrees from the top, in order) and a
+    column per azimuth (degrees around the skull's middle, 0 straight behind, 180 in front), each vertex on its
+    ray from the middle. Returns (vertices, quads)."""
+    p = np.radians(np.repeat(np.asarray(polars, dtype=np.float64), len(azimuths)))
+    a = np.radians(np.tile(np.asarray(azimuths, dtype=np.float64), len(polars)))
+    points, _reach = _onto_head(np.column_stack((np.sin(p) * np.sin(a), np.sin(p) * np.cos(a), np.cos(p))), gap, race)
+    columns = len(azimuths)
+    quads = [(i * columns + j, i * columns + j + 1, (i + 1) * columns + j + 1, (i + 1) * columns + j)
+             for i in range(len(polars) - 1) for j in range(columns - 1)]
+    return points, quads
+
+
+def down_neck(tops, bottom, rows=20, gap=0.01, race=RACE):
+    """A sheet of hair hanging from the row ``tops`` (in order) straight down to height ``bottom``, ``rows``
+    rows, lying ``gap`` off the head and neck: each vertex pushed out from the neck's vertical axis (through
+    j_kubi) to ``gap`` off the head, and below the head model straight under the one above. The first row is
+    ``tops`` itself. Returns (vertices, quads)."""
+    field = head(race)
+    axis = hairing.Reference.get().rig(race, 0).by_name[hairing.NECK].head
+    tops = np.asarray(tops, dtype=np.float64)
+    columns = len(tops)
+    out = tops[:, :2] - axis[:2]
+    out /= np.linalg.norm(out, axis=1)[:, None]
+    verts = [tops]
+    for i in range(1, rows + 1):
+        z = tops[:, 2] + (bottom - tops[:, 2]) * i / rows
+        middle = np.column_stack((np.tile(axis[:2], (columns, 1)), z))
+        direction = np.column_stack((out, np.zeros(columns)))
+        lo, hi = np.zeros(columns), np.full(columns, 0.3)
+        for _ in range(40):
+            mid = 0.5 * (lo + hi)
+            outside = field.distance(middle + direction * mid[:, None]) > gap
+            hi = np.where(outside, mid, hi)
+            lo = np.where(outside, lo, mid)
+        row = middle + direction * hi[:, None]
+        # Where the axis lies outside the head too, there is no head here: straight under the row above.
+        below = field.distance(middle) >= gap
+        row[below, :2] = verts[-1][below, :2]
+        verts.append(row)
+    quads = [(i * columns + j, i * columns + j + 1, (i + 1) * columns + j + 1, (i + 1) * columns + j)
+             for i in range(rows) for j in range(columns - 1)]
+    return np.vstack(verts), quads
+
+
+def cap(rings=10, segments=24, gap=0.01, race=RACE, reach=None, lowest=100.0):
+    """The scalp: the top of the head down to the ears (``lowest`` degrees from the top), open over the face.
+    With ``reach``, what stands farther out from the skull's middle is left out (a Miqo'te head's cat ears)."""
     verts, faces, grid = [], [], {}
     for i in range(rings + 1):
-        polar = math.radians(8 + 92 * i / rings)   # from near the top down to ear height
+        polar = math.radians(8 + (lowest - 8) * i / rings)   # from near the top down to ear height
         for j in range(segments):
             azimuth = 2 * math.pi * j / segments
             d = np.array((math.sin(polar) * math.sin(azimuth), math.sin(polar) * math.cos(azimuth), math.cos(polar)))

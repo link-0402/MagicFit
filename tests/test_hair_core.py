@@ -936,16 +936,25 @@ def test_race_change_rebuilds():
     check(name is not None, "race change: a ponytail chain for c0201")
     if name is None:
         return
-    before = bone_head(armature, name)
+    before = [bone_head(armature, bones[0]) for _kind, bones in rig_chains(armature) if bones]
     use_settings(hair_skeleton_mode='CUSTOM', hair_race='c0801')
     result, reports = hair_weights_reports()
     data = json.loads(armature.get(hairrig.RIG_PROPERTY, "{}"))
     check(result == {'FINISHED'} and data.get("race") == 'c0801' and armature.magic_fit_hair_rig.race == 'c0801'
           and obj.magic_fit_hair.race == 'c0801', "race change: the rig is for c0801 now")
     check(any(text.startswith("Built ") for text in reports), "race change: the chains are built again")
-    name = ponytail_root(armature)
-    gap = float(np.linalg.norm(bone_head(armature, name) - before)) if name is not None else 0.0
-    check(gap > 0.001, "race change: the ponytail's first joint is placed for c0801's head ({:.4f} m away)".format(gap))
+    # A chain starts where its hair leaves the held hair, on a row of the mesh: on this coarse hair that is the
+    # same row on either head (the chains start where they did), so the chains are checked against those
+    # planned for c0801's head.
+    after = [bone_head(armature, bones[0]) for _kind, bones in rig_chains(armature) if bones]
+    co, tris = mesh_arrays(obj)
+    base = hairing.Reference.get().rig('c0801', 0)
+    plans = hairrig.plan_rig(co, tris, base.moved(hairing.armature_offset(armature, base)))
+    gap = max((float(np.linalg.norm(head - plan.joints[0])) for head, plan in zip(after, plans)), default=math.inf)
+    check(len(after) == len(plans) and gap < 1e-5, "race change: the chains are planned for c0801's head ({}, "
+          "{:.2e} m off; {:d} of them where they were for c0201)".format(
+              [kind for kind, _bones in rig_chains(armature)], gap,
+              sum(min(float(np.linalg.norm(head - old)) for old in before) < 1e-6 for head in after)))
 
 
 def test_nothing_hangs():
@@ -1166,9 +1175,11 @@ def test_custom_parts_one_after_another():
             rig_chains(armature)))
         if chain is None:
             continue
-        co, _tris = mesh_arrays(second)
+        co, part_tris = mesh_arrays(second)
         reference = hairing.Reference.get().rig('c0201', 0)
-        hanging = hairing.hanging_share(reference.head_distance(co), 0.025, 0.07) > hairrig.LOCK_START
+        # The hair that hangs (goes into locks), by the scalp and the part's cap depth.
+        hanging = hairrig._hanging(reference.scalp(co), reference.head_distance(co),
+                                   hairing.cap_depth(co, part_tris, reference))
         weights = hair.by_name(second)
         zero = np.zeros(len(co))
         own = sum((weights.get(name, zero) for name in chain), zero)[hanging]

@@ -206,6 +206,11 @@ SCORE_BODY_HAIR_HANDICAP = 0.08
 # nearest head points.
 SCALP_HALF = 0.65
 SCALP_NEIGHBOURS = 4
+# Nothing lower than the scalp goes is scalp: a point more than SCALP_BELOW (metres) below the lowest head point
+# with a share of at least SCALP_HALF in its direction (bins of SCALP_BIN degrees around the head's vertical
+# axis through j_kao) has a scalp share of 0.
+SCALP_BELOW = 0.01
+SCALP_BIN = 15.0
 # Hair over the scalp stands off it when it lies STAND_MARGIN farther out than the hair's cap depth (see
 # `cap_depth`), blending in over STAND_BLEND.
 STAND_MARGIN = 0.03
@@ -245,9 +250,10 @@ class HeadField:
     head, and from points spread over its surface beyond the grid's reach (12.7 cm). ``scalp_share`` gives
     each of those points its scalp share (0..1): the share of the game's hairstyles that hold hair there on
     the head, 0 on the front of the face (see tools/make_scalp_map.py); all 0 without a scalp map. `scalp` and
-    `scalp_gap` look the scalp up for any point."""
+    `scalp_gap` look the scalp up for any point. ``axis`` ((x, y), the head bone's) is the head's vertical axis
+    the scalp's lowest reach is measured around (SCALP_BELOW); None: the middle of the head points."""
 
-    def __init__(self, origin, step, grid, surface, scalp=None):
+    def __init__(self, origin, step, grid, surface, scalp=None, axis=None):
         self.origin = np.asarray(origin, dtype=np.float64)
         self.step = float(step)
         self.grid = np.asarray(grid, dtype=np.float32) / 1000.0
@@ -255,7 +261,21 @@ class HeadField:
         self.surface = np.asarray(surface, dtype=np.float64)
         self.scalp_share = (np.zeros(len(self.surface)) if scalp is None
                             else np.asarray(scalp, dtype=np.float64))
+        self.axis = self.surface[:, :2].mean(0) if axis is None else np.asarray(axis, dtype=np.float64)[:2]
+        # The lowest scalp point in each direction around the axis; -inf where none is (no limit).
+        self.scalp_floor = np.full(int(round(360.0 / SCALP_BIN)), -np.inf)
+        on = self.scalp_share >= SCALP_HALF
+        if on.any():
+            lowest = np.full(len(self.scalp_floor), np.inf)
+            np.minimum.at(lowest, self._bins(self.surface[on]), self.surface[on, 2])
+            self.scalp_floor = np.where(np.isfinite(lowest), lowest, -np.inf)
         self._tree = None
+
+    def _bins(self, points):
+        """The SCALP_BIN bin of each of ``points`` around the head's vertical axis (from straight behind, all
+        round)."""
+        angle = np.degrees(np.arctan2(points[:, 0] - self.axis[0], points[:, 1] - self.axis[1])) % 360.0
+        return np.minimum((angle / SCALP_BIN).astype(np.int64), len(self.scalp_floor) - 1)
 
     @staticmethod
     def _nearest(points, targets, count):
@@ -288,10 +308,12 @@ class HeadField:
 
     def scalp(self, points):
         """The scalp share at ``points``: the inverse-distance mean of their SCALP_NEIGHBOURS nearest head
-        points' shares."""
+        points' shares; 0 more than SCALP_BELOW below the lowest scalp point in their direction."""
+        points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
         index, distance = self._nearest(points, self.surface, SCALP_NEIGHBOURS)
         weight = 1.0 / np.maximum(distance, 1e-4)
-        return (self.scalp_share[index] * weight).sum(1) / weight.sum(1)
+        share = (self.scalp_share[index] * weight).sum(1) / weight.sum(1)
+        return np.where(points[:, 2] < self.scalp_floor[self._bins(points)] - SCALP_BELOW, 0.0, share)
 
     def scalp_gap(self, points, cap=0.0):
         """How far ``points`` are from the scalp beyond the hair's cap depth ``cap``: the straight distance to
@@ -367,7 +389,9 @@ class Reference:
             start = int(d["sdf_offset"][index])
             grid = d["sdf_data"][start:start + int(np.prod(shape))].reshape(shape)
             scalp = d["head_scalp"][index] if "head_scalp" in d else None
-            self._heads[race] = HeadField(d["sdf_origin"][index], step, grid, d["head_points"][index], scalp)
+            head = next((bone for bone in self._base.get(race, ()) if bone.name == HEAD), None)
+            self._heads[race] = HeadField(d["sdf_origin"][index], step, grid, d["head_points"][index], scalp,
+                                          None if head is None else head.head[:2])
 
     def skeletons(self, race):
         """The hair skeleton numbers the game has for ``race``, ascending."""

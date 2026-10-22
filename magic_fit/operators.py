@@ -2486,17 +2486,19 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
             # A mesh joining chains built without it gets them built again over the whole hair, unless the
             # user edited the bones: those are kept, and the mesh hangs from them as they are.
             again = bool(joining) and have and not hairrig.rig_edited(armature)
+            # How far the hair's cap lies off the head: measured over the whole hair when its chains are built.
+            cap = None
             if custom and joining and have and not again:
                 unreached = [obj for obj, rest in zip(targets, rests) if obj in joining and hairrig.hangs(
-                    rest.co, rig, hang_start=settings.hair_hang_start, hang_length=settings.hair_hang_length)]
+                    rest.co, rig, cap=cap)]
             if custom and (self.rebuild or again or not have):
                 # Built over the whole hair, its other parts too, as the matching sees it.
                 points = np.concatenate([rest.co for rest in whole])
                 starts = np.cumsum([0] + [len(rest.co) for rest in whole[:-1]])
                 tris = np.concatenate([np.asarray(rest.tris, dtype=np.int64).reshape(-1, 3) + start
                                        for rest, start in zip(whole, starts)])
-                plans = hairrig.plan_rig(points, tris, rig, hang_start=settings.hair_hang_start,
-                                         hang_length=settings.hair_hang_length)
+                cap = hairing.cap_depth(points, tris, rig)
+                plans = hairrig.plan_rig(points, tris, rig, cap=cap)
                 if again and not self.rebuild:
                     # Built again only because a part joined: the chains the user picked kinds for keep them.
                     plans = hairrig.keep_kinds(armature, plans)
