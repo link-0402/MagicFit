@@ -895,6 +895,153 @@ def test_settle_reweigh():
         hairview.clear()
 
 
+def counting_weights(reads, sleep=0.0):
+    """(`hairview.chain_weights`, a stand-in for it that keeps the time of each read, slowed by ``sleep`` s)."""
+    original = hairview.chain_weights
+
+    def counted(*args):
+        reads.append(time.perf_counter())
+        if sleep:
+            time.sleep(sleep)
+        return original(*args)
+
+    return original, counted
+
+
+def test_reweigh_chain_change():
+    obj, armature = rig_scene()
+    context = bpy.context
+    wm = context.window_manager
+    rig = armature.magic_fit_hair_rig
+    reads = []
+    original, counted = counting_weights(reads)
+    hairview.chain_weights = counted
+    wm.magic_fit_show_chains = True
+    try:
+        meshes = hairview.overlay_meshes(context, armature)
+        hairview._refresh(context, armature, meshes)
+        tint = hairview._layer_tints(context)[obj.session_uid]
+        group = obj.vertex_groups[rig.chains[0].bones.split(",")[0]]
+        for change in ("added", "removed"):
+            # A write to the weights (as Hair Weights makes) just now: a read would be held back.
+            group.add([0, 1, 2], 0.5, 'REPLACE')
+            obj.data.update()
+            context.view_layer.update()
+            check(tint.reweigh and time.perf_counter() - tint.marked < hairview.SETTLE,
+                  "chain change: a fresh mark ({:s})".format(change))
+            if change == "added":
+                chain = rig.chains.add()
+                chain.kind = next(kind for kind in hairrig.KINDS if kind != rig.chains[0].kind)
+                chain.bones = rig.chains[0].bones.split(",")[-1]
+            else:
+                rig.chains.remove(len(rig.chains) - 1)
+            before = len(reads)
+            try:
+                hairview._refresh(context, armature, meshes)
+                raised = None
+            except Exception as error:
+                raised = error
+            check(raised is None, "chain change: a chain {:s} raises nothing ({})".format(change, raised))
+            check(len(reads) == before + 1 and tint.weights.shape[1] == len(rig.chains)
+                  and tint.colors is not None and len(tint.colors) == len(obj.data.vertices) and not tint.reweigh,
+                  "chain change: a chain {:s} reads the weights at once, once ({:d} reads)".format(
+                      change, len(reads) - before))
+        # Weights read for another number of chains are never recoloured with the chains' kinds.
+        tint.weights = tint.weights[:, :-1]
+        tint.colors_key = None
+        tint.reweigh = False
+        colors = tint.colors
+        try:
+            hairview._refresh(context, armature, meshes)
+            raised = None
+        except Exception as error:
+            raised = error
+        check(raised is None and (tint.colors is colors or tint.weights.shape[1] == len(rig.chains)),
+              "chain change: weights of other chains aren't recoloured ({})".format(raised))
+    finally:
+        hairview.chain_weights = original
+        if bpy.app.timers.is_registered(hairview._tag_views):
+            bpy.app.timers.unregister(hairview._tag_views)
+        wm.magic_fit_show_chains = False
+        hairview.clear()
+
+
+def test_hold_max():
+    obj, armature = rig_scene()
+    context = bpy.context
+    wm = context.window_manager
+    rig = armature.magic_fit_hair_rig
+    reads = []
+    original, counted = counting_weights(reads)
+    hairview.chain_weights = counted
+    wm.magic_fit_show_chains = True
+    try:
+        check(hairview.HOLD_MAX == 1.0, "hold: HOLD_MAX 1.0")
+        meshes = hairview.overlay_meshes(context, armature)
+        hairview._refresh(context, armature, meshes)
+        tint = hairview._layer_tints(context)[obj.session_uid]
+        tint.weighed -= 10.0
+        group = obj.vertex_groups[rig.chains[0].bones.split(",")[0]]
+        # Marks every 30 ms for 1.5 s (a mesh updated without end): one read, about HOLD_MAX after the first.
+        del reads[:]
+        start = time.perf_counter()
+        first = None
+        k = 0
+        while time.perf_counter() - start < 1.5:
+            group.add([k % 50], 0.1 + 0.8 * (k % 7) / 7.0, 'REPLACE')
+            obj.data.update()
+            context.view_layer.update()
+            if first is None:
+                first = tint.marked
+            hairview._refresh(context, armature, meshes)
+            k += 1
+            time.sleep(0.03)
+        at = [read - first for read in reads]
+        check(len(reads) == 1 and 0.95 <= at[0] <= 1.15,
+              "hold: marks every 30 ms for 1.5 s read once, near HOLD_MAX ({})".format([round(a, 3) for a in at]))
+    finally:
+        hairview.chain_weights = original
+        if bpy.app.timers.is_registered(hairview._tag_views):
+            bpy.app.timers.unregister(hairview._tag_views)
+        wm.magic_fit_show_chains = False
+        hairview.clear()
+
+
+def test_hold_max_slow_read():
+    obj, armature = rig_scene()
+    context = bpy.context
+    wm = context.window_manager
+    rig = armature.magic_fit_hair_rig
+    reads = []
+    original, counted = counting_weights(reads, sleep=0.4)
+    hairview.chain_weights = counted
+    wm.magic_fit_show_chains = True
+    try:
+        meshes = hairview.overlay_meshes(context, armature)
+        hairview._refresh(context, armature, meshes)
+        tint = hairview._layer_tints(context)[obj.session_uid]
+        check(tint.weigh_cost >= 0.4 and hairview.WEIGH_WAIT * tint.weigh_cost > hairview.HOLD_MAX,
+              "slow read: 5 times its time is past HOLD_MAX ({:.3f} s)".format(tint.weigh_cost))
+        group = obj.vertex_groups[rig.chains[0].bones.split(",")[0]]
+        group.add([0], 0.5, 'REPLACE')
+        obj.data.update()
+        context.view_layer.update()
+        now = time.perf_counter()
+        tint.marked = now - 10.0                  # settled
+        tint.weighed = now - 0.9
+        hairview._refresh(context, armature, meshes)
+        check(len(reads) == 1 and tint.reweigh, "slow read: put off before HOLD_MAX")
+        tint.weighed = time.perf_counter() - hairview.HOLD_MAX - 0.02
+        hairview._refresh(context, armature, meshes)
+        check(len(reads) == 2 and not tint.reweigh, "slow read: the next waits no longer than HOLD_MAX")
+    finally:
+        hairview.chain_weights = original
+        if bpy.app.timers.is_registered(hairview._tag_views):
+            bpy.app.timers.unregister(hairview._tag_views)
+        wm.magic_fit_show_chains = False
+        hairview.clear()
+
+
 def test_xray_skips():
     shows = hairview.view_shows_chains
     check(shows(view()), "x-ray: drawn in solid shading")
@@ -950,7 +1097,7 @@ def main():
                  test_chain_weights, test_chain_weights_edge_cases, test_overlay_meshes, test_overlay_rebuilds,
                  test_chain_lines, test_line_rebuilds, test_normals_only_when_moved, test_xray_skips,
                  test_gpu_state_reset, test_bone_lines_shown, test_adaptive_reweigh,
-                 test_settle_reweigh)
+                 test_settle_reweigh, test_reweigh_chain_change, test_hold_max, test_hold_max_slow_read)
         if hairview is None:
             check(False, "magic_fit.hairview exists")
             tests = ()

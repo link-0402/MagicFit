@@ -76,6 +76,9 @@ WEIGH_WAIT = 5
 # Seconds a mesh's data must go without updates (a paint stroke sends one per dab) before its weights are read
 # again: the tint catches up after a stroke instead of stuttering through it.
 SETTLE = 0.2
+# Seconds a weight read is put off at most: after the first update not read yet, however many follow (a mesh
+# updated every frame never settles), and after a read however slow it was.
+HOLD_MAX = 1.0
 # Width of the chain bones' lines, in pixels at the default resolution scale.
 LINE_WIDTH = 3.0
 # Opacity of the lines of the chains not picked in the list (the picked one's is 1): the tint's FADE would
@@ -357,7 +360,7 @@ class _Tint:
     """The tint of one mesh object."""
 
     __slots__ = ("co", "normals", "tris", "data", "weights", "weights_key", "colors", "colors_key", "batch",
-                 "built", "weighed", "weigh_cost", "marked", "moved", "reweigh")
+                 "built", "weighed", "weigh_cost", "marked", "first_mark", "moved", "reweigh")
 
     def __init__(self):
         self.co = None              # world space positions, as displayed
@@ -373,6 +376,7 @@ class _Tint:
         self.weighed = 0.0          # time.perf_counter() the weights were last read at
         self.weigh_cost = 0.0       # seconds that read took
         self.marked = 0.0           # time.perf_counter() an update of the mesh data last reached it
+        self.first_mark = None      # ...and the first not read yet, None when all were
         self.moved = True           # positions to be read again
         self.reweigh = True         # weights to be read again
 
@@ -459,7 +463,8 @@ def _refresh(context, armature_object, meshes):
     """Bring the tints of ``meshes`` (`overlay_meshes` of ``armature_object``) up to date and forget the view
     layer's others. Positions that changed less than REBUILD_INTERVAL after they were last read wait. Weights
     wait until the mesh data had no update for SETTLE, and REBUILD_INTERVAL or WEIGH_WAIT times their last
-    read's time after it, whichever is longer; the old tint stays meanwhile. A timer redraws the views when
+    read's time after it, whichever is longer, each at most HOLD_MAX; the old tint stays meanwhile. Weights
+    read for other chains or another mesh are read at once. A timer redraws the views when
     they're due. Returns True when one waits."""
     tints = _layer_tints(context)
     shown = {obj.session_uid for obj in meshes}
@@ -481,12 +486,17 @@ def _refresh(context, armature_object, meshes):
         if tint.data != obj.data.session_uid or tint.weights_key != weights_key:
             tint.reweigh = True
         if tint.reweigh:
-            # Weights that don't fit the mesh any more are read at once; else after the stroke (the mesh data
-            # settled) and when the last read is long enough ago, longer for a mesh slow to read.
+            # Weights that don't fit the mesh or the chains any more are read at once; else after the stroke
+            # (the mesh data settled, or HOLD_MAX after its first update) and when the last read is long enough
+            # ago, longer for a mesh slow to read (up to HOLD_MAX).
             left = 0.0
-            if tint.weights is not None and len(tint.weights) == count:
-                left = max(tint.marked + SETTLE,
-                           tint.weighed + max(REBUILD_INTERVAL, WEIGH_WAIT * tint.weigh_cost)) - now
+            if (tint.weights is not None and tint.weights.shape == (count, len(bones))
+                    and tint.data == obj.data.session_uid and tint.weights_key[0] == bones):
+                settled = tint.marked + SETTLE
+                if tint.first_mark is not None:
+                    settled = min(settled, tint.first_mark + HOLD_MAX)
+                spaced = tint.weighed + max(REBUILD_INTERVAL, min(WEIGH_WAIT * tint.weigh_cost, HOLD_MAX))
+                left = max(settled, spaced) - now
             if left > 0.0:
                 wait = left if wait is None else min(wait, left)
             else:
@@ -494,6 +504,7 @@ def _refresh(context, armature_object, meshes):
                 tint.weights = chain_weights(obj, rig)
                 tint.weigh_cost = time.perf_counter() - started
                 tint.weighed = now
+                tint.first_mark = None
                 tint.data, tint.weights_key = obj.data.session_uid, weights_key
                 tint.colors_key = None
                 tint.reweigh = False
@@ -514,7 +525,9 @@ def _refresh(context, armature_object, meshes):
                     tint.batch = None
                 tint.moved = False
                 tint.built = now
-        if tint.colors_key != colors_key and len(tint.weights) == len(tint.co):
+        # Weights waiting to be read for other chains aren't recoloured with these chains' kinds.
+        if (tint.colors_key != colors_key and len(tint.weights) == len(tint.co)
+                and tint.weights.shape[1] == len(kinds)):
             tint.colors = chain_colors(tint.weights, kinds, rig.active)
             tint.colors_key = colors_key
             tint.batch = None
@@ -569,6 +582,8 @@ def _on_depsgraph_update(_scene, depsgraph):
                     if tint.data == data.session_uid:
                         tint.reweigh = True
                         tint.marked = now
+                        if tint.first_mark is None:
+                            tint.first_mark = now
         elif isinstance(data, bpy.types.Armature):
             for lines in _lines.values():
                 if lines.data == data.session_uid:
