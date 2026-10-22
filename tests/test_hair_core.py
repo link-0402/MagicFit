@@ -126,14 +126,29 @@ def test_scalp_lookup():
     check(rig.scalp(top)[0] > 0.8, "scalp: the crown is scalp ({:.2f})".format(rig.scalp(top)[0]))
     check(rig.scalp(forehead_low)[0] < 0.2,
           "scalp: the lower forehead is face ({:.2f})".format(rig.scalp(forehead_low)[0]))
-    check(rig.scalp_gap(top)[0] == 0.0, "scalp: the scalp has no gap to it ({:.3f})".format(rig.scalp_gap(top)[0]))
+    gap = rig.scalp_gap(top, 0.01)[0]
+    check(gap <= 0.005, "scalp: a 1 cm cap on the crown is on the scalp ({:.4f} m)".format(gap))
     check(rig.scalp_gap(neck)[0] > 0.03,
           "scalp: the front of the neck is far from the scalp ({:.3f} m)".format(rig.scalp_gap(neck)[0]))
+    # Below the head (it ends at the neck's top): 1 cm behind the back of the neck at z 1.25...
+    surface = rig.head_field.surface
+    nape = surface[(surface[:, 2] < 1.40) & (np.abs(surface[:, 0]) < 0.02)]
+    low = np.array([[0.0, nape[:, 1].max() + 0.01, 1.25]])
+    gap = rig.scalp_gap(low, 0.03)[0]
+    check(gap > 0.03, "scalp: hair 1 cm behind the neck at z 1.25 is far from the scalp ({:.3f} m)".format(gap))
+    # ...and hair 3 cm off the nape at z 1.43, the hairline.
+    polar = np.arange(110.0, 160.0)
+    rays = on_head('c0801', 0.03, *((p, 0.0) for p in polar))
+    hairline = rays[[int(np.argmin(np.abs(rays[:, 2] - 1.43)))]]
+    gap = rig.scalp_gap(hairline, 0.03)[0]
+    check(abs(hairline[0, 2] - 1.43) < 0.005 and gap <= 0.02,
+          "scalp: hair 3 cm off the nape at z {:.3f} is on the scalp with a 3 cm cap ({:.3f} m)".format(
+              hairline[0, 2], gap))
     offset = np.array((0.02, -0.01, 0.05))
     moved = rig.moved(offset)
-    points = np.vstack((top, forehead_low, neck))
+    points = np.vstack((top, forehead_low, neck, low, hairline))
     check(np.allclose(moved.scalp(points + offset), rig.scalp(points))
-          and np.allclose(moved.scalp_gap(points + offset), rig.scalp_gap(points)),
+          and np.allclose(moved.scalp_gap(points + offset, 0.03), rig.scalp_gap(points, 0.03)),
           "scalp: a moved rig looks the scalp up where its head is")
 
 

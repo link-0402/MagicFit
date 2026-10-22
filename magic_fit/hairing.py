@@ -256,17 +256,17 @@ class HeadField:
         self.scalp_share = (np.zeros(len(self.surface)) if scalp is None
                             else np.asarray(scalp, dtype=np.float64))
         self._tree = None
-        self._scalp_gap = None
 
-    def _nearest(self, points, count):
-        """The ``count`` nearest head points of each of ``points`` ((n, count) indices, in no order) and how far
+    @staticmethod
+    def _nearest(points, targets, count):
+        """The ``count`` nearest of ``targets`` to each of ``points`` ((n, count) indices, in no order) and how far
         they are."""
         points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-        count = min(count, len(self.surface))
+        count = min(count, len(targets))
         index = np.zeros((len(points), count), dtype=np.int64)
         distance = np.zeros((len(points), count))
         for start in range(0, len(points), HEAD_CHUNK):
-            d = np.linalg.norm(points[start:start + HEAD_CHUNK, None, :] - self.surface[None], axis=2)
+            d = np.linalg.norm(points[start:start + HEAD_CHUNK, None, :] - targets[None], axis=2)
             nearest = np.argpartition(d, count - 1, axis=1)[:, :count]
             index[start:start + HEAD_CHUNK] = nearest
             distance[start:start + HEAD_CHUNK] = np.take_along_axis(d, nearest, 1)
@@ -275,21 +275,20 @@ class HeadField:
     def scalp(self, points):
         """The scalp share at ``points``: the inverse-distance mean of their SCALP_NEIGHBOURS nearest head
         points' shares."""
-        index, distance = self._nearest(points, SCALP_NEIGHBOURS)
+        index, distance = self._nearest(points, self.surface, SCALP_NEIGHBOURS)
         weight = 1.0 / np.maximum(distance, 1e-4)
         return (self.scalp_share[index] * weight).sum(1) / weight.sum(1)
 
-    def scalp_gap(self, points):
-        """How far ``points`` are from the scalp along the head: from their nearest head point to the nearest
-        head point with a scalp share of at least SCALP_HALF (0 on the scalp; infinite without one)."""
-        if self._scalp_gap is None:
-            on = self.scalp_share >= SCALP_HALF
-            self._scalp_gap = np.full(len(self.surface), np.inf)
-            if on.any():
-                self._scalp_gap = np.linalg.norm(self.surface[:, None, :] - self.surface[None, on], axis=2).min(1)
-                self._scalp_gap[on] = 0.0
-        index, _distance = self._nearest(points, 1)
-        return self._scalp_gap[index[:, 0]]
+    def scalp_gap(self, points, cap=0.0):
+        """How far ``points`` are from the scalp beyond the hair's cap depth ``cap``: the straight distance to
+        the nearest head point with a scalp share of at least SCALP_HALF, less ``cap``, and never below 0
+        (infinite without a scalp)."""
+        points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+        on = self.surface[self.scalp_share >= SCALP_HALF]
+        if not len(on):
+            return np.full(len(points), np.inf)
+        _index, distance = self._nearest(points, on, 1)
+        return np.maximum(distance[:, 0] - cap, 0.0)
 
     def distance(self, points):
         points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
@@ -435,9 +434,10 @@ class HairRig:
         """The scalp share at world space ``points`` (see `HeadField.scalp`)."""
         return self.head_field.scalp(self.model(points))
 
-    def scalp_gap(self, points):
-        """How far world space ``points`` are from the scalp along the head (see `HeadField.scalp_gap`)."""
-        return self.head_field.scalp_gap(self.model(points))
+    def scalp_gap(self, points, cap=0.0):
+        """How far world space ``points`` are from the scalp beyond the hair's cap depth ``cap`` (see
+        `HeadField.scalp_gap`)."""
+        return self.head_field.scalp_gap(self.model(points), cap)
 
     def head_height(self, name=HEAD):
         return float(self.by_name[name].head[2] + self.offset[2])
