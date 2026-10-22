@@ -222,6 +222,29 @@ def test_weights():
           "weights: Neck Weight gives the neck more of what stays with the body")
 
 
+# The column sums of the long hair's weights (`hair.build`) with c0201's first hair skeleton that has bones of
+# its own, by default settings, as Best Match gave them before the hair's own skeleton weighted by its chains.
+BEST_MATCH_SUMS = {
+    'j_sebo_c': 2.735781, 'j_kubi': 8.947516, 'j_kao': 345.84533, 'j_kami_a': 7.07853, 'j_kami_f_l': 3.460525,
+    'j_kami_f_r': 3.460505, 'j_kami_b': 40.068318, 'j_ex_h0002_ke_b': 151.909326, 'j_ex_h0002_ke_f': 0.352109,
+    'j_ex_h0002_ke_l': 9.075322, 'j_ex_h0002_ke_r': 9.066738,
+}
+
+
+def test_best_match_unchanged():
+    hair.clear_scene()
+    obj, _parts = hair.build()
+    co, tris = mesh_arrays(obj)
+    ref = hairing.Reference.get()
+    number = next(n for n in ref.skeletons('c0201') if ref.rig('c0201', n).skeleton_bones())
+    names, weights = hairing.hair_weights(co, tris, ref.rig('c0201', number))
+    sums = dict(zip(names, weights.sum(0).tolist()))
+    off = {name: round(sums.get(name, 0.0) - value, 9) for name, value in BEST_MATCH_SUMS.items()
+           if abs(sums.get(name, 0.0) - value) >= 1e-6}
+    others = {name: value for name, value in sums.items() if name not in BEST_MATCH_SUMS and value != 0.0}
+    check(not off and not others, "best match: the weights with h{:04d} as before ({}, {})".format(number, off, others))
+
+
 def test_chains():
     ref = hairing.Reference.get()
     rig = ref.rig('c0201', 210)
@@ -1024,6 +1047,19 @@ def test_custom_brush():
     move_bone_head(obj, armature, ponytail_root(armature), (0.01, 0.0, 0.0))
     moved = hairing.build_stroke(bpy.context, obj, settings)
     check(not np.array_equal(moved.goal_weights, stroke.goal_weights), "own brush: a moved bone moves the goal")
+    # So do the cap depth and the light chains the rig keeps.
+    state = armature.magic_fit_hair_rig
+    cap = state.cap_depth
+    state.cap_depth = cap + 0.05
+    deeper = hairing.build_stroke(bpy.context, obj, settings)
+    check(not np.array_equal(deeper.goal_weights, moved.goal_weights), "own brush: a changed cap depth moves the goal")
+    state.cap_depth = cap
+    for chain in state.chains:
+        chain.light = True
+    lighter = hairing.build_stroke(bpy.context, obj, settings)
+    # This hair has nothing over the scalp standing off the cap for light chains to change: the key tells.
+    check(lighter.rig.light and hairing._brush_cache[0][-2:] == (lighter.rig.cap_depth, tuple(sorted(lighter.rig.light))),
+          "own brush: the weights kept are those of the light chains ({})".format(sorted(lighter.rig.light)))
     del armature[hairrig.RIG_PROPERTY]
     problem = operators.check_hair_ready(obj, settings)
     check(problem == "Give the hair Hair Weights first",
@@ -1243,7 +1279,7 @@ def main():
     magic_fit.register()
     try:
         for test in (test_reference, test_scalp_lookup, test_cap_depth, test_cap_depth_fallback, test_weights,
-                     test_chains, test_layers, test_ears, test_matching, test_button,
+                     test_best_match_unchanged, test_chains, test_layers, test_ears, test_matching, test_button,
                      test_existing_armature, test_customize_plus, test_armature_out_of_view_layer, test_parts,
                      test_selected, test_replace, test_masks, test_pick, test_brush, test_readiness,
                      test_custom_button, test_custom_reuses_rig, test_race_change_rebuilds, test_nothing_hangs,

@@ -802,24 +802,76 @@ def test_maeve_chains():
     check(chains and lowest >= 1.36, "maeve: no chain starts below z 1.36 ({:.3f})".format(lowest))
 
 
+def test_maeve_weights():
+    """The real test hair's weights from its own chains: the fringe hangs, the cap above it stays."""
+    if not os.path.isfile(MAEVE):
+        print("skip: no Maeve hair at " + MAEVE)
+        return
+    import hair_models
+    with open(MAEVE, "rb") as handle:
+        points, tris, _held = hair_models.decode(handle.read())
+    maeve = rig(MIQOTE)
+    cap = hairing.cap_depth(points, tris, maeve)
+    chains = hairrig.plan_rig(points, tris, maeve, cap=cap)
+    custom = own_rig(maeve, chains, cap)
+    started = time.perf_counter()
+    names, weights = hairing.hair_weights(points, tris, custom)
+    took = time.perf_counter() - started
+    own = own_weight(names, weights)
+    top = float(maeve.head_field.surface[:, 2].max())
+    below = top - points[:, 2]
+    front = (np.abs(points[:, 0]) < 0.05) & (points[:, 1] < maeve.by_name[hairing.HEAD].head[1] - 0.04)
+    print("      hair_weights: {:.3f} s for {:d} vertices, {:d} chains ({:d} light)".format(
+        took, len(points), len(chains), sum(chain.light for chain in chains)))
+    print("      front rows (cm below the head's top): vertices, mean weight on the chains, on j_kao")
+    for start in range(0, 24, 2):
+        row = front & (below >= start / 100.0) & (below < (start + 2) / 100.0)
+        if row.any():
+            print("      {:2d}-{:2d}  {:5d}  {:.3f}  {:.3f}".format(start, start + 2, int(row.sum()), float(own[row].mean()),
+                                                                   float(weights[row, names.index(hairing.HEAD)].mean())))
+    # Past the ramp of the nearest bangs chain: more than half the ramp below its first joint.
+    bangs = [chain for chain in hairing.chains_of(custom.hair_bones())
+             if chains[hairrig._parse(chain.root)[0] - 1].kind == "bangs"]
+    model = custom.model(points)
+    nearest = np.argmin(np.column_stack([chain.project(model)[0] for chain in bangs]), axis=1) if bangs else None
+    past = np.zeros(len(points), dtype=bool)
+    for c, chain in enumerate(bangs):
+        past |= (nearest == c) & (chain.along(model) > 0.5 * hairing.RAMP_SHARE * first_bone(chain))
+    past &= front
+    print("      {:d} bangs chain(s); {:d} front vertices past the ramp".format(len(bangs), int(past.sum())))
+    check(past.any() and float(own[past].mean()) >= 0.7,
+          "maeve weights: the fringe past its bangs chain's ramp hangs from the chains ({:.3f} on average)".format(
+              float(own[past].mean()) if past.any() else math.nan))
+    fringe = front & (below >= 0.12) & (below <= 0.16)
+    cap_rows = front & (below >= 0.0) & (below <= 0.08)
+    check(fringe.any() and float(own[fringe].mean()) >= 0.4,
+          "maeve weights: the fringe 12-16 cm below the top hangs from the chains ({:.3f} on average)".format(
+              float(own[fringe].mean()) if fringe.any() else math.nan))
+    check(cap_rows.any() and float(own[cap_rows].mean()) <= 0.05,
+          "maeve weights: the front 0-8 cm below the top stays with the head ({:.3f} on the chains on average)".format(
+              float(own[cap_rows].mean()) if cap_rows.any() else math.nan))
+
+
 # -----------------------------------------------------------------------------
 # The rig on the armature
 
-def rig_scene(bun=False):
+def rig_scene(fixture=None):
     """The long hair (`hair.build`) deformed by a new armature with c0201's j_kao, j_kubi and j_sebo_c (made by
     `hairing.ensure_bones`), and its chains built on the armature with the hair's cap depth, as Hair Weights
     builds them: (hair object, armature, plans, bone names, points, triangles, part index of each point, part
-    names). With ``bun``, the bun on c0801 (`bun_hair`) instead."""
+    names). With ``fixture`` (a c0801 fixture: `bun_hair`, `flat_fringe` or `neck_hair`), that hair instead,
+    on c0801's bones."""
     hair.clear_scene()
-    race = MIQOTE if bun else hair.RACE
-    if bun:
-        co, tris, ids = bun_hair()
-        names = ["cap", "bun"]
+    race = hair.RACE if fixture is None else MIQOTE
+    if fixture is not None:
+        co, tris, ids = fixture()
+        names = list(ids)
         part = np.zeros(len(co), dtype=np.int64)
-        part[ids["bun"]] = 1
-        mesh = bpy.data.meshes.new("Bun")
+        for index, name in enumerate(names):
+            part[ids[name]] = index
+        mesh = bpy.data.meshes.new(fixture.__name__)
         mesh.from_pydata([tuple(p) for p in co], [], [tuple(int(k) for k in t) for t in tris])
-        obj = bpy.data.objects.new("Bun", mesh)
+        obj = bpy.data.objects.new(fixture.__name__, mesh)
         bpy.context.scene.collection.objects.link(obj)
     else:
         co, tris, part, names = long_hair()
@@ -1103,7 +1155,7 @@ def test_kind_change_writes_json():
 
 
 def test_state_keeps_light():
-    _obj, armature, plans, _bones, co, tris, _part, _names = rig_scene(bun=True)
+    _obj, armature, plans, _bones, co, tris, _part, _names = rig_scene(bun_hair)
     state = armature.magic_fit_hair_rig
     cap = hairing.cap_depth(co, tris, rig(MIQOTE))
     first = hairrig.bone_name(0, 0)
@@ -1175,6 +1227,182 @@ def test_old_rig_state():
           "old rig: a rig read from the property has no light chain")
 
 
+# -----------------------------------------------------------------------------
+# Weights from the chains
+
+def body_weight(names, weights):
+    """Each vertex's weight on the bones what stays with the body goes to: j_kao, j_kubi and j_sebo_c."""
+    return weights[:, [names.index(name) for name in (hairing.HEAD, hairing.NECK, hairing.UPPER_BACK)]].sum(1)
+
+
+def own_weight(names, weights, chain=None):
+    """Each vertex's weight on the hair's own bones (BONE_PREFIX), or on those of chain number ``chain`` (from 1)."""
+    prefix = hairrig.BONE_PREFIX if chain is None else "{:s}{:02d}_".format(hairrig.BONE_PREFIX, chain)
+    return weights[:, [k for k, name in enumerate(names) if name.startswith(prefix)]].sum(1)
+
+
+def chain_along(custom, co, number=None):
+    """How far down a chain of ``custom`` each of ``co`` is (`hairing.Chain.along`): down its nearest chain, or
+    down chain ``number`` (from 1); and that chain's first bone's length."""
+    chains = hairing.chains_of(custom.hair_bones())
+    model = custom.model(co)
+    if number is not None:
+        chain = next(chain for chain in chains if chain.root == hairrig.bone_name(number - 1, 0))
+        return chain.along(model), np.full(len(co), first_bone(chain))
+    nearest = np.argmin(np.column_stack([chain.project(model)[0] for chain in chains]), axis=1)
+    along = np.column_stack([chain.along(model) for chain in chains])[np.arange(len(co)), nearest]
+    return along, np.array([first_bone(chain) for chain in chains])[nearest]
+
+
+def first_bone(chain):
+    return float(chain.seg[0]) if len(chain.seg) else hairing.BONE_LENGTH
+
+
+def own_rig(base, plans, cap):
+    """The hair's own skeleton of ``plans`` on ``base`` (c0801's body, not moved) as `hairrig.custom_rig` reads it
+    from the bones `hairrig.build_armature_rig` makes, without Blender: a bone per joint, its X axis to the next
+    joint (the last one's to the tip), each hanging from the one before, the first from j_kao."""
+    bones, skeleton, light = list(base.bones), [], set()
+    for c, plan in enumerate(plans):
+        parent = hairing.HEAD
+        for b, (joint, end) in enumerate(zip(plan.joints, list(plan.joints[1:]) + [plan.tip])):
+            rest = np.eye(4)
+            rest[:3, 0] = (end - joint) / np.linalg.norm(end - joint)
+            rest[:3, 3] = joint
+            name = hairrig.bone_name(c, b)
+            bones.append(hairing.Bone(name, parent, rest))
+            skeleton.append(name)
+            parent = name
+        if plan.light:
+            light.add(hairrig.bone_name(c, 0))
+    return hairing.HairRig(base.race, 0, bones, base.head_field, skeleton, custom=True, cap_depth=cap, light=light)
+
+
+def test_chain_along():
+    rest = np.eye(4)
+    rest[:3, 0] = (0.0, 0.0, -1.0)
+    rest[:3, 3] = (0.0, 0.0, 1.5)
+    second = rest.copy()
+    second[:3, 3] = (0.0, 0.0, 1.4)
+    chain = hairing.Chain([hairing.Bone("a", None, rest), hairing.Bone("b", "a", second)])
+    points = np.array(((0.01, 0.0, 1.53), (0.01, 0.0, 1.45), (0.0, 0.01, 1.35), (0.0, 0.0, 1.2)))
+    along = chain.along(points)
+    _distance, down = chain.project(points)
+    check(np.allclose(along, (-0.03, 0.05, 0.15, 0.30)) and np.allclose(down[1:], along[1:]) and down[0] == 0.0,
+          "chain along: down the chain as project measures it, negative above its first joint ({})".format(
+              np.round(along, 4).tolist()))
+
+
+def test_ramp_from_first_joint():
+    _obj, armature, plans, _bones, co, tris, part, names = rig_scene(flat_fringe)
+    custom = hairrig.custom_rig(armature, MIQOTE)
+    # The rule itself, without holding layers together (which smooths the ramp over about LAYER_SMOOTH).
+    bone_names, weights = hairing.hair_weights(co, tris, custom, layer_range=0.0)
+    along, first = chain_along(custom, co)
+    # The ramp is centred on the first joint, RAMP_SHARE of the first bone wide.
+    half = 0.5 * hairing.RAMP_SHARE * first
+    fringe = part == names.index("fringe")
+    above = fringe & (along < -half)
+    past = fringe & (along > half)
+    body, own = body_weight(bone_names, weights), own_weight(bone_names, weights)
+    print("      {:d} chains; fringe: {:d} vertices above the ramp, {:d} past it".format(
+        len(plans), int(above.sum()), int(past.sum())))
+    check(above.any() and float(body[above].min()) >= 0.95,
+          "ramp: the fringe above its chain's ramp stays on j_kao ({:.3f} at least)".format(
+              float(body[above].min()) if above.any() else math.nan))
+    check(past.any() and float(own[past].min()) >= 0.95,
+          "ramp: the fringe past the ramp hangs from the chain ({:.3f} at least)".format(
+              float(own[past].min()) if past.any() else math.nan))
+    _names, planned = hairing.hair_weights(co, tris, own_rig(rig(MIQOTE), plans, armature.magic_fit_hair_rig.cap_depth),
+                                           layer_range=0.0)
+    # The armature keeps its bones in single precision.
+    check(_names == bone_names and float(np.abs(planned - weights).max()) < 1e-4,
+          "ramp: the plans' rig without Blender weights as the armature's ({:.2e})".format(
+              float(np.abs(planned - weights).max()) if _names == bone_names else math.inf))
+
+
+def test_cap_stays():
+    for fixture in (flat_fringe, neck_hair, bun_hair):
+        _obj, armature, _plans, _bones, co, tris, part, names = rig_scene(fixture)
+        custom = hairrig.custom_rig(armature, MIQOTE)
+        # The rule itself: holding layers together gives the cap under the bun's foot some of the bun's weights.
+        bone_names, weights = hairing.hair_weights(co, tris, custom, layer_range=0.0)
+        held = (part == names.index("cap")) & ~hairrig._hanging(custom.scalp(co), custom.head_distance(co),
+                                                               custom.cap_depth)
+        own = own_weight(bone_names, weights)
+        # The c0801 cap covers the cat ears' roots: Ears gives them to the ear bones.
+        ears = weights[:, [bone_names.index(name) for name in hairing.EARS]].sum(1)
+        check(held.any() and float(own[held].max()) <= 1e-6
+              and float((body_weight(bone_names, weights) + ears)[held].min()) >= 1.0 - 1e-6,
+              "cap stays: {:s}: the held cap only on j_kao, the neck, upper back and ears ({:d} vertices, {:.2e} on "
+              "the chains at most)".format(fixture.__name__, int(held.sum()),
+                                           float(own[held].max()) if held.any() else math.nan))
+
+
+def test_bun_light():
+    _obj, armature, _plans, _bones, co, tris, part, _names = rig_scene(bun_hair)
+    custom = hairrig.custom_rig(armature, MIQOTE)
+    # The rule itself; holding layers together changes it a little.
+    bone_names, weights = hairing.hair_weights(co, tris, custom, layer_range=0.0)
+    bun = np.flatnonzero(part == 1)
+    own = own_weight(bone_names, weights)
+    top = bun[co[bun, 2] >= co[bun, 2].max() - 1e-6]
+    held_names, held = hairing.hair_weights(co, tris, custom)
+    print("      scalp share over the bun: {:.3f} to {:.3f}; with layers held, {:.4f} on the chain at most".format(
+        float(custom.scalp(co[bun]).min()), float(custom.scalp(co[bun]).max()),
+        float(own_weight(held_names, held)[bun].max())))
+    check(custom.light and float(own[bun].max()) <= hairing.LIGHT_SHARE + 1e-6,
+          "bun light: the bun's light chain takes at most a third ({:.4f})".format(float(own[bun].max())))
+    check(float(own[top].min()) > 0.2, "bun light: ...and its top moves ({:.4f})".format(float(own[top].min())))
+
+
+def test_own_neck_weight():
+    _obj, armature, _plans, _bones, co, tris, _part, _names = rig_scene(neck_hair)
+    custom = hairrig.custom_rig(armature, MIQOTE)
+    held = ~hairrig._hanging(custom.scalp(co), custom.head_distance(co), custom.cap_depth)
+    below = held & (co[:, 2] < custom.head_height(hairing.HEAD))
+    kubi = {}
+    for neck_weight in (0.3, 0.0):
+        bone_names, weights = hairing.hair_weights(co, tris, custom, neck_weight=neck_weight)
+        kubi[neck_weight] = weights[below, bone_names.index(hairing.NECK)]
+    check(below.any() and float(kubi[0.3].mean()) > 0.02 and float(kubi[0.0].max()) == 0.0,
+          "own neck weight: the held hair below j_kao gets j_kubi weight with Neck Weight 0.3 ({:.3f} on average, "
+          "{:d} vertices), none with 0 ({:.3f})".format(float(kubi[0.3].mean()) if below.any() else math.nan,
+                                                        int(below.sum()), float(kubi[0.0].max()) if below.any() else 0.0))
+
+
+def test_ramp_follows_edited_bone():
+    _obj, armature, _plans, _bones, co, tris, _part, _names = rig_scene(neck_hair)
+    before = hairrig.custom_rig(armature, MIQOTE)
+    old_names, old = hairing.hair_weights(co, tris, before, neck_weight=0.0, layer_range=0.0)
+    old_along, first = chain_along(before, co, 1)
+    # The vertices chain 01 takes (the sheet's other chain takes some of those near it).
+    chains = hairing.chains_of(before.hair_bones())
+    ones = hairing.chain_shares(before.model(co), before, chains)[:, [chain.root for chain in chains].index(
+        hairrig.bone_name(0, 0))] >= 0.95
+    # The first joint moved 3 cm down its bone.
+    name = hairrig.bone_name(0, 0)
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='EDIT')
+    edit = armature.data.edit_bones[name]
+    edit.head = edit.head + (edit.tail - edit.head).normalized() * 0.03
+    hairrig.sync_rig(bpy.context, armature, MIQOTE)
+    after = hairrig.custom_rig(armature, MIQOTE)
+    new_names, new = hairing.hair_weights(co, tris, after, neck_weight=0.0, layer_range=0.0)
+    new_along, new_first = chain_along(after, co, 1)
+    # Past the old first joint (half hanging or more), above the new one's ramp.
+    between = ones & (old_along > 0.0) & (new_along < -0.5 * hairing.RAMP_SHARE * new_first)
+    # Chain 01's own weight there: the moved joint also moves chain 01's share, so some of that hair goes to
+    # the other chain, whose ramp didn't move.
+    one_old, one_new = own_weight(old_names, old, 1), own_weight(new_names, new, 1)
+    print("      first bone {:.3f} m; {:d} vertices between the old and the new joint".format(float(first[0]),
+                                                                                       int(between.sum())))
+    check(between.any() and float(one_new[between].max()) <= 1e-6 and float(one_old[between].mean()) >= 0.3,
+          "edited bone: the hair between the old and the new first joint doesn't hang from chain 01 now ({:.3f} at "
+          "most, {:.3f} on average before)".format(float(one_new[between].max()) if between.any() else math.nan,
+                                                    float(one_old[between].mean()) if between.any() else math.nan))
+
+
 def main():
     magic_fit.register()
     try:
@@ -1183,9 +1411,10 @@ def main():
                      test_kinds, test_budget, test_card_hair_kinds, test_card_hair_time, test_moved_hair,
                      test_flat_fringe, test_neck_layer, test_neck_only_layer, test_cap_rim, test_bun,
                      test_roots_near_scalp, test_twins_merge_first, test_lone_kind_survives, test_maeve_chains,
-                     test_armature_rig, test_weights_follow_locks,
+                     test_maeve_weights, test_armature_rig, test_weights_follow_locks,
                      test_edited_rig_is_kept, test_branch_starts_chain, test_bones_hash, test_kind_change_writes_json,
-                     test_state_keeps_light, test_old_rig_state):
+                     test_state_keeps_light, test_old_rig_state, test_chain_along, test_ramp_from_first_joint,
+                     test_cap_stays, test_bun_light, test_own_neck_weight, test_ramp_follows_edited_bone):
             print("==", test.__name__)
             try:
                 test()

@@ -15,7 +15,9 @@ Hair Weights needs no weights and no armature:
   tells how far each vertex hangs from the scalp. Hair on the scalp follows the head; hair farther out
   hangs from the hair bones: none of it closer than Hang Start, 63 % of it Hang Length farther out and
   95 % three times as far (1 - exp(-(distance - start) / length)), as the game's hair and well-made
-  modded hair both do on average.
+  modded hair both do on average. With the hair's own skeleton (`hairrig`) its chains tell instead: each
+  takes the hair from about its first joint down, the hair over the face and what stands off the cap, a light
+  chain a third of the latter (see `own_hanging`).
 - The hanging part goes to a chain of hair bones (a chain runs from a bone hanging from the head down
   its children, and on past the last one along its axis), by a score of how close the vertex is to
   it, how far around the head from it, whether it falls on the side of the head the chain's hair
@@ -215,6 +217,13 @@ SCALP_BIN = 15.0
 # `cap_depth`), blending in over STAND_BLEND.
 STAND_MARGIN = 0.03
 STAND_BLEND = 0.01
+# With the hair's own skeleton, a chain takes hair from none to all of it over RAMP_SHARE of its first bone's
+# length, centred on its first joint; a light chain (`hairrig.Lock`) takes at most LIGHT_SHARE of what stands
+# off the cap. Its weights count hair as over the scalp from none at a scalp share SCALP_BLEND below SCALP_HALF
+# to all of it at SCALP_HALF, where the hair rig holds it (`hairrig`).
+RAMP_SHARE = 0.5
+LIGHT_SHARE = 1.0 / 3.0
+SCALP_BLEND = 0.2
 # A hair with less than CAP_MIN_AREA (m²) over the scalp has no cap of its own: its cap depth is CAP_FALLBACK.
 CAP_FALLBACK = 0.01
 CAP_MIN_AREA = 0.001
@@ -565,18 +574,30 @@ class Chain:
     def project(self, points):
         """Distance of ``points`` to the chain (its last bone going on along its axis) and how far down
         the chain their closest point is."""
+        best, down, _along = self._closest(points)
+        return best, down
+
+    def along(self, points):
+        """How far down the chain ``points`` are, as `project` measures it, but signed above its first
+        joint: a point closest to the first bone and before its head is that far up the bone's axis
+        (negative)."""
+        return self._closest(points)[2]
+
+    def _closest(self, points):
         best = np.full(len(points), np.inf)
         down = np.zeros(len(points))
+        along = np.zeros(len(points))
         count = len(self.bones)
         for k in range(count):
             v = points - self.heads[k]
-            t = v @ self.axes[k]
-            t = np.clip(t, 0.0, self.seg[k] if k < count - 1 else np.inf)
+            raw = v @ self.axes[k]
+            t = np.clip(raw, 0.0, self.seg[k] if k < count - 1 else np.inf)
             d = np.linalg.norm(v - t[:, None] * self.axes[k][None], axis=1)
             closer = d < best
             best[closer] = d[closer]
             down[closer] = self.joints[k] + t[closer]
-        return best, down
+            along[closer] = np.where(raw < 0.0, raw, t)[closer] if k == 0 else down[closer]
+        return best, down, along
 
 
 def chains_of(bones):
@@ -684,6 +705,32 @@ def chain_shares(model, rig, chains):
     return share / share.sum(1, keepdims=True)
 
 
+def own_hanging(points, tris, rig, chains):
+    """How much of hair ``points`` (world space, rest pose) with triangles ``tris`` hangs from each of
+    the ``chains`` of the hair's own skeleton (``rig`` custom): (n, len(chains)).
+
+    A chain takes the hair down it (`Chain.along`) from none half a ramp above its first joint to all of it
+    half a ramp below, the ramp being RAMP_SHARE of its first bone's length: hair above a chain stays with
+    the head, wherever its bones are. Of that, it takes the hair over the face and of the hair over the scalp
+    what stands off the cap, from STAND_MARGIN beyond the hair's cap depth on (`HairRig.cap_depth`, measured
+    from these points when not known), blending in over STAND_BLEND; a light chain takes only LIGHT_SHARE of
+    that. Hair is over the scalp by its scalp share (`HairRig.scalp`): none of it SCALP_BLEND below
+    SCALP_HALF, all of it from SCALP_HALF on, so all the hair `hairrig` holds counts as over the scalp. Hair
+    lying on the cap over the scalp stays with the head."""
+    model = rig.model(points)
+    share = rig.scalp(points)
+    cap = rig.cap_depth if rig.cap_depth is not None else cap_depth(points, tris, rig, share=share)
+    scalp = smoothstep((share - SCALP_HALF + SCALP_BLEND) / SCALP_BLEND)
+    stand = smoothstep((rig.head_distance(points) - cap - STAND_MARGIN) / STAND_BLEND)
+    hang = np.zeros((len(points), len(chains)))
+    for i, chain in enumerate(chains):
+        width = RAMP_SHARE * (float(chain.seg[0]) if len(chain.seg) else BONE_LENGTH)
+        ramp = smoothstep((chain.along(model) + 0.5 * width) / width)
+        light = LIGHT_SHARE if chain.root in rig.light else 1.0
+        hang[:, i] = ramp * ((1.0 - scalp) + scalp * stand * light)
+    return hang
+
+
 # -----------------------------------------------------------------------------
 # Weights
 
@@ -712,10 +759,12 @@ def hair_weights(points, tris, rig, *, hang_start=0.025, hang_length=0.07, neck_
     """Bone weights of hair ``points`` (world space, rest pose, (n, 3)) with triangles ``tris``: (bone
     names, (n, len(names)) weights adding up to 1 per vertex).
 
-    Layers within ``layer_range`` of each other are held together (see `hold_layers`), also to ``fixed``:
-    (points, triangles, weights in the columns of the names) of the hair's other parts, weighted before,
-    which keep their weights. ``weld`` (vertex -> welded group) joins vertices sharing a position into
-    loose parts; by default they are found here."""
+    How much of the hair hangs comes from ``hang_start`` and ``hang_length``, or with the hair's own
+    skeleton (a ``custom`` rig) from its chains (see `own_hanging`). Layers within ``layer_range`` of each
+    other are held together (see `hold_layers`), also to ``fixed``: (points, triangles, weights in the
+    columns of the names) of the hair's other parts, weighted before, which keep their weights. ``weld``
+    (vertex -> welded group) joins vertices sharing a position into loose parts; by default they are found
+    here."""
     points = np.asarray(points, dtype=np.float64)
     tris = np.asarray(tris, dtype=np.int64).reshape(-1, 3)
     model = rig.model(points)
@@ -723,8 +772,6 @@ def hair_weights(points, tris, rig, *, hang_start=0.025, hang_length=0.07, neck_
     names = [bone.name for bone in rig.bones]
     column = {name: i for i, name in enumerate(names)}
     weights = np.zeros((count, len(names)))
-    distance = rig.head_distance(points)
-    hanging = hanging_share(distance, hang_start, hang_length)
 
     hair = rig.hair_bones()
     chains = chains_of(hair)
@@ -733,6 +780,13 @@ def hair_weights(points, tris, rig, *, hang_start=0.025, hang_length=0.07, neck_
         for i, chain in enumerate(chains):
             down[:, i] = chain.project(model)[1]
         share = chain_shares(model, rig, chains)
+        # How much of each vertex hangs from each chain: the same for every chain, unless the hair has its own.
+        if rig.custom:
+            hang = own_hanging(points, tris, rig, chains)
+            hanging = (share * hang).sum(1)
+        else:
+            hanging = hanging_share(rig.head_distance(points), hang_start, hang_length)
+            hang = None
         # Loose parts take their vertices' choice as a whole when they mostly agree.
         if weld is None:
             weld, weld_count = fitting.weld_groups(points, fitting.WELD_DISTANCE)
@@ -749,6 +803,8 @@ def hair_weights(points, tris, rig, *, hang_start=0.025, hang_length=0.07, neck_
             pooled /= np.maximum(pooled.sum(1, keepdims=True), 1e-12)
             agree = smoothstep((pooled.max(1) - PART_AGREEMENT) / PART_AGREEMENT_RANGE)[part]
             share = (1.0 - agree)[:, None] * share + agree[:, None] * pooled[part]
+        if hang is not None:
+            hanging = (share * hang).sum(1)
         nearest = share.argmax(1)
         for i, chain in enumerate(chains):
             joints = chain.joints.copy()
@@ -765,8 +821,9 @@ def hair_weights(points, tris, rig, *, hang_start=0.025, hang_length=0.07, neck_
                 joints = chain.joints + chain_stretch * (np.maximum(chain.joints, even) - chain.joints)
                 widths[1:] = np.maximum(joint_blend, JOINT_SPREAD * np.diff(joints))
             shares = segment_shares(down[:, i], joints, widths)
+            hangs = hanging if hang is None else hang[:, i]
             for k, bone in enumerate(chain.bones):
-                weights[:, column[bone.name]] += hanging * share[:, i] * shares[:, k]
+                weights[:, column[bone.name]] += hangs * share[:, i] * shares[:, k]
     if ears:
         for name, ear in ear_shares(model, tris, rig).items():
             weights *= (1.0 - ear)[:, None]
@@ -1650,8 +1707,9 @@ def build_stroke(context, obj, settings):
     # The hair's own bones can be moved, deleted or added in Edit Mode: where they are is part of the key.
     own = tuple((bone.name, bone.parent, tuple(bone.rest.ravel().tolist())) for bone in rig.skeleton_bones()) \
         if custom else ()
+    # So are the hair's cap depth and light chains its rig state keeps.
     key = (obj.data.as_pointer(), race, number, custom, own, tuple(rig.offset.tolist()),
-           tuple(sorted(weight_kwargs.items())))
+           tuple(sorted(weight_kwargs.items())), rig.cap_depth, tuple(sorted(rig.light)))
     arrays = [rest.co, rest.tris] + (list(fixed) if fixed is not None else [])
     weights = _brush_weights(key, arrays, lambda: hair_weights(rest.co, rest.tris, rig, fixed=fixed, **weight_kwargs))
     return HairStroke(obj, rest.co, rest.tris, rig, weights=weights, **params)
