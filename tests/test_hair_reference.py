@@ -31,10 +31,6 @@ FAILURES = []
 HAIR_MODELS = os.environ.get("MAGIC_FIT_HAIR_MODELS", os.path.join(tempfile.gettempdir(), "magic_fit_hair_models"))
 MAEVE = os.environ.get("MAGIC_FIT_MAEVE", r"G:\Penumbra\DOUX Maeve\chara\human\c0801\obj\hair\h0108\model"
                                           r"\c0801h0108_hir.mdl")
-# Hair over less scalp share than this hangs (SCALP_HALF, tuned with the scalp map; hairing gets it in a later
-# task), and hair over the scalp hangs when it stands STAND_MARGIN farther out than the hair's cap depth.
-SCALP_HALF = 0.65
-STAND_MARGIN = 0.03
 # The races the scalp map is tuned and tested on: Miqo'te, Au Ra and Viera women.
 SUPPORTED = ("c0801", "c1401", "c1801")
 
@@ -57,18 +53,6 @@ def hair_model(race, number):
         return None
     with open(path, "rb") as handle:
         return handle.read()
-
-
-def scalp_at(head, points):
-    """The scalp share at ``points``: inverse-distance mean over their 4 nearest head points (until HeadField
-    has its own)."""
-    result = np.zeros(len(points))
-    for start in range(0, len(points), 4096):
-        distance = np.linalg.norm(points[start:start + 4096, None, :] - head.surface[None], axis=2)
-        nearest = np.argsort(distance, axis=1)[:, :4]
-        weight = 1.0 / np.maximum(np.take_along_axis(distance, nearest, 1), 1e-4)
-        result[start:start + 4096] = (head.scalp_share[nearest] * weight).sum(1) / weight.sum(1)
-    return result
 
 
 def test_decode():
@@ -105,7 +89,7 @@ def test_scalp_supported_races():
         forehead = share[(np.abs(p[:, 0]) < 0.03) & (p[:, 1] < kao[1]) & (below >= 0.11) & (below <= 0.16)].mean()
         behind = p[:, 1] > kao[1]
         neck = share[behind & (p[:, 2] <= np.quantile(p[behind, 2], 0.05))].mean()
-        check(crown > 0.8 and forehead < SCALP_HALF and neck < SCALP_HALF,
+        check(crown > 0.8 and forehead < hairing.SCALP_HALF and neck < hairing.SCALP_HALF,
               "scalp: {:s} crown {:.2f}, forehead {:.2f}, neck {:.2f}".format(race, crown, forehead, neck))
 
 
@@ -129,15 +113,13 @@ def test_maeve_must_haves():
     with open(MAEVE, "rb") as handle:
         points, tris, _held = hair_models.decode(handle.read())
     area = hairing.vertex_areas(points, tris)
-    head = hairing.Reference.get().head("c0801")
-    kao = rig("c0801").by_name[hairing.HEAD].head
-    distance = head.distance(points)
-    share = scalp_at(head, points)
-    over = share >= SCALP_HALF
-    order = np.argsort(distance[over])
-    cumulative = np.cumsum(area[over][order]) / area[over].sum()
-    cap = float(distance[over][order][np.searchsorted(cumulative, 0.5)])
-    hangs = (share < SCALP_HALF) | (distance > cap + STAND_MARGIN)
+    maeve = rig("c0801")
+    head = maeve.head_field
+    kao = maeve.by_name[hairing.HEAD].head
+    distance = maeve.head_distance(points)
+    share = maeve.scalp(points)
+    cap = hairing.cap_depth(points, tris, maeve)
+    hangs = (share < hairing.SCALP_HALF) | (distance > cap + hairing.STAND_MARGIN)
     print("      cap depth {:.3f} m".format(cap))
 
     def row(mask, name, low=None, high=None):

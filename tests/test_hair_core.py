@@ -111,6 +111,56 @@ def test_reference():
     check(far > 0.45, "head: 60 cm below the head is far from it ({:.3f} m, beyond the grid)".format(far))
 
 
+def on_head(race, gap, *angles):
+    """Points ``gap`` off the head of ``race`` along rays from its middle, one per (polar, azimuth) in degrees
+    (azimuth as in `hair.cap`: 0 straight behind, 180 straight ahead)."""
+    p, a = np.radians(np.array(angles, dtype=np.float64).reshape(-1, 2)).T
+    directions = np.column_stack((np.sin(p) * np.sin(a), np.sin(p) * np.cos(a), np.cos(p)))
+    return hair._onto_head(directions, gap, race)[0]
+
+
+def test_scalp_lookup():
+    rig = hairing.Reference.get().rig('c0801', 0)
+    # The neck in front (the head ends at the neck's top; the nape behind is scalp in the game's hairs).
+    top, forehead_low, neck = (on_head('c0801', 0.01, angles) for angles in ((10, 0), (85, 180), (140, 180)))
+    check(rig.scalp(top)[0] > 0.8, "scalp: the crown is scalp ({:.2f})".format(rig.scalp(top)[0]))
+    check(rig.scalp(forehead_low)[0] < 0.2,
+          "scalp: the lower forehead is face ({:.2f})".format(rig.scalp(forehead_low)[0]))
+    check(rig.scalp_gap(top)[0] == 0.0, "scalp: the scalp has no gap to it ({:.3f})".format(rig.scalp_gap(top)[0]))
+    check(rig.scalp_gap(neck)[0] > 0.03,
+          "scalp: the front of the neck is far from the scalp ({:.3f} m)".format(rig.scalp_gap(neck)[0]))
+    offset = np.array((0.02, -0.01, 0.05))
+    moved = rig.moved(offset)
+    points = np.vstack((top, forehead_low, neck))
+    check(np.allclose(moved.scalp(points + offset), rig.scalp(points))
+          and np.allclose(moved.scalp_gap(points + offset), rig.scalp_gap(points)),
+          "scalp: a moved rig looks the scalp up where its head is")
+
+
+def test_cap_depth():
+    rig = hairing.Reference.get().rig('c0801', 0)
+    for gap in (0.01, 0.02):
+        co, tris, _ranges = join([hair.cap(gap=gap, race='c0801')])
+        depth = hairing.cap_depth(co, tris, rig)
+        check(abs(depth - gap) < 0.003, "cap depth: a cap {:.0f} cm off the head ({:.4f} m)".format(gap * 100, depth))
+    offset = np.array((0.0, 0.0, 0.1))
+    co, tris, _ranges = join([hair.cap(gap=0.01, race='c0801')])
+    check(abs(hairing.cap_depth(co + offset, tris, rig.moved(offset)) - hairing.cap_depth(co, tris, rig)) < 1e-6,
+          "cap depth: the same with the rig moved along")
+
+
+def test_cap_depth_fallback():
+    rig = hairing.Reference.get().rig('c0801', 0)
+    top, bottom = on_head('c0801', 0.015, (95, 180), (125, 180))
+    co, tris, _ranges = join([hair.strip(top, bottom, 0.03, (1.0, 0.0, 0.0))])
+    area = float(hairing.vertex_areas(co, tris).sum())
+    check(area > hairing.CAP_MIN_AREA and float(rig.scalp(co).max()) < hairing.SCALP_HALF,
+          "cap depth: the strip over the face is no scalp ({:.0f} cm², scalp share {:.2f} at most)".format(
+              area * 1e4, float(rig.scalp(co).max())))
+    check(hairing.cap_depth(co, tris, rig) == hairing.CAP_FALLBACK,
+          "cap depth: hair with nothing over the scalp takes the fallback")
+
+
 def test_weights():
     hair.clear_scene()
     obj, parts = hair.build()
@@ -1114,7 +1164,8 @@ def test_custom_parts_one_after_another():
 def main():
     magic_fit.register()
     try:
-        for test in (test_reference, test_weights, test_chains, test_layers, test_ears, test_matching, test_button,
+        for test in (test_reference, test_scalp_lookup, test_cap_depth, test_cap_depth_fallback, test_weights,
+                     test_chains, test_layers, test_ears, test_matching, test_button,
                      test_existing_armature, test_customize_plus, test_armature_out_of_view_layer, test_parts,
                      test_selected, test_replace, test_masks, test_pick, test_brush, test_readiness,
                      test_custom_button, test_custom_reuses_rig, test_race_change_rebuilds, test_nothing_hangs,

@@ -201,6 +201,20 @@ SCORE_HANG_LENGTH = 0.08
 SCORE_JOINT_BLEND = 0.10
 # Handicap of all four body hair bones in the score's distances when a hair skeleton has chains.
 SCORE_BODY_HAIR_HANDICAP = 0.08
+# The scalp (see `HeadField.scalp`): where the head's scalp share is at least SCALP_HALF, tuned on the
+# Miqo'te, Au Ra and Viera women and the real test hair. A point's share is blended from its SCALP_NEIGHBOURS
+# nearest head points.
+SCALP_HALF = 0.65
+SCALP_NEIGHBOURS = 4
+# Hair over the scalp stands off it when it lies STAND_MARGIN farther out than the hair's cap depth (see
+# `cap_depth`), blending in over STAND_BLEND.
+STAND_MARGIN = 0.03
+STAND_BLEND = 0.01
+# A hair with less than CAP_MIN_AREA (m²) over the scalp has no cap of its own: its cap depth is CAP_FALLBACK.
+CAP_FALLBACK = 0.01
+CAP_MIN_AREA = 0.001
+# Head points are looked up this many hair points at a time.
+HEAD_CHUNK = 2048
 
 
 class HairError(Exception):
@@ -230,7 +244,8 @@ class HeadField:
     """The signed distance to a race's head (metres, negative inside): from a grid of 1 cm cells near the
     head, and from points spread over its surface beyond the grid's reach (12.7 cm). ``scalp_share`` gives
     each of those points its scalp share (0..1): the share of the game's hairstyles that hold hair there on
-    the head, 0 on the front of the face (see tools/make_scalp_map.py); all 0 without a scalp map."""
+    the head, 0 on the front of the face (see tools/make_scalp_map.py); all 0 without a scalp map. `scalp` and
+    `scalp_gap` look the scalp up for any point."""
 
     def __init__(self, origin, step, grid, surface, scalp=None):
         self.origin = np.asarray(origin, dtype=np.float64)
@@ -241,6 +256,40 @@ class HeadField:
         self.scalp_share = (np.zeros(len(self.surface)) if scalp is None
                             else np.asarray(scalp, dtype=np.float64))
         self._tree = None
+        self._scalp_gap = None
+
+    def _nearest(self, points, count):
+        """The ``count`` nearest head points of each of ``points`` ((n, count) indices, in no order) and how far
+        they are."""
+        points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+        count = min(count, len(self.surface))
+        index = np.zeros((len(points), count), dtype=np.int64)
+        distance = np.zeros((len(points), count))
+        for start in range(0, len(points), HEAD_CHUNK):
+            d = np.linalg.norm(points[start:start + HEAD_CHUNK, None, :] - self.surface[None], axis=2)
+            nearest = np.argpartition(d, count - 1, axis=1)[:, :count]
+            index[start:start + HEAD_CHUNK] = nearest
+            distance[start:start + HEAD_CHUNK] = np.take_along_axis(d, nearest, 1)
+        return index, distance
+
+    def scalp(self, points):
+        """The scalp share at ``points``: the inverse-distance mean of their SCALP_NEIGHBOURS nearest head
+        points' shares."""
+        index, distance = self._nearest(points, SCALP_NEIGHBOURS)
+        weight = 1.0 / np.maximum(distance, 1e-4)
+        return (self.scalp_share[index] * weight).sum(1) / weight.sum(1)
+
+    def scalp_gap(self, points):
+        """How far ``points`` are from the scalp along the head: from their nearest head point to the nearest
+        head point with a scalp share of at least SCALP_HALF (0 on the scalp; infinite without one)."""
+        if self._scalp_gap is None:
+            on = self.scalp_share >= SCALP_HALF
+            self._scalp_gap = np.full(len(self.surface), np.inf)
+            if on.any():
+                self._scalp_gap = np.linalg.norm(self.surface[:, None, :] - self.surface[None, on], axis=2).min(1)
+                self._scalp_gap[on] = 0.0
+        index, _distance = self._nearest(points, 1)
+        return self._scalp_gap[index[:, 0]]
 
     def distance(self, points):
         points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
@@ -382,6 +431,14 @@ class HairRig:
     def head_distance(self, points):
         return self.head_field.distance(np.asarray(points, dtype=np.float64) - self.offset)
 
+    def scalp(self, points):
+        """The scalp share at world space ``points`` (see `HeadField.scalp`)."""
+        return self.head_field.scalp(self.model(points))
+
+    def scalp_gap(self, points):
+        """How far world space ``points`` are from the scalp along the head (see `HeadField.scalp_gap`)."""
+        return self.head_field.scalp_gap(self.model(points))
+
     def head_height(self, name=HEAD):
         return float(self.by_name[name].head[2] + self.offset[2])
 
@@ -411,6 +468,22 @@ def components(count, edges):
 def hanging_share(distance, start, length):
     """The share of hair ``distance`` from the scalp that hangs from the hair bones."""
     return 1.0 - np.exp(-np.maximum(0.0, np.asarray(distance, dtype=np.float64) - start) / max(length, 1e-6))
+
+
+def cap_depth(points, tris, rig):
+    """How far the hair's cap lies off the head: the area-weighted median head distance (none inside) of its
+    vertices over the scalp (scalp share at least SCALP_HALF), or CAP_FALLBACK when less than CAP_MIN_AREA of
+    it lies there."""
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    distance = rig.head_distance(points)
+    area = vertex_areas(points, np.asarray(tris, dtype=np.int64).reshape(-1, 3))
+    over = (rig.scalp(points) >= SCALP_HALF) & np.isfinite(distance)
+    if area[over].sum() < CAP_MIN_AREA:
+        return CAP_FALLBACK
+    depth = np.maximum(distance[over], 0.0)
+    order = np.argsort(depth)
+    cumulative = np.cumsum(area[over][order]) / area[over].sum()
+    return float(depth[order][min(np.searchsorted(cumulative, 0.5), len(order) - 1)])
 
 
 def neck_split(points, rig, neck_weight):
