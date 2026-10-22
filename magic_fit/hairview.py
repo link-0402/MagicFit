@@ -14,13 +14,24 @@
   (`overlay_meshes`) by the chain that moves it (`chain_colors`): each chain in its kind's colour, every second
   chain of a kind darker, the chain picked in the list at full strength and the others faded. Weight on j_kao,
   the neck, the upper back or the ears gives no tint. The tint is drawn on the displayed (posed) hair, nudged
-  a little off it either way along its normals, depth-tested with the scene. A mesh's tint is built again when
-  it moves or changes (depsgraph updates), at most every REBUILD_INTERVAL; nothing is written to the meshes.
-  No tint on a mesh in Edit Mode.
+  a little off it either way along its (displayed) normals, depth-tested with the scene. A mesh's tint is built
+  again when it moves or changes (depsgraph updates), at most every REBUILD_INTERVAL, and only what changed:
+  its normals only when the hair moved, its colours only when its weights or the chains changed. Nothing is
+  written to the meshes. No tint on a mesh in Edit Mode.
+- Over the tint, in front of everything and in every mode, the overlay draws each chain bone of the current
+  armature as a line from its head to its tail (`chain_lines`: posed, or the edit bones in Edit Mode), in the
+  colour its chain's tint has, the picked chain at full strength and the others faded. Blender draws bone
+  colours in Pose and Edit Mode only, so this is what shows the chains in Object Mode. The lines follow the
+  armature's pose and transform.
+- Nothing is drawn while the 3D view shows X-ray.
 """
 
 import time
+from contextlib import contextmanager
+from itertools import chain as flatten
+from operator import itemgetter
 
+import bmesh
 import bpy
 import gpu
 import numpy as np
@@ -57,6 +68,11 @@ SHADE_DARK = 0.6
 NUDGE = 0.0005
 # Seconds at least between two reads of a mesh for its tint while it keeps changing (posing, painting).
 REBUILD_INTERVAL = 0.25
+# Width of the chain bones' lines, in pixels at the default resolution scale.
+LINE_WIDTH = 3.0
+# Displayed positions that moved less than this (m) since the last read count as where they were: the
+# deformed hair then keeps its normals (a paint stroke doesn't move it, up to rounding).
+MOVE_TOLERANCE = 1e-6
 
 # {armature object's session uid: its In Front before Show Chains turned it on}
 _in_front = {}
@@ -67,6 +83,8 @@ _restored = {}
 _pending = set()
 # {(scene name, view layer name): {mesh object's session uid: _Tint}}
 _tints = {}
+# {(scene name, view layer name): _Lines of the current armature}
+_lines = {}
 _handle = None
 _tag_due = None      # time.perf_counter() the views are next redrawn at, while a timer waits for it
 
@@ -162,7 +180,7 @@ def show_chains_changed(wm, context):
         _restored.update(_in_front)
         _in_front.clear()
         _pending.clear()
-        _tints.clear()
+        clear()
     redraw_views()
 
 
@@ -193,48 +211,101 @@ def _apply_pending_in_front():
 def chain_weights(obj, rig_state):
     """How much each chain of ``rig_state`` (`Object.magic_fit_hair_rig`) moves each vertex of ``obj``
     ((vertices, chains)): the sum of the vertex's weights on the chain's bones (``obj.vertex_groups``)."""
-    chains = list(rig_state.chains)
-    column = {}
-    for c, chain in enumerate(chains):
+    chains = len(rig_state.chains)
+    count = len(obj.data.vertices)
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(obj.data)
+        layer = bm.verts.layers.deform.active
+        if layer is None:
+            return np.zeros((count, chains))
+        # Python reads each vertex's groups fastest as two lists, its group indices and its weights.
+        deform = list(map(itemgetter(layer), bm.verts))
+        groups = [vert.keys() for vert in deform]
+        values = [vert.values() for vert in deform]
+    finally:
+        bm.free()
+    sizes = np.fromiter(map(len, groups), dtype=np.int64, count=count)
+    total = int(sizes.sum())
+    groups = np.fromiter(flatten.from_iterable(groups), dtype=np.int64, count=total)
+    values = np.fromiter(flatten.from_iterable(values), dtype=np.float64, count=total)
+    # Each vertex group's chain; groups of no chain go to a column past the chains, dropped at the end.
+    column = np.full(max(len(obj.vertex_groups), int(groups.max(initial=-1)) + 1), chains, dtype=np.int64)
+    for c, chain in enumerate(rig_state.chains):
         for name in chain.bones.split(","):
             group = obj.vertex_groups.get(name) if name else None
             if group is not None:
                 column[group.index] = c
-    weights = np.zeros((len(obj.data.vertices), len(chains)))
-    if column:
-        for vert in obj.data.vertices:
-            for elem in vert.groups:
-                c = column.get(elem.group)
-                if c is not None:
-                    weights[vert.index, c] += elem.weight
-    return weights
+    cells = np.repeat(np.arange(count) * (chains + 1), sizes) + column[groups]
+    weights = np.bincount(cells, values, minlength=count * (chains + 1)).reshape(count, chains + 1)
+    return weights[:, :chains]
 
 
-def chain_colors(weights, kinds, active, rgb=kind_rgb):
-    """The tint of each vertex ((n, 4) float32 RGBA) from its ``weights`` (n, chains) on chains of ``kinds``.
-    A chain's colour is its kind's (``rgb``), SHADE_DARK times that for every second chain of a kind; a vertex's
-    is the mean of its chains', by weight. Its alpha is TINT_ALPHA times its weight on the chains, FADE times
-    that on chains other than ``active`` (when that is one of them). Vertices without chain weight are clear."""
-    weights = np.asarray(weights, dtype=np.float64)
-    result = np.zeros((len(weights), 4), dtype=np.float32)
-    count = weights.shape[1] if weights.ndim == 2 else 0
-    if not count or not len(weights):
-        return result
-    shades = np.empty((count, 3))
+def chain_shades(kinds, rgb=kind_rgb):
+    """Each chain's colour ((chains, 3)) for chains of ``kinds``: its kind's (``rgb``), SHADE_DARK times that for
+    every second chain of a kind (in list order)."""
+    shades = np.empty((len(kinds), 3))
     seen = {}
     for c, kind in enumerate(kinds):
         number = seen.get(kind, 0)
         seen[kind] = number + 1
         shades[c] = np.asarray(rgb(kind), dtype=np.float64)[:3] * (SHADE_DARK if number % 2 else 1.0)
-    total = weights.sum(axis=1)
-    has = total > 1e-9
-    result[has, :3] = weights[has] @ shades / total[has, None]
+    return shades
+
+
+def chain_strengths(count, active):
+    """Each of ``count`` chains' strength: 1 for ``active`` and FADE for the others, or 1 for all when
+    ``active`` is none of them."""
     strength = np.ones(count)
     if 0 <= active < count:
         strength[:] = FADE
         strength[active] = 1.0
-    result[:, 3] = TINT_ALPHA * np.clip(weights @ strength, 0.0, 1.0)
+    return strength
+
+
+def chain_colors(weights, kinds, active, rgb=kind_rgb):
+    """The tint of each vertex ((n, 4) float32 RGBA) from its ``weights`` (n, chains) on chains of ``kinds``.
+    A chain's colour is `chain_shades`'; a vertex's is the mean of its chains', by weight. Its alpha is
+    TINT_ALPHA times its weight on the chains, FADE times that on chains other than ``active`` (when that is
+    one of them). Vertices without chain weight are clear."""
+    weights = np.asarray(weights, dtype=np.float64)
+    result = np.zeros((len(weights), 4), dtype=np.float32)
+    count = weights.shape[1] if weights.ndim == 2 else 0
+    if not count or not len(weights):
+        return result
+    shades = chain_shades(kinds, rgb)
+    total = weights.sum(axis=1)
+    has = total > 1e-9
+    result[has, :3] = weights[has] @ shades / total[has, None]
+    result[:, 3] = TINT_ALPHA * np.clip(weights @ chain_strengths(count, active), 0.0, 1.0)
     return result
+
+
+def chain_lines(armature_object, rig_state, rgb=kind_rgb):
+    """The lines drawn for the chain bones of ``rig_state`` in ``armature_object``: positions ((2k, 3) float32,
+    world space, each bone's head then its tail; posed, or the edit bones' while the armature is in Edit Mode)
+    and their colours ((2k, 4) float32): the chain's colour (`chain_shades`), alpha its strength
+    (`chain_strengths`). Bones listed in a chain but not in the armature are left out."""
+    chains = rig_state.chains
+    shades = chain_shades([chain.kind for chain in chains], rgb)
+    strengths = chain_strengths(len(chains), rig_state.active)
+    if armature_object.mode == 'EDIT':
+        bones = armature_object.data.edit_bones
+    else:
+        bones = armature_object.pose.bones
+    points, colors = [], []
+    for c, chain in enumerate(chains):
+        color = (*shades[c], strengths[c])
+        for name in chain.bones.split(","):
+            bone = bones.get(name) if name else None
+            if bone is not None:
+                points += (bone.head, bone.tail)
+                colors += (color, color)
+    if not points:
+        return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 4), dtype=np.float32)
+    m = np.array(armature_object.matrix_world, dtype=np.float64)
+    positions = np.array(points, dtype=np.float64) @ m[:3, :3].T + m[:3, 3]
+    return positions.astype(np.float32), np.array(colors, dtype=np.float32)
 
 
 def overlay_meshes(context, armature_object):
@@ -266,7 +337,7 @@ class _Tint:
 
     def __init__(self):
         self.co = None              # world space positions, as displayed
-        self.normals = None         # their normals (`hairing.vertex_normals`)
+        self.normals = None         # their normals (`_evaluated_normals`)
         self.tris = None
         self.data = 0               # session uid of the mesh data the weights were read from
         self.weights = None         # `chain_weights`
@@ -279,19 +350,81 @@ class _Tint:
         self.reweigh = True         # weights to be read again
 
 
+class _Lines:
+    """The lines of one armature's chain bones (`chain_lines`)."""
+
+    __slots__ = ("uid", "data", "positions", "colors", "key", "batch", "moved")
+
+    def __init__(self, armature_object):
+        self.uid = armature_object.session_uid
+        self.data = armature_object.data.session_uid
+        self.positions = None
+        self.colors = None
+        self.key = None             # the chains' bones and kinds, the active chain and the kinds' colours
+        self.batch = None           # what's drawn: None to be built, False when there are no lines
+        self.moved = True           # the armature was posed or moved since the lines were made
+
+
+def _forget_old_layers(store):
+    """Forget the entries of ``store`` ({(scene name, view layer name): ...}) of scenes and view layers that were
+    renamed or deleted since."""
+    for old in list(store):
+        scene = bpy.data.scenes.get(old[0])
+        if scene is None or scene.view_layers.get(old[1]) is None:
+            del store[old]
+
+
 def _layer_tints(context):
     """The tints of the view layer in ``context`` ({mesh object's session uid: _Tint}), made on first use.
     Windows can show different view layers side by side."""
     key = (context.scene.name, context.view_layer.name)
     tints = _tints.get(key)
     if tints is None:
-        # Forget scenes and view layers that were renamed or deleted since.
-        for old in list(_tints):
-            scene = bpy.data.scenes.get(old[0])
-            if scene is None or scene.view_layers.get(old[1]) is None:
-                del _tints[old]
+        _forget_old_layers(_tints)
         tints = _tints[key] = {}
     return tints
+
+
+def _evaluated_normals(obj, depsgraph):
+    """The normals of ``obj``'s displayed (evaluated) mesh's vertices, in world space ((n, 3))."""
+    obj_eval = obj.evaluated_get(depsgraph)
+    vertices = obj_eval.data.vertices
+    normals = np.empty(len(vertices) * 3, dtype=np.float32)
+    vertices.foreach_get("normal", normals)
+    m = np.array(obj_eval.matrix_world.to_3x3().inverted_safe().transposed(), dtype=np.float64)
+    normals = normals.reshape(-1, 3) @ m.T
+    return normals / np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12)
+
+
+def _same_place(tint, co, tris):
+    """Whether displayed positions ``co`` and triangles ``tris`` are those ``tint`` was built with."""
+    return (tint.co is not None and tint.co.shape == co.shape and np.array_equal(tint.tris, tris)
+            and (not len(co) or float(np.abs(tint.co - co).max()) <= MOVE_TOLERANCE))
+
+
+def _refresh_lines(context, armature_object):
+    """The lines of ``armature_object``'s chain bones for the view layer in ``context`` (_Lines), made again
+    when the armature was posed or moved, or its chains changed; every time in Edit Mode, where bones are
+    edited without telling."""
+    key = (context.scene.name, context.view_layer.name)
+    lines = _lines.get(key)
+    if lines is None:
+        _forget_old_layers(_lines)
+    if (lines is None or lines.uid != armature_object.session_uid
+            or lines.data != armature_object.data.session_uid):
+        lines = _lines[key] = _Lines(armature_object)
+    rig = armature_object.magic_fit_hair_rig
+    lines_key = (tuple((chain.bones, chain.kind) for chain in rig.chains), rig.active,
+                 tuple(kind_rgb(kind) for kind in hairrig.KINDS))
+    if lines.moved or lines.key != lines_key or armature_object.mode == 'EDIT':
+        positions, colors = chain_lines(armature_object, rig)
+        if (lines.positions is None or not np.array_equal(positions, lines.positions)
+                or not np.array_equal(colors, lines.colors)):
+            lines.positions, lines.colors = positions, colors
+            lines.batch = None
+        lines.key = lines_key
+        lines.moved = False
+    return lines
 
 
 def _refresh(context, armature_object, meshes):
@@ -324,15 +457,18 @@ def _refresh(context, armature_object, meshes):
                 if tint.reweigh:
                     tint.weights = chain_weights(obj, rig)
                     tint.data, tint.weights_key = obj.data.session_uid, weights_key
+                    tint.colors_key = None
                 if tint.moved or tint.co is None or len(tint.co) != len(tint.weights):
                     if depsgraph is None:
                         depsgraph = context.evaluated_depsgraph_get()
                     geometry = read_geometry(obj, depsgraph, source='DISPLAYED')
-                    tint.co, tint.tris = geometry.co, geometry.tris
-                    tint.normals = hairing.vertex_normals(tint.co, tint.tris)
+                    # A paint stroke lists the hair's geometry as updated too: keep what didn't move.
+                    if not _same_place(tint, geometry.co, geometry.tris):
+                        tint.co, tint.tris = geometry.co, geometry.tris
+                        tint.normals = _evaluated_normals(obj, depsgraph)
+                        tint.batch = None
                 tint.moved = tint.reweigh = False
                 tint.built = now
-                tint.colors_key = None
         if tint.colors_key != colors_key and len(tint.weights) == len(tint.co):
             tint.colors = chain_colors(tint.weights, kinds, rig.active)
             tint.colors_key = colors_key
@@ -357,6 +493,7 @@ def tint_arrays(tint):
 
 def clear():
     _tints.clear()
+    _lines.clear()
 
 
 # -----------------------------------------------------------------------------
@@ -364,22 +501,31 @@ def clear():
 
 @persistent
 def _on_depsgraph_update(_scene, depsgraph):
-    if not _tints:
+    if not _tints and not _lines:
         return
     for update in depsgraph.updates:
         data = update.id.original
         if isinstance(data, bpy.types.Object):
             if update.is_updated_geometry or update.is_updated_transform:
+                uid = data.session_uid
                 for tints in _tints.values():
-                    tint = tints.get(data.session_uid)
+                    tint = tints.get(uid)
                     if tint is not None:
                         tint.moved = True
+                # Posing lists the armature object's geometry.
+                for lines in _lines.values():
+                    if lines.uid == uid:
+                        lines.moved = True
         elif isinstance(data, bpy.types.Mesh):
             # Weights live on the mesh data: posing doesn't list it, painting does.
             for tints in _tints.values():
                 for tint in tints.values():
                     if tint.data == data.session_uid:
                         tint.reweigh = True
+        elif isinstance(data, bpy.types.Armature):
+            for lines in _lines.values():
+                if lines.data == data.session_uid:
+                    lines.moved = True
 
 
 def redraw_views(delay=0.01):
@@ -408,15 +554,42 @@ def _tag_views():
 # -----------------------------------------------------------------------------
 # Drawing
 
+def view_shows_chains(space):
+    """Whether the overlay is drawn in ``space``: a 3D view with its overlays shown and X-ray off (X-ray has
+    its own switch in wireframe shading, and none in Material Preview and Rendered)."""
+    if space is None or space.type != 'VIEW_3D' or not space.overlay.show_overlays:
+        return False
+    shading = space.shading
+    if shading.type == 'WIREFRAME':
+        return not shading.show_xray_wireframe
+    return shading.type != 'SOLID' or not shading.show_xray
+
+
+@contextmanager
+def _drawing_state(state):
+    """Blend by alpha, depth-test LESS_EQUAL without writing depth, through ``state`` (`gpu.state`), and put
+    blend, depth test, depth mask and line width back afterwards, also when drawing fails."""
+    try:
+        state.blend_set('ALPHA')
+        state.depth_mask_set(False)
+        state.depth_test_set('LESS_EQUAL')
+        yield
+    finally:
+        state.depth_test_set('NONE')
+        state.depth_mask_set(True)
+        state.blend_set('NONE')
+        state.line_width_set(1.0)
+
+
 def _draw():
     if bpy.app.background:
         return
     context = bpy.context
     if not _showing(context.window_manager):
         _tints.clear()
+        _lines.clear()
         return
-    space = context.space_data
-    if space is None or space.type != 'VIEW_3D' or not space.overlay.show_overlays:
+    if not view_shows_chains(context.space_data):
         return
     armature = follow_current(context)
     if armature is None:
@@ -424,24 +597,31 @@ def _draw():
     meshes = overlay_meshes(context, armature)
     _refresh(context, armature, meshes)
     tints = _layer_tints(context)
+    lines = _refresh_lines(context, armature)
 
-    shader = gpu.shader.from_builtin('SMOOTH_COLOR')
-    gpu.state.blend_set('ALPHA')
-    gpu.state.depth_mask_set(False)
-    gpu.state.depth_test_set('LESS_EQUAL')
-    for obj in meshes:
-        tint = tints.get(obj.session_uid)
-        if tint is None or tint.colors is None:
-            continue
-        if tint.batch is None:
-            positions, colors, indices = tint_arrays(tint)
-            tint.batch = batch_for_shader(shader, 'TRIS', {"pos": positions, "color": colors},
-                                          indices=indices) if len(indices) else False
-        if tint.batch:
-            tint.batch.draw(shader)
-    gpu.state.depth_test_set('NONE')
-    gpu.state.depth_mask_set(True)
-    gpu.state.blend_set('NONE')
+    with _drawing_state(gpu.state):
+        shader = gpu.shader.from_builtin('SMOOTH_COLOR')
+        for obj in meshes:
+            tint = tints.get(obj.session_uid)
+            if tint is None or tint.colors is None:
+                continue
+            if tint.batch is None:
+                positions, colors, indices = tint_arrays(tint)
+                tint.batch = batch_for_shader(shader, 'TRIS', {"pos": positions, "color": colors},
+                                              indices=indices) if len(indices) else False
+            if tint.batch:
+                tint.batch.draw(shader)
+        # The chain bones, in front of everything.
+        shader = gpu.shader.from_builtin('POLYLINE_SMOOTH_COLOR')
+        if lines.batch is None:
+            lines.batch = False
+            if len(lines.positions):
+                lines.batch = batch_for_shader(shader, 'LINES', {"pos": lines.positions, "color": lines.colors})
+        if lines.batch:
+            gpu.state.depth_test_set('ALWAYS')
+            shader.uniform_float("viewportSize", gpu.state.viewport_get()[2:])
+            shader.uniform_float("lineWidth", LINE_WIDTH * context.preferences.system.pixel_size)
+            lines.batch.draw(shader)
 
 
 # -----------------------------------------------------------------------------
@@ -464,7 +644,7 @@ def _on_load(_dummy=None):
     _in_front.clear()
     _restored.clear()
     _pending.clear()
-    _tints.clear()
+    clear()
     wm = bpy.context.window_manager
     if _showing(wm):
         wm.magic_fit_show_chains = False
@@ -478,10 +658,12 @@ def _on_undo_redo(_scene=None, _depsgraph=None):
         _set_in_front(dict.fromkeys(_in_front, True))
     else:
         _set_in_front(_restored)
-    # The meshes may have changed in any way.
+    # The meshes and armatures may have changed in any way.
     for tints in _tints.values():
         for tint in tints.values():
             tint.moved = tint.reweigh = True
+    for lines in _lines.values():
+        lines.moved = True
 
 
 _HANDLERS = (

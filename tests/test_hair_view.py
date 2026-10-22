@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 """Headless tests for the chain view of the hair's own skeleton (Own Skeleton): its bones coloured by their
-chain's kind, the Show Chains toggle drawing them in front, and the overlay tinting the hair by its chains
-(its colours, weights and rebuilds; batches can't be drawn headless).
+chain's kind, the Show Chains toggle drawing them in front, and the overlay tinting the hair by its chains and
+drawing the chain bones as lines (their colours, weights, positions and rebuilds, the X-ray skip and the GPU
+state put back; batches can't be drawn headless).
 
 Run from the repository root:
     blender -b --factory-startup --python tests/test_hair_view.py
@@ -13,9 +14,11 @@ import shutil
 import sys
 import tempfile
 import traceback
+from types import SimpleNamespace
 
 import bpy
 import numpy as np
+from mathutils import Vector
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -342,6 +345,33 @@ def test_chain_weights():
     colors = hairview.chain_colors(weights, [chain.kind for chain in rig.chains], rig.active)
     check(not colors[total < 1e-6, 3].any() and colors[total > 0.99, 3].min() > 0.0,
           "chain weights: head weights give no tint")
+    check(weights.shape == looped_chain_weights(obj, rig).shape
+          and np.allclose(weights, looped_chain_weights(obj, rig), atol=1e-6),
+          "chain weights: the same as a vertex by vertex sum")
+    # Some weights painted off and others on (in groups of other chains and of no chain).
+    group.add(list(range(0, count, 3)), 0.0, 'REPLACE')
+    other = obj.vertex_groups[rig.chains[-1].bones.split(",")[-1]]
+    other.add(list(range(1, count, 5)), 0.4, 'ADD')
+    obj.vertex_groups[hairing.HEAD].add(list(range(2, count, 7)), 0.3, 'REPLACE')
+    check(np.allclose(hairview.chain_weights(obj, rig), looped_chain_weights(obj, rig), atol=1e-6),
+          "chain weights: ...also after weights change")
+
+
+def looped_chain_weights(obj, rig):
+    """`hairview.chain_weights` as it was first written: vertex by vertex, group by group."""
+    column = {}
+    for c, chain in enumerate(rig.chains):
+        for name in chain.bones.split(","):
+            group = obj.vertex_groups.get(name) if name else None
+            if group is not None:
+                column[group.index] = c
+    weights = np.zeros((len(obj.data.vertices), len(rig.chains)))
+    for vert in obj.data.vertices:
+        for elem in vert.groups:
+            c = column.get(elem.group)
+            if c is not None:
+                weights[vert.index, c] += elem.weight
+    return weights
 
 
 def test_chain_weights_edge_cases():
@@ -354,6 +384,11 @@ def test_chain_weights_edge_cases():
     check(weights.shape == (8, len(rig.chains)) and not weights.any(), "chain weights: no hair groups, zeros")
     cube.vertex_groups.clear()
     check(not hairview.chain_weights(cube, rig).any(), "chain weights: no groups at all, zeros")
+    bpy.ops.mesh.primitive_cube_add()
+    bare = bpy.context.active_object
+    check(hairview.chain_weights(bare, rig).shape == (8, len(rig.chains))
+          and not hairview.chain_weights(bare, rig).any(), "chain weights: a mesh never weighted, zeros")
+    bpy.data.objects.remove(bare)
     empty = bpy.data.objects.new("No Chains", bpy.data.armatures.new("No Chains"))
     check(hairview.chain_weights(obj, empty.magic_fit_hair_rig).shape == (len(obj.data.vertices), 0),
           "chain weights: no chains, no columns")
@@ -471,13 +506,274 @@ def test_overlay_rebuilds():
         hairview.clear()
 
 
+def expected_segments(armature, rig, bones=None):
+    """(chain, head, tail) in world space of every chain bone there is, in chain and bone order: from the posed
+    bones, or from ``bones`` ({name: (head, tail)} in armature space)."""
+    matrix = armature.matrix_world
+    result = []
+    for c, chain in enumerate(rig.chains):
+        for name in chain.bones.split(","):
+            if bones is not None:
+                if name in bones:
+                    result.append((c, matrix @ Vector(bones[name][0]), matrix @ Vector(bones[name][1])))
+                continue
+            bone = armature.pose.bones.get(name) if name else None
+            if bone is not None:
+                result.append((c, matrix @ bone.head, matrix @ bone.tail))
+    return result
+
+
+def same_segments(positions, segments):
+    if positions.shape != (2 * len(segments), 3) or positions.dtype != np.float32:
+        return False
+    expected = np.array([[tuple(head), tuple(tail)] for _c, head, tail in segments]).reshape(-1, 3)
+    return np.allclose(positions, expected, atol=1e-5)
+
+
+def test_chain_lines():
+    _obj, armature = rig_scene()
+    context = bpy.context
+    rig = armature.magic_fit_hair_rig
+    check(len(rig.chains) >= 3, "lines: the hair has three chains or more")
+    # Moved and posed: the lines follow both.
+    armature.location = (0.3, -0.2, 0.1)
+    armature.rotation_euler.z = 0.5
+    bone = armature.pose.bones[rig.chains[0].bones.split(",")[0]]
+    bone.rotation_mode = 'XYZ'
+    bone.rotation_euler.x = 0.6
+    context.view_layer.update()
+    positions, colors = hairview.chain_lines(armature, rig)
+    segments = expected_segments(armature, rig)
+    check(same_segments(positions, segments),
+          "lines: a segment from head to tail of every chain bone, posed, in world space ({} for {:d})".format(
+              positions.shape, len(segments)))
+    check(colors.shape == (len(positions), 4) and colors.dtype == np.float32, "lines: (2k, 4) float32 colours")
+    rest = armature.data.bones[bone.name]
+    check(not np.allclose(positions[1], np.array(armature.matrix_world @ rest.tail_local), atol=1e-4),
+          "lines: the posed bone, not its rest")
+
+    # Colours: each chain's kind's, every second of a kind darker; the picked chain full, the others faded.
+    palette = {"bangs": (1.0, 0.0, 0.0), "side": (0.0, 1.0, 0.0), "back": (0.0, 0.0, 1.0), "ponytail": (1.0, 1.0, 0.0)}
+    kinds = ["side", "side", "back"] + ["ponytail"] * (len(rig.chains) - 3)
+    for chain, kind in zip(rig.chains, kinds):
+        chain.kind = kind
+    rig.active = 2
+    positions, colors = hairview.chain_lines(armature, rig, rgb=lambda kind: palette[kind])
+    chain_of = np.repeat([c for c, _head, _tail in expected_segments(armature, rig)], 2)
+    seen, expected = {}, []
+    for kind in kinds:
+        expected.append(np.array(palette[kind]) * (hairview.SHADE_DARK if seen.get(kind, 0) % 2 else 1.0))
+        seen[kind] = seen.get(kind, 0) + 1
+    check(len(chain_of) == len(colors) and all(np.allclose(colors[k, :3], expected[c]) for k, c in enumerate(chain_of)),
+          "lines: each chain in its kind's colour, the second side chain darker")
+    check(np.allclose(colors[chain_of == 2, 3], 1.0) and np.allclose(colors[chain_of != 2, 3], hairview.FADE),
+          "lines: the picked chain at full strength, the others faded")
+    rig.active = 99
+    _positions, colors = hairview.chain_lines(armature, rig, rgb=lambda kind: palette[kind])
+    check(np.allclose(colors[:, 3], 1.0), "lines: no chain picked, all at full strength")
+    check(hairview.chain_lines(armature, rig)[1][:, :3].max() > 0.0, "lines: theme colours by default")
+
+    # A bone listed in a chain but not in the armature is left out.
+    count = len(positions)
+    rig.chains[1].bones += ",j_ex_no_such_bone"
+    positions, _colors = hairview.chain_lines(armature, rig)
+    check(len(positions) == count and same_segments(positions, expected_segments(armature, rig)),
+          "lines: a bone missing from the armature is skipped")
+
+    # In Edit Mode the edit bones are drawn, as Blender draws them.
+    layer = context.view_layer
+    for each in context.selected_objects:
+        each.select_set(False)
+    armature.select_set(True)
+    layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='EDIT')
+    try:
+        edit = armature.data.edit_bones[bone.name]
+        edit.tail = edit.tail + Vector((0.0, 0.0, 0.05))
+        bones = {each.name: (each.head.copy(), each.tail.copy()) for each in armature.data.edit_bones}
+        positions, _colors = hairview.chain_lines(armature, rig)
+        check(same_segments(positions, expected_segments(armature, rig, bones)),
+              "lines: in Edit Mode, the edit bones")
+    finally:
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+
+def test_line_rebuilds():
+    obj, armature = rig_scene()
+    context = bpy.context
+    wm = context.window_manager
+    rig = armature.magic_fit_hair_rig
+    wm.magic_fit_show_chains = True
+    try:
+        lines = hairview._refresh_lines(context, armature)
+        check(lines is not None and same_segments(lines.positions, expected_segments(armature, rig)),
+              "line rebuild: built for the current armature")
+        lines.batch = "drawn"
+        hairview._refresh_lines(context, armature)
+        check(lines.batch == "drawn", "line rebuild: nothing changed, nothing built again")
+        bone = armature.pose.bones[rig.chains[0].bones.split(",")[0]]
+        bone.rotation_mode = 'XYZ'
+        bone.rotation_euler.x = 0.5
+        context.view_layer.update()
+        check(lines.moved, "line rebuild: posing marks the lines")
+        again = hairview._refresh_lines(context, armature)
+        check(again is lines and not lines.moved and lines.batch is None
+              and same_segments(lines.positions, expected_segments(armature, rig)),
+              "line rebuild: ...and they follow the pose")
+        lines.batch = "drawn"
+        armature.location.x += 0.2
+        context.view_layer.update()
+        hairview._refresh_lines(context, armature)
+        check(lines.batch is None and same_segments(lines.positions, expected_segments(armature, rig)),
+              "line rebuild: moving the armature moves them")
+        lines.batch = "drawn"
+        alpha = lines.colors[:, 3].copy()
+        rig.active = 1 if rig.active != 1 else 0
+        hairview._refresh_lines(context, armature)
+        check(lines.batch is None and not np.array_equal(lines.colors[:, 3], alpha),
+              "line rebuild: another chain picked recolours them")
+        check(hairview._refresh_lines(context, armature) is lines and len(hairview._lines) == 1,
+              "line rebuild: one per view layer")
+        # The lines don't need a tinted mesh: the armature alone, current, has them.
+        context.view_layer.objects.active = armature
+        obj.hide_set(True)
+        check(hairview.overlay_meshes(context, armature) == []
+              and hairview._refresh_lines(context, armature) is lines, "line rebuild: drawn without a tint")
+        obj.hide_set(False)
+        wm.magic_fit_show_chains = False
+        check(not hairview._lines, "line rebuild: off forgets them")
+        wm.magic_fit_show_chains = True
+        hairview._refresh_lines(context, armature)
+        hairview.clear()
+        check(not hairview._lines and not hairview._tints, "line rebuild: clear forgets them")
+    finally:
+        obj.hide_set(False)
+        wm.magic_fit_show_chains = False
+        hairview.clear()
+
+
+def test_normals_only_when_moved():
+    obj, armature = rig_scene()
+    context = bpy.context
+    wm = context.window_manager
+    rig = armature.magic_fit_hair_rig
+    calls = []
+    original = hairview._evaluated_normals
+
+    def counted(*args, **kwargs):
+        calls.append(args)
+        return original(*args, **kwargs)
+
+    hairview._evaluated_normals = counted
+    wm.magic_fit_show_chains = True
+    try:
+        meshes = hairview.overlay_meshes(context, armature)
+        hairview._refresh(context, armature, meshes)
+        tint = hairview._layer_tints(context)[obj.session_uid]
+        check(len(calls) == 1 and tint.normals.shape == tint.co.shape, "normals: read for the first tint")
+        lengths = np.linalg.norm(tint.normals, axis=1)
+        check(np.allclose(lengths[lengths > 0], 1.0, atol=1e-4), "normals: unit length")
+        # A paint stroke: the weights change, the depsgraph lists the hair's geometry too, nothing moves.
+        positions = tint.co
+        group = obj.vertex_groups[rig.chains[0].bones.split(",")[0]]
+        group.add(list(range(len(obj.data.vertices))), 0.0, 'REPLACE')
+        obj.data.update()
+        context.view_layer.update()
+        check(tint.reweigh and tint.moved, "normals: a weight change marks weights and positions")
+        tint.built -= hairview.REBUILD_INTERVAL
+        hairview._refresh(context, armature, meshes)
+        check(len(calls) == 1 and tint.co is positions and not tint.reweigh and not tint.moved,
+              "normals: not read again when a weight change leaves the hair where it was ({:d})".format(len(calls)))
+        # A pose change moves it: read again.
+        tint.batch = "drawn"
+        bone = armature.pose.bones[rig.chains[1].bones.split(",")[0]]
+        bone.rotation_mode = 'XYZ'
+        bone.rotation_euler.x = 0.4
+        context.view_layer.update()
+        tint.built -= hairview.REBUILD_INTERVAL
+        hairview._refresh(context, armature, meshes)
+        check(len(calls) == 2 and tint.co is not positions and tint.batch is None,
+              "normals: read again after a pose change ({:d})".format(len(calls)))
+        # The moved object: too.
+        obj.location.z += 0.1
+        armature.location.z += 0.1
+        context.view_layer.update()
+        tint.built -= hairview.REBUILD_INTERVAL
+        hairview._refresh(context, armature, meshes)
+        check(len(calls) == 3, "normals: read again after the hair moved")
+        geometry = painting.read_geometry(obj, context.evaluated_depsgraph_get(), source='DISPLAYED', normals=True)
+        check(np.allclose(np.abs((tint.normals * geometry.normals).sum(axis=1)), 1.0, atol=1e-3),
+              "normals: the displayed mesh's normals, in world space")
+    finally:
+        hairview._evaluated_normals = original
+        if bpy.app.timers.is_registered(hairview._tag_views):
+            bpy.app.timers.unregister(hairview._tag_views)
+        wm.magic_fit_show_chains = False
+        hairview.clear()
+
+
+def view(shading_type='SOLID', xray=False, xray_wireframe=False, overlays=True):
+    """A stand-in for a SpaceView3D."""
+    return SimpleNamespace(type='VIEW_3D', overlay=SimpleNamespace(show_overlays=overlays),
+                           shading=SimpleNamespace(type=shading_type, show_xray=xray,
+                                                   show_xray_wireframe=xray_wireframe))
+
+
+def test_xray_skips():
+    shows = hairview.view_shows_chains
+    check(shows(view()), "x-ray: drawn in solid shading")
+    check(not shows(view(xray=True)), "x-ray: not with X-ray on")
+    check(not shows(view('WIREFRAME', xray_wireframe=True)), "x-ray: not in wireframe with its X-ray on")
+    check(shows(view('WIREFRAME', xray=True)), "x-ray: wireframe goes by its own X-ray")
+    check(shows(view('MATERIAL', xray=True)), "x-ray: Material Preview has none")
+    check(not shows(view(overlays=False)), "x-ray: not with overlays hidden")
+    check(not shows(None) and not shows(SimpleNamespace(type='IMAGE_EDITOR')), "x-ray: only in a 3D view")
+
+
+class StateRecorder:
+    """Stands in for gpu.state: keeps the calls made on it."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __getattr__(self, name):
+        def call(*args):
+            self.calls.append((name,) + args)
+        return call
+
+
+def test_gpu_state_reset():
+    state = StateRecorder()
+    try:
+        with hairview._drawing_state(state):
+            state.depth_test_set('ALWAYS')
+            raise RuntimeError("drawing failed")
+    except RuntimeError:
+        pass
+    last = {}
+    for call in state.calls:
+        last[call[0]] = call[1:]
+    check(('blend_set', 'ALPHA') in state.calls and ('depth_test_set', 'LESS_EQUAL') in state.calls
+          and ('depth_mask_set', False) in state.calls, "gpu state: set for drawing ({})".format(state.calls))
+    check(last.get('blend_set') == ('NONE',) and last.get('depth_test_set') == ('NONE',)
+          and last.get('depth_mask_set') == (True,) and last.get('line_width_set') == (1.0,),
+          "gpu state: blend, depth test, depth mask and line width reset after an error ({})".format(last))
+    state = StateRecorder()
+    with hairview._drawing_state(state):
+        pass
+    check(state.calls[-4:] and dict((c[0], c[1:]) for c in state.calls[-4:]).get('blend_set') == ('NONE',),
+          "gpu state: reset without an error too")
+
+
 def main():
     magic_fit.register()
     try:
         tests = (test_palettes, test_bones_colored_by_kind, test_current_armature, test_toggle_in_front,
                  test_toggle_drawn, test_save_keeps_in_front_off, test_renamed_armature_restored,
                  test_in_front_new_current, test_undo_redo_in_front, test_unregister_turns_off, test_chain_colors,
-                 test_chain_weights, test_chain_weights_edge_cases, test_overlay_meshes, test_overlay_rebuilds)
+                 test_chain_weights, test_chain_weights_edge_cases, test_overlay_meshes, test_overlay_rebuilds,
+                 test_chain_lines, test_line_rebuilds, test_normals_only_when_moved, test_xray_skips,
+                 test_gpu_state_reset)
         if hairview is None:
             check(False, "magic_fit.hairview exists")
             tests = ()
