@@ -1124,17 +1124,21 @@ class VIEW3D_PT_hair_weights_sidebar(tabs.TabPanel, bpy.types.Panel):
 
     @staticmethod
     def draw_chains(layout, obj):
-        """The chains of the hair's own skeleton, on its armature, with their kinds to change, and the button
-        that builds them again."""
+        """The chains of the hair's own skeleton, on its armature, with their kinds to change, the Show Chains
+        toggle (an eye) and the button that builds them again."""
         armature = hairing.weighted_armature(obj)
         if armature is None:
             return
         rig_state = armature.magic_fit_hair_rig
         bones = sum(len(_chain_bones(chain)) for chain in rig_state.chains)
         box = layout.box().column()
-        box.label(text="{:s}, {:s} (at most {:d})".format(
+        row = box.row()
+        row.label(text="{:s}, {:s} (at most {:d})".format(
             hairrig.counted(len(rig_state.chains), "chain"), hairrig.counted(bones, "bone"), hairrig.MAX_HAIR_BONES),
             icon='ARMATURE_DATA')
+        wm = bpy.context.window_manager
+        row.prop(wm, "magic_fit_show_chains", text="", icon='HIDE_OFF' if wm.magic_fit_show_chains else 'HIDE_ON',
+                 emboss=False)
         box.template_list("MAGIC_FIT_UL_hair_chains", "", rig_state, "chains", rig_state, "active", rows=4)
         op = box.operator(MAGIC_FIT_OT_hair_weights.bl_idname, text="Rebuild Chains", icon='FILE_REFRESH')
         op.rebuild = True

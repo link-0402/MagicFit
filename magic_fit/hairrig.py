@@ -55,10 +55,11 @@ j_kao. They are ordinary Blender bones, head on a joint and tail on the next, so
 and the user can move, delete or add some in Edit Mode; `sync_rig` reads them back as they are and names
 new ones; the rig state keeps a hash of the bones (`bones_hash`) to tell whether the user edited them since,
 and for the weights the hair's cap depth and which chains are light (kept by chain number, like the kinds).
-Each bone's Z axis points away from the head's axis. The armature carries the rig as RIG_PROPERTY,
-written from `Object.magic_fit_hair_rig` after every change, for exporters (Instant Edit) to make the hair
-skeleton. A hair bone points along its X axis in the game and along its Y axis in Blender: ALONG_X turns
-one into the other, here (`custom_rig`) and in the exporter.
+Each bone's Z axis points away from the head's axis, and its bone colour is its chain's kind's
+(`hairview.color_bones`). The armature carries the rig as RIG_PROPERTY, written from
+`Object.magic_fit_hair_rig` after every change, for exporters (Instant Edit) to make the hair skeleton. A
+hair bone points along its X axis in the game and along its Y axis in Blender: ALONG_X turns one into the
+other, here (`custom_rig`) and in the exporter.
 
 Like `hairing`, nothing here depends on the 3D view.
 """
@@ -814,8 +815,10 @@ def counted(count, word):
 
 def _fill_state(armature_object, race, chains, cap_depth=None):
     """Fill the rig state of ``armature_object`` with ``race``, ``chains`` ((kind, bone names, light) each),
-    the hair's ``cap_depth`` (None keeps the one stored) and the hash of its bones (`bones_hash`), and write
-    RIG_PROPERTY."""
+    the hair's ``cap_depth`` (None keeps the one stored) and the hash of its bones (`bones_hash`), write
+    RIG_PROPERTY and colour the chains' bones by kind (`hairview.color_bones`)."""
+    # hairview imports this module.
+    from . import hairview
     state = armature_object.magic_fit_hair_rig
     state.race = race
     state.bones_hash = bones_hash(armature_object)
@@ -829,6 +832,7 @@ def _fill_state(armature_object, race, chains, cap_depth=None):
         chain.kind = kind
     state.active = min(max(state.active, 0), max(len(state.chains) - 1, 0))
     write_rig_property(armature_object)
+    hairview.color_bones(armature_object)
 
 
 def build_armature_rig(context, armature_object, plans, race, cap_depth=-1.0):

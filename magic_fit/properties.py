@@ -12,7 +12,7 @@ from bpy.props import (
     StringProperty,
 )
 
-from . import earring, hairrig
+from . import earring, hairrig, hairview
 
 
 def _poll_mesh(_self, obj):
@@ -874,6 +874,7 @@ HAIR_RIG_KINDS = tuple((kind, kind.capitalize(), _HAIR_RIG_KIND_DESCRIPTIONS[kin
 
 def _hair_rig_kind_changed(self, _context):
     hairrig.write_rig_property(self.id_data)
+    hairview.color_bones(self.id_data)
 
 
 class HairRigChain(bpy.types.PropertyGroup):
@@ -1602,9 +1603,17 @@ def register():
     bpy.types.Scene.magic_fit_clipping = PointerProperty(type=ClippingSettings)
     bpy.types.Object.magic_fit_hair = PointerProperty(type=HairWeightsState)
     bpy.types.Object.magic_fit_hair_rig = PointerProperty(type=HairRigState)
+    # Runtime only: off when a file opens (hairview).
+    bpy.types.WindowManager.magic_fit_show_chains = BoolProperty(
+        name="Show Chains",
+        description="Draw the hair's chains in front and tint the hair by the chain that moves it",
+        default=False,
+        update=hairview.show_chains_changed,
+    )
 
 
 def unregister():
+    del bpy.types.WindowManager.magic_fit_show_chains
     del bpy.types.Object.magic_fit_hair_rig
     del bpy.types.Object.magic_fit_hair
     del bpy.types.Scene.magic_fit_clipping
