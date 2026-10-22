@@ -162,6 +162,9 @@ def test_cap_depth():
     co, tris, _ranges = join([hair.cap(gap=0.01, race='c0801')])
     check(abs(hairing.cap_depth(co + offset, tris, rig.moved(offset)) - hairing.cap_depth(co, tris, rig)) < 1e-6,
           "cap depth: the same with the rig moved along")
+    check(hairing.cap_depth(co, tris, rig, share=rig.scalp(co)) == hairing.cap_depth(co, tris, rig)
+          and hairing.cap_depth(co, tris, rig, share=np.zeros(len(co))) == hairing.CAP_FALLBACK,
+          "cap depth: takes scalp shares worked out before")
 
 
 def test_cap_depth_fallback():

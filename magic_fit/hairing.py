@@ -259,17 +259,31 @@ class HeadField:
 
     @staticmethod
     def _nearest(points, targets, count):
-        """The ``count`` nearest of ``targets`` to each of ``points`` ((n, count) indices, in no order) and how far
-        they are."""
-        points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+        """The ``count`` nearest of ``targets`` to each of ``points`` ((n, count) indices, nearest first) and how
+        far they are."""
+        # Squared distances are |p|² + |t|² - 2 p·t, around the targets' middle so the terms stay small. |p|² is
+        # the same for all of a point's targets, so the nearest are picked by |t|² - 2 p·t (one matrix product
+        # per chunk, of the points with a 1 appended), one argmin after another (much faster than argpartition
+        # for a few), and |p|² is added to the picked ones only.
+        middle = targets.mean(0)
+        targets = targets - middle
+        points = np.asarray(points, dtype=np.float64).reshape(-1, 3) - middle
         count = min(count, len(targets))
+        product = np.vstack((-2.0 * targets.T, (targets * targets).sum(1)[None]))
         index = np.zeros((len(points), count), dtype=np.int64)
         distance = np.zeros((len(points), count))
         for start in range(0, len(points), HEAD_CHUNK):
-            d = np.linalg.norm(points[start:start + HEAD_CHUNK, None, :] - targets[None], axis=2)
-            nearest = np.argpartition(d, count - 1, axis=1)[:, :count]
-            index[start:start + HEAD_CHUNK] = nearest
-            distance[start:start + HEAD_CHUNK] = np.take_along_axis(d, nearest, 1)
+            chunk = points[start:start + HEAD_CHUNK]
+            partial = np.hstack((chunk, np.ones((len(chunk), 1)))) @ product
+            rows = np.arange(len(chunk))
+            squares = np.zeros((len(chunk), count))
+            for k in range(count):
+                nearest = np.argmin(partial, axis=1)
+                index[start + rows, k] = nearest
+                squares[:, k] = partial[rows, nearest]
+                partial[rows, nearest] = np.inf
+            squares += (chunk * chunk).sum(1)[:, None]
+            distance[start:start + HEAD_CHUNK] = np.sqrt(np.maximum(squares, 0.0))
         return index, distance
 
     def scalp(self, points):
@@ -470,14 +484,15 @@ def hanging_share(distance, start, length):
     return 1.0 - np.exp(-np.maximum(0.0, np.asarray(distance, dtype=np.float64) - start) / max(length, 1e-6))
 
 
-def cap_depth(points, tris, rig):
+def cap_depth(points, tris, rig, share=None):
     """How far the hair's cap lies off the head: the area-weighted median head distance (none inside) of its
     vertices over the scalp (scalp share at least SCALP_HALF), or CAP_FALLBACK when less than CAP_MIN_AREA of
-    it lies there."""
+    it lies there. ``share`` is the points' scalp share (`HairRig.scalp`) when already known."""
     points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     distance = rig.head_distance(points)
     area = vertex_areas(points, np.asarray(tris, dtype=np.int64).reshape(-1, 3))
-    over = (rig.scalp(points) >= SCALP_HALF) & np.isfinite(distance)
+    share = rig.scalp(points) if share is None else np.asarray(share, dtype=np.float64)
+    over = (share >= SCALP_HALF) & np.isfinite(distance)
     if area[over].sum() < CAP_MIN_AREA:
         return CAP_FALLBACK
     depth = np.maximum(distance[over], 0.0)
