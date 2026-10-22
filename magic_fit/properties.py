@@ -875,6 +875,12 @@ HAIR_RIG_KINDS = tuple((kind, kind.capitalize(), _HAIR_RIG_KIND_DESCRIPTIONS[kin
 def _hair_rig_kind_changed(self, _context):
     hairrig.write_rig_property(self.id_data)
     hairview.color_bones(self.id_data)
+    hairview.redraw_views()
+
+
+def _hair_rig_active_changed(_self, _context):
+    # Show Chains tints the picked chain stronger; picking one sends no depsgraph update.
+    hairview.redraw_views()
 
 
 class HairRigChain(bpy.types.PropertyGroup):
@@ -913,6 +919,7 @@ class HairRigState(bpy.types.PropertyGroup):
         description="The chain selected in the list",
         default=0,
         min=0,
+        update=_hair_rig_active_changed,
     )
     bones_hash: StringProperty(
         name="Bones Hash",

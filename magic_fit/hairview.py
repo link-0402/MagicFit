@@ -5,15 +5,30 @@
 - Bone colours: every bone of a chain gets Blender's bone colour (`Bone.color.palette`, a theme palette) for
   the chain's kind, one per kind (KIND_PALETTES), when the chains are built or read back (`hairrig._fill_state`)
   and when a chain's kind changes in the list. They are saved with the file; exporters ignore them.
-- Show Chains (`WindowManager.magic_fit_show_chains`, runtime: off after a file opens): while it's on, the
-  hair's armature (`current_armature`) is drawn In Front. What In Front was before is kept by armature, at
-  runtime, and comes back when the toggle goes off. Files are saved with it as it was before.
+- Show Chains (`WindowManager.magic_fit_show_chains`, runtime: off after a file opens, and after the add-on is
+  turned off and on): while it's on, the hair's armature (`current_armature`) is drawn In Front, and so is an
+  armature that becomes current while it's on. What In Front was before is kept by armature (its session uid,
+  so a renamed one counts), at runtime, and comes back when the toggle goes off. Files are saved with it as it
+  was before, and an undo or redo that brings back In Front from while the toggle was on is put right.
+- While it's on, an overlay tints every shown mesh the current armature deforms that has its own skeleton
+  (`overlay_meshes`) by the chain that moves it (`chain_colors`): each chain in its kind's colour, every second
+  chain of a kind darker, the chain picked in the list at full strength and the others faded. Weight on j_kao,
+  the neck, the upper back or the ears gives no tint. The tint is drawn on the displayed (posed) hair, nudged
+  a little off it either way along its normals, depth-tested with the scene. A mesh's tint is built again when
+  it moves or changes (depsgraph updates), at most every REBUILD_INTERVAL; nothing is written to the meshes.
+  No tint on a mesh in Edit Mode.
 """
 
+import time
+
 import bpy
+import gpu
+import numpy as np
 from bpy.app.handlers import persistent
+from gpu_extras.batch import batch_for_shader
 
 from . import hairing, hairrig
+from .painting import read_geometry
 
 # The bone colour set (Preferences > Themes > Bone Color Sets) of each chain kind's bones. In the default theme
 # THEME09 is yellow, THEME03 green, THEME04 blue and THEME06 purple.
@@ -31,8 +46,29 @@ _DEFAULT_RGB = {
     'THEME06': (0.263, 0.047, 0.471),
 }
 
-# {armature object name: its In Front before Show Chains turned it on}
+# Opacity of the tint where a vertex moves with the chains alone.
+TINT_ALPHA = 0.6
+# Strength of the chains not picked in the list, relative to the picked one.
+FADE = 0.35
+# Every second chain of a kind (in list order) is tinted this much darker, so neighbouring chains tell apart.
+SHADE_DARK = 0.6
+# The tint floats this far (m) off the hair, along its normals both ways (cards are seen from both sides), so
+# it doesn't flicker with it.
+NUDGE = 0.0005
+# Seconds at least between two reads of a mesh for its tint while it keeps changing (posing, painting).
+REBUILD_INTERVAL = 0.25
+
+# {armature object's session uid: its In Front before Show Chains turned it on}
 _in_front = {}
+# {armature object's session uid: the In Front Show Chains gave back when it went off}, until it goes on again
+# or a file opens: put back after an undo or redo that brought back the In Front of while it was on.
+_restored = {}
+# Session uids of armatures that became current while Show Chains is on, to draw In Front from a timer.
+_pending = set()
+# {(scene name, view layer name): {mesh object's session uid: _Tint}}
+_tints = {}
+_handle = None
+_tag_due = None      # time.perf_counter() the views are next redrawn at, while a timer waits for it
 
 
 def kind_rgb(kind):
@@ -78,35 +114,338 @@ def current_armature(context):
     return None
 
 
+# -----------------------------------------------------------------------------
+# In Front
+
+def _object(uid):
+    """The object with session uid ``uid``, or None."""
+    return next((obj for obj in bpy.data.objects if obj.session_uid == uid), None)
+
+
+def _set_in_front(values):
+    """Set the In Front of the armatures in ``values`` ({session uid: In Front}) that are still there."""
+    for uid, value in values.items():
+        obj = _object(uid)
+        if obj is not None and obj.type == 'ARMATURE' and obj.show_in_front != value:
+            obj.show_in_front = value
+
+
 def _draw_in_front(armature_object):
     """Draw ``armature_object`` In Front, keeping what it was the first time."""
-    if armature_object.name not in _in_front:
-        _in_front[armature_object.name] = armature_object.show_in_front
-    armature_object.show_in_front = True
+    uid = armature_object.session_uid
+    if uid not in _in_front:
+        _in_front[uid] = armature_object.show_in_front
+    if not armature_object.show_in_front:
+        armature_object.show_in_front = True
 
 
 def _restore_in_front():
     """Give the armatures Show Chains drew In Front their In Front back."""
-    for name, value in _in_front.items():
-        obj = bpy.data.objects.get(name)
-        if obj is not None and obj.type == 'ARMATURE':
-            obj.show_in_front = value
+    _set_in_front(_in_front)
+
+
+def _showing(wm):
+    return wm is not None and getattr(wm, "magic_fit_show_chains", False)
 
 
 def show_chains_changed(wm, context):
     """Property update callback of Show Chains: on, the hair's armature is drawn In Front; off, every armature
     it drew In Front gets its In Front back."""
     if wm.magic_fit_show_chains:
+        _restored.clear()
         armature = current_armature(context)
         if armature is not None:
             _draw_in_front(armature)
     else:
         _restore_in_front()
+        _restored.clear()
+        _restored.update(_in_front)
         _in_front.clear()
+        _pending.clear()
+        _tints.clear()
+    redraw_views()
+
+
+def follow_current(context):
+    """The armature whose chains are shown (`current_armature`), or None. While Show Chains is on, one not
+    drawn In Front yet is drawn so soon, from a timer: the draw callback this is called from mustn't write it."""
+    armature = current_armature(context)
+    if armature is not None and _showing(context.window_manager) and armature.session_uid not in _in_front:
+        _pending.add(armature.session_uid)
+        if not bpy.app.timers.is_registered(_apply_pending_in_front):
+            bpy.app.timers.register(_apply_pending_in_front, first_interval=0.0)
+    return armature
+
+
+def _apply_pending_in_front():
+    if _showing(bpy.context.window_manager):
+        for uid in _pending:
+            obj = _object(uid)
+            if obj is not None and obj.type == 'ARMATURE':
+                _draw_in_front(obj)
+    _pending.clear()
+    return None
 
 
 # -----------------------------------------------------------------------------
-# Files
+# Tint
+
+def chain_weights(obj, rig_state):
+    """How much each chain of ``rig_state`` (`Object.magic_fit_hair_rig`) moves each vertex of ``obj``
+    ((vertices, chains)): the sum of the vertex's weights on the chain's bones (``obj.vertex_groups``)."""
+    chains = list(rig_state.chains)
+    column = {}
+    for c, chain in enumerate(chains):
+        for name in chain.bones.split(","):
+            group = obj.vertex_groups.get(name) if name else None
+            if group is not None:
+                column[group.index] = c
+    weights = np.zeros((len(obj.data.vertices), len(chains)))
+    if column:
+        for vert in obj.data.vertices:
+            for elem in vert.groups:
+                c = column.get(elem.group)
+                if c is not None:
+                    weights[vert.index, c] += elem.weight
+    return weights
+
+
+def chain_colors(weights, kinds, active, rgb=kind_rgb):
+    """The tint of each vertex ((n, 4) float32 RGBA) from its ``weights`` (n, chains) on chains of ``kinds``.
+    A chain's colour is its kind's (``rgb``), SHADE_DARK times that for every second chain of a kind; a vertex's
+    is the mean of its chains', by weight. Its alpha is TINT_ALPHA times its weight on the chains, FADE times
+    that on chains other than ``active`` (when that is one of them). Vertices without chain weight are clear."""
+    weights = np.asarray(weights, dtype=np.float64)
+    result = np.zeros((len(weights), 4), dtype=np.float32)
+    count = weights.shape[1] if weights.ndim == 2 else 0
+    if not count or not len(weights):
+        return result
+    shades = np.empty((count, 3))
+    seen = {}
+    for c, kind in enumerate(kinds):
+        number = seen.get(kind, 0)
+        seen[kind] = number + 1
+        shades[c] = np.asarray(rgb(kind), dtype=np.float64)[:3] * (SHADE_DARK if number % 2 else 1.0)
+    total = weights.sum(axis=1)
+    has = total > 1e-9
+    result[has, :3] = weights[has] @ shades / total[has, None]
+    strength = np.ones(count)
+    if 0 <= active < count:
+        strength[:] = FADE
+        strength[active] = 1.0
+    result[:, 3] = TINT_ALPHA * np.clip(weights @ strength, 0.0, 1.0)
+    return result
+
+
+def overlay_meshes(context, armature_object):
+    """The meshes tinted: those shown in ``context``'s view layer that ``armature_object`` deforms
+    (`hairing.weighted_armature`) and that have their own skeleton (``magic_fit_hair.custom``). Not one whose
+    mesh is in Edit Mode (also through another object sharing it), nor one displayed with other vertices than
+    its own (a Subdivision modifier): its weights wouldn't line up with them."""
+    view_layer = context.view_layer
+    depsgraph = None
+    result = []
+    for obj in view_layer.objects:
+        if obj.type != 'MESH' or obj.data.is_editmode or not obj.magic_fit_hair.custom:
+            continue
+        if not obj.visible_get(view_layer=view_layer) or hairing.weighted_armature(obj) != armature_object:
+            continue
+        if depsgraph is None:
+            depsgraph = context.evaluated_depsgraph_get()
+        if len(obj.evaluated_get(depsgraph).data.vertices) != len(obj.data.vertices):
+            continue
+        result.append(obj)
+    return result
+
+
+class _Tint:
+    """The tint of one mesh object."""
+
+    __slots__ = ("co", "normals", "tris", "data", "weights", "weights_key", "colors", "colors_key", "batch",
+                 "built", "moved", "reweigh")
+
+    def __init__(self):
+        self.co = None              # world space positions, as displayed
+        self.normals = None         # their normals (`hairing.vertex_normals`)
+        self.tris = None
+        self.data = 0               # session uid of the mesh data the weights were read from
+        self.weights = None         # `chain_weights`
+        self.weights_key = None     # the chains' bones and the mesh's vertex groups they were read with
+        self.colors = None          # `chain_colors`
+        self.colors_key = None      # the chains' kinds, the active chain and the kinds' colours they were made with
+        self.batch = None           # what's drawn: None to be built, False when nothing is tinted
+        self.built = 0.0            # time.perf_counter() the mesh was last read at
+        self.moved = True           # positions to be read again
+        self.reweigh = True         # weights to be read again
+
+
+def _layer_tints(context):
+    """The tints of the view layer in ``context`` ({mesh object's session uid: _Tint}), made on first use.
+    Windows can show different view layers side by side."""
+    key = (context.scene.name, context.view_layer.name)
+    tints = _tints.get(key)
+    if tints is None:
+        # Forget scenes and view layers that were renamed or deleted since.
+        for old in list(_tints):
+            scene = bpy.data.scenes.get(old[0])
+            if scene is None or scene.view_layers.get(old[1]) is None:
+                del _tints[old]
+        tints = _tints[key] = {}
+    return tints
+
+
+def _refresh(context, armature_object, meshes):
+    """Bring the tints of ``meshes`` (`overlay_meshes` of ``armature_object``) up to date and forget the view
+    layer's others. A mesh that changed less than REBUILD_INTERVAL after it was last read waits, and a timer
+    redraws the views when it's due. Returns True when one waits."""
+    tints = _layer_tints(context)
+    shown = {obj.session_uid for obj in meshes}
+    for uid in [uid for uid in tints if uid not in shown]:
+        del tints[uid]
+    rig = armature_object.magic_fit_hair_rig
+    bones = tuple(chain.bones for chain in rig.chains)
+    kinds = tuple(chain.kind for chain in rig.chains)
+    colors_key = (kinds, rig.active, tuple(kind_rgb(kind) for kind in hairrig.KINDS))
+    now = time.perf_counter()
+    depsgraph = None
+    wait = None
+    for obj in meshes:
+        tint = tints.get(obj.session_uid)
+        if tint is None:
+            tint = tints[obj.session_uid] = _Tint()
+        weights_key = (bones, tuple(group.name for group in obj.vertex_groups))
+        if tint.data != obj.data.session_uid or tint.weights_key != weights_key:
+            tint.reweigh = True
+        if tint.moved or tint.reweigh:
+            left = tint.built + REBUILD_INTERVAL - now
+            if tint.co is not None and left > 0.0:
+                wait = left if wait is None else min(wait, left)
+            else:
+                if tint.reweigh:
+                    tint.weights = chain_weights(obj, rig)
+                    tint.data, tint.weights_key = obj.data.session_uid, weights_key
+                if tint.moved or tint.co is None or len(tint.co) != len(tint.weights):
+                    if depsgraph is None:
+                        depsgraph = context.evaluated_depsgraph_get()
+                    geometry = read_geometry(obj, depsgraph, source='DISPLAYED')
+                    tint.co, tint.tris = geometry.co, geometry.tris
+                    tint.normals = hairing.vertex_normals(tint.co, tint.tris)
+                tint.moved = tint.reweigh = False
+                tint.built = now
+                tint.colors_key = None
+        if tint.colors_key != colors_key and len(tint.weights) == len(tint.co):
+            tint.colors = chain_colors(tint.weights, kinds, rig.active)
+            tint.colors_key = colors_key
+            tint.batch = None
+    if wait is not None:
+        redraw_views(wait)
+    return wait is not None
+
+
+def tint_arrays(tint):
+    """What's drawn of ``tint``: positions ((2n, 3) float32: the hair NUDGE out along its normals, then as far
+    in), their colours ((2n, 4) float32) and the triangles' corners ((k, 3) int32: those with a tinted corner,
+    on both)."""
+    offset = NUDGE * tint.normals
+    positions = np.concatenate((tint.co + offset, tint.co - offset)).astype(np.float32)
+    colors = np.concatenate((tint.colors, tint.colors))
+    tris = tint.tris.reshape(-1, 3)
+    tris = tris[(tint.colors[tris, 3] > 0.0).any(axis=1)]
+    indices = np.concatenate((tris, tris + len(tint.co))).astype(np.int32)
+    return positions, colors, indices
+
+
+def clear():
+    _tints.clear()
+
+
+# -----------------------------------------------------------------------------
+# Keeping up with changes
+
+@persistent
+def _on_depsgraph_update(_scene, depsgraph):
+    if not _tints:
+        return
+    for update in depsgraph.updates:
+        data = update.id.original
+        if isinstance(data, bpy.types.Object):
+            if update.is_updated_geometry or update.is_updated_transform:
+                for tints in _tints.values():
+                    tint = tints.get(data.session_uid)
+                    if tint is not None:
+                        tint.moved = True
+        elif isinstance(data, bpy.types.Mesh):
+            # Weights live on the mesh data: posing doesn't list it, painting does.
+            for tints in _tints.values():
+                for tint in tints.values():
+                    if tint.data == data.session_uid:
+                        tint.reweigh = True
+
+
+def redraw_views(delay=0.01):
+    """Redraw the 3D views in ``delay`` seconds, or sooner when that's due already (from a timer: tagging
+    redraws while drawing isn't safe)."""
+    global _tag_due
+    due = time.perf_counter() + delay
+    if bpy.app.timers.is_registered(_tag_views):
+        if _tag_due is not None and _tag_due <= due:
+            return
+        bpy.app.timers.unregister(_tag_views)
+    _tag_due = due
+    bpy.app.timers.register(_tag_views, first_interval=delay)
+
+
+def _tag_views():
+    global _tag_due
+    _tag_due = None
+    for window in bpy.context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+    return None
+
+
+# -----------------------------------------------------------------------------
+# Drawing
+
+def _draw():
+    if bpy.app.background:
+        return
+    context = bpy.context
+    if not _showing(context.window_manager):
+        _tints.clear()
+        return
+    space = context.space_data
+    if space is None or space.type != 'VIEW_3D' or not space.overlay.show_overlays:
+        return
+    armature = follow_current(context)
+    if armature is None:
+        return
+    meshes = overlay_meshes(context, armature)
+    _refresh(context, armature, meshes)
+    tints = _layer_tints(context)
+
+    shader = gpu.shader.from_builtin('SMOOTH_COLOR')
+    gpu.state.blend_set('ALPHA')
+    gpu.state.depth_mask_set(False)
+    gpu.state.depth_test_set('LESS_EQUAL')
+    for obj in meshes:
+        tint = tints.get(obj.session_uid)
+        if tint is None or tint.colors is None:
+            continue
+        if tint.batch is None:
+            positions, colors, indices = tint_arrays(tint)
+            tint.batch = batch_for_shader(shader, 'TRIS', {"pos": positions, "color": colors},
+                                          indices=indices) if len(indices) else False
+        if tint.batch:
+            tint.batch.draw(shader)
+    gpu.state.depth_test_set('NONE')
+    gpu.state.depth_mask_set(True)
+    gpu.state.blend_set('NONE')
+
+
+# -----------------------------------------------------------------------------
+# Files and undo
 
 @persistent
 def _on_save_pre(_dummy=None):
@@ -116,34 +455,71 @@ def _on_save_pre(_dummy=None):
 
 @persistent
 def _on_save_post(_dummy=None):
-    for name in _in_front:
-        obj = bpy.data.objects.get(name)
-        if obj is not None and obj.type == 'ARMATURE':
-            obj.show_in_front = True
+    _set_in_front(dict.fromkeys(_in_front, True))
 
 
 @persistent
 def _on_load(_dummy=None):
     # The armatures of the file before are gone; the toggle is off in a file just opened.
     _in_front.clear()
+    _restored.clear()
+    _pending.clear()
+    _tints.clear()
     wm = bpy.context.window_manager
-    if wm is not None and getattr(wm, "magic_fit_show_chains", False):
+    if _showing(wm):
         wm.magic_fit_show_chains = False
 
 
+@persistent
+def _on_undo_redo(_scene=None, _depsgraph=None):
+    # An undo step keeps In Front as it was then: while on, the shown armatures stay in front; while off, they
+    # keep what off gave back (else a file saved after it keeps In Front on).
+    if _showing(bpy.context.window_manager):
+        _set_in_front(dict.fromkeys(_in_front, True))
+    else:
+        _set_in_front(_restored)
+    # The meshes may have changed in any way.
+    for tints in _tints.values():
+        for tint in tints.values():
+            tint.moved = tint.reweigh = True
+
+
+_HANDLERS = (
+    (bpy.app.handlers.depsgraph_update_post, _on_depsgraph_update),
+    # A new frame (scrubbing, playback) sends no depsgraph update, but its depsgraph lists what changed.
+    (bpy.app.handlers.frame_change_post, _on_depsgraph_update),
+    (bpy.app.handlers.save_pre, _on_save_pre),
+    (bpy.app.handlers.save_post, _on_save_post),
+    (bpy.app.handlers.load_post, _on_load),
+    (bpy.app.handlers.undo_post, _on_undo_redo),
+    (bpy.app.handlers.redo_post, _on_undo_redo),
+)
+
+
 def register():
-    bpy.app.handlers.save_pre.append(_on_save_pre)
-    bpy.app.handlers.save_post.append(_on_save_post)
-    bpy.app.handlers.load_post.append(_on_load)
+    global _handle
+    _handle = bpy.types.SpaceView3D.draw_handler_add(_draw, (), 'WINDOW', 'POST_VIEW')
+    for handlers, callback in _HANDLERS:
+        handlers.append(callback)
 
 
 def unregister():
-    for handlers, callback in (
-            (bpy.app.handlers.save_pre, _on_save_pre),
-            (bpy.app.handlers.save_post, _on_save_post),
-            (bpy.app.handlers.load_post, _on_load),
-    ):
+    global _handle, _tag_due
+    if _handle is not None:
+        bpy.types.SpaceView3D.draw_handler_remove(_handle, 'WINDOW')
+        _handle = None
+    for handlers, callback in _HANDLERS:
         if callback in handlers:
             handlers.remove(callback)
+    for timer in (_tag_views, _apply_pending_in_front):
+        if bpy.app.timers.is_registered(timer):
+            bpy.app.timers.unregister(timer)
+    _tag_due = None
     _restore_in_front()
+    # The toggle's value would outlive its property and be back on when the add-on is turned on again.
+    for wm in bpy.data.window_managers:
+        wm.property_unset("magic_fit_show_chains")
     _in_front.clear()
+    _restored.clear()
+    _pending.clear()
+    clear()
