@@ -13,6 +13,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import traceback
 from types import SimpleNamespace
 
@@ -480,6 +481,7 @@ def test_overlay_rebuilds():
         context.view_layer.update()
         check(tint.reweigh, "overlay: a weight change marks the weights")
         tint.built -= hairview.REBUILD_INTERVAL
+        tint.weighed -= 10.0   # the weights have their own clock (WEIGH_WAIT)
         hairview._refresh(context, armature, meshes)
         check(not tint.reweigh and not np.array_equal(tint.weights, weights_before), "overlay: weights read again")
 
@@ -566,8 +568,14 @@ def test_chain_lines():
         seen[kind] = seen.get(kind, 0) + 1
     check(len(chain_of) == len(colors) and all(np.allclose(colors[k, :3], expected[c]) for k, c in enumerate(chain_of)),
           "lines: each chain in its kind's colour, the second side chain darker")
-    check(np.allclose(colors[chain_of == 2, 3], 1.0) and np.allclose(colors[chain_of != 2, 3], hairview.FADE),
-          "lines: the picked chain at full strength, the others faded")
+    check(hairview.LINE_FLOOR == 0.8 and hairview.LINE_FLOOR > hairview.FADE, "lines: LINE_FLOOR 0.8")
+    check(np.allclose(colors[chain_of == 2, 3], 1.0) and np.allclose(colors[chain_of != 2, 3], hairview.LINE_FLOOR),
+          "lines: the picked chain at full strength, the others at LINE_FLOOR (not the tint's FADE)")
+    under = hairview.line_underlay(colors)
+    check(under.shape == colors.shape and under.dtype == np.float32 and not under[:, :3].any()
+          and np.allclose(under[:, 3], hairview.UNDERLAY_ALPHA * colors[:, 3]) and hairview.UNDERLAY_ALPHA == 0.6,
+          "lines: a black underlay, its alpha UNDERLAY_ALPHA times the line's")
+    check(hairview.UNDERLAY_WIDTH == 2.0, "lines: the underlay 2 px wider")
     rig.active = 99
     _positions, colors = hairview.chain_lines(armature, rig, rgb=lambda kind: palette[kind])
     check(np.allclose(colors[:, 3], 1.0), "lines: no chain picked, all at full strength")
@@ -681,6 +689,7 @@ def test_normals_only_when_moved():
         context.view_layer.update()
         check(tint.reweigh and tint.moved, "normals: a weight change marks weights and positions")
         tint.built -= hairview.REBUILD_INTERVAL
+        tint.weighed -= 10.0
         hairview._refresh(context, armature, meshes)
         check(len(calls) == 1 and tint.co is positions and not tint.reweigh and not tint.moved,
               "normals: not read again when a weight change leaves the hair where it was ({:d})".format(len(calls)))
@@ -712,11 +721,113 @@ def test_normals_only_when_moved():
         hairview.clear()
 
 
-def view(shading_type='SOLID', xray=False, xray_wireframe=False, overlays=True):
+def view(shading_type='SOLID', xray=False, xray_wireframe=False, overlays=True, bones=True, local=False):
     """A stand-in for a SpaceView3D."""
-    return SimpleNamespace(type='VIEW_3D', overlay=SimpleNamespace(show_overlays=overlays),
+    return SimpleNamespace(type='VIEW_3D', overlay=SimpleNamespace(show_overlays=overlays, show_bones=bones),
                            shading=SimpleNamespace(type=shading_type, show_xray=xray,
-                                                   show_xray_wireframe=xray_wireframe))
+                                                   show_xray_wireframe=xray_wireframe),
+                           local_view=SimpleNamespace() if local else None)
+
+
+class FakeArmature:
+    """Stands in for an armature object's visibility: keeps what it was asked."""
+
+    def __init__(self, visible=True, in_local_view=True):
+        self.visible, self.in_local_view, self.asked = visible, in_local_view, []
+
+    def visible_get(self, view_layer=None, viewport=None):
+        self.asked.append(("visible_get", view_layer, viewport))
+        return self.visible
+
+    def local_view_get(self, viewport):
+        self.asked.append(("local_view_get", viewport))
+        return self.in_local_view
+
+
+def test_bone_lines_shown():
+    shown = hairview.bone_lines_shown
+    layer = bpy.context.view_layer
+    space = view()
+    armature = FakeArmature()
+    check(shown(space, layer, armature), "bone lines: shown for a visible armature")
+    check(("visible_get", layer, space) in armature.asked,
+          "bone lines: visibility asked for that view layer and that viewport ({})".format(armature.asked))
+    check(not shown(view(bones=False), layer, FakeArmature()), "bone lines: not with the Bones overlay off")
+    check(not shown(space, layer, FakeArmature(visible=False)), "bone lines: not for an armature hidden there")
+    local = view(local=True)
+    check(not shown(local, layer, FakeArmature(in_local_view=False)), "bone lines: not for one out of local view")
+    armature = FakeArmature()
+    check(shown(local, layer, armature) and ("local_view_get", local) in armature.asked,
+          "bone lines: shown for one in local view")
+    armature = FakeArmature(in_local_view=False)
+    check(shown(space, layer, armature) and not any(a[0] == "local_view_get" for a in armature.asked),
+          "bone lines: local view asked only in local view")
+
+
+def test_adaptive_reweigh():
+    obj, armature = rig_scene()
+    context = bpy.context
+    wm = context.window_manager
+    rig = armature.magic_fit_hair_rig
+    original = hairview.chain_weights
+    reads = []
+
+    def slow(*args):
+        reads.append(time.perf_counter())
+        time.sleep(0.08)
+        return original(*args)
+
+    hairview.chain_weights = slow
+    wm.magic_fit_show_chains = True
+    try:
+        meshes = hairview.overlay_meshes(context, armature)
+        hairview._refresh(context, armature, meshes)
+        tint = hairview._layer_tints(context)[obj.session_uid]
+        check(len(reads) == 1 and 0.08 <= tint.weigh_cost < 0.5,
+              "reweigh: chain_weights' time is kept ({:.3f} s)".format(tint.weigh_cost))
+        check(hairview.WEIGH_WAIT == 5, "reweigh: WEIGH_WAIT 5")
+        wait = max(hairview.REBUILD_INTERVAL, hairview.WEIGH_WAIT * tint.weigh_cost)
+        check(wait > hairview.REBUILD_INTERVAL, "reweigh: a slow read waits longer than REBUILD_INTERVAL")
+        group = obj.vertex_groups[rig.chains[0].bones.split(",")[0]]
+
+        def paint(weight):
+            group.add(list(range(len(obj.data.vertices))), weight, 'REPLACE')
+            obj.data.update()
+            context.view_layer.update()
+
+        # Past REBUILD_INTERVAL, short of the slow read's wait: the weights wait, the positions don't.
+        paint(0.0)
+        bone = armature.pose.bones[rig.chains[1].bones.split(",")[0]]
+        bone.rotation_mode = 'XYZ'
+        bone.rotation_euler.x = 0.4
+        context.view_layer.update()
+        positions = tint.co
+        now = time.perf_counter()
+        tint.built = now - hairview.REBUILD_INTERVAL - 0.01
+        tint.weighed = now - (hairview.REBUILD_INTERVAL + wait) / 2
+        put_off = hairview._refresh(context, armature, meshes)
+        check(put_off and len(reads) == 1 and tint.reweigh,
+              "reweigh: put off until WEIGH_WAIT times the last read ({:d} reads)".format(len(reads)))
+        check(not tint.moved and tint.co is not positions, "reweigh: ...while the positions are read again")
+        check(bpy.app.timers.is_registered(hairview._tag_views), "reweigh: a timer redraws when it's due")
+        tint.weighed = time.perf_counter() - wait - 0.01
+        put_off = hairview._refresh(context, armature, meshes)
+        check(not put_off and len(reads) == 2 and not tint.reweigh, "reweigh: done once due")
+        # A fast read waits REBUILD_INTERVAL as before.
+        hairview.chain_weights = original
+        hairview._refresh(context, armature, meshes)
+        tint.weigh_cost = 0.001
+        paint(0.5)
+        tint.weighed = time.perf_counter() - hairview.REBUILD_INTERVAL - 0.01
+        tint.built = tint.weighed
+        put_off = hairview._refresh(context, armature, meshes)
+        check(not put_off and not tint.reweigh, "reweigh: a fast read waits REBUILD_INTERVAL only")
+    finally:
+        hairview.chain_weights = original
+        if bpy.app.timers.is_registered(hairview._tag_views):
+            bpy.app.timers.unregister(hairview._tag_views)
+        wm.magic_fit_show_chains = False
+        hairview.clear()
 
 
 def test_xray_skips():
@@ -773,7 +884,7 @@ def main():
                  test_in_front_new_current, test_undo_redo_in_front, test_unregister_turns_off, test_chain_colors,
                  test_chain_weights, test_chain_weights_edge_cases, test_overlay_meshes, test_overlay_rebuilds,
                  test_chain_lines, test_line_rebuilds, test_normals_only_when_moved, test_xray_skips,
-                 test_gpu_state_reset)
+                 test_gpu_state_reset, test_bone_lines_shown, test_adaptive_reweigh)
         if hairview is None:
             check(False, "magic_fit.hairview exists")
             tests = ()

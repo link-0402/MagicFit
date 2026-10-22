@@ -15,14 +15,16 @@
   chain of a kind darker, the chain picked in the list at full strength and the others faded. Weight on j_kao,
   the neck, the upper back or the ears gives no tint. The tint is drawn on the displayed (posed) hair, nudged
   a little off it either way along its (displayed) normals, depth-tested with the scene. A mesh's tint is built
-  again when it moves or changes (depsgraph updates), at most every REBUILD_INTERVAL, and only what changed:
-  its normals only when the hair moved, its colours only when its weights or the chains changed. Nothing is
-  written to the meshes. No tint on a mesh in Edit Mode.
+  again when it moves or changes (depsgraph updates), at most every REBUILD_INTERVAL (its weights less often
+  when they are slow to read: WEIGH_WAIT), and only what changed: its normals only when the hair moved, its
+  colours only when its weights or the chains changed. Nothing is written to the meshes. No tint on a mesh in
+  Edit Mode.
 - Over the tint, in front of everything and in every mode, the overlay draws each chain bone of the current
   armature as a line from its head to its tail (`chain_lines`: posed, or the edit bones in Edit Mode), in the
-  colour its chain's tint has, the picked chain at full strength and the others faded. Blender draws bone
-  colours in Pose and Edit Mode only, so this is what shows the chains in Object Mode. The lines follow the
-  armature's pose and transform.
+  colour its chain's tint has, the picked chain at full strength and the others a little fainter (LINE_FLOOR),
+  each over a wider black line. Blender draws bone colours in Pose and Edit Mode only, so this is what shows
+  the chains in Object Mode. The lines follow the armature's pose and transform, and aren't drawn where the
+  armature is hidden or the Bones overlay is off.
 - Nothing is drawn while the 3D view shows X-ray.
 """
 
@@ -68,8 +70,18 @@ SHADE_DARK = 0.6
 NUDGE = 0.0005
 # Seconds at least between two reads of a mesh for its tint while it keeps changing (posing, painting).
 REBUILD_INTERVAL = 0.25
+# A mesh's weights are read again at most every WEIGH_WAIT times as long as reading them took last time (and
+# not more often than REBUILD_INTERVAL), so painting a large hair doesn't spend most of its time on the tint.
+WEIGH_WAIT = 5
 # Width of the chain bones' lines, in pixels at the default resolution scale.
 LINE_WIDTH = 3.0
+# Opacity of the lines of the chains not picked in the list (the picked one's is 1): the tint's FADE would
+# leave them unreadable over the bones.
+LINE_FLOOR = 0.8
+# Each line is drawn over a black one this much (px) wider, at this times the line's opacity, so it reads on
+# light and dark alike.
+UNDERLAY_WIDTH = 2.0
+UNDERLAY_ALPHA = 0.6
 # Displayed positions that moved less than this (m) since the last read count as where they were: the
 # deformed hair then keeps its normals (a paint stroke doesn't move it, up to rounding).
 MOVE_TOLERANCE = 1e-6
@@ -285,10 +297,11 @@ def chain_lines(armature_object, rig_state, rgb=kind_rgb):
     """The lines drawn for the chain bones of ``rig_state`` in ``armature_object``: positions ((2k, 3) float32,
     world space, each bone's head then its tail; posed, or the edit bones' while the armature is in Edit Mode)
     and their colours ((2k, 4) float32): the chain's colour (`chain_shades`), alpha its strength
-    (`chain_strengths`). Bones listed in a chain but not in the armature are left out."""
+    (`chain_strengths`) but at least LINE_FLOOR. Bones listed in a chain but not in the armature are left
+    out."""
     chains = rig_state.chains
     shades = chain_shades([chain.kind for chain in chains], rgb)
-    strengths = chain_strengths(len(chains), rig_state.active)
+    strengths = np.maximum(chain_strengths(len(chains), rig_state.active), LINE_FLOOR)
     if armature_object.mode == 'EDIT':
         bones = armature_object.data.edit_bones
     else:
@@ -306,6 +319,14 @@ def chain_lines(armature_object, rig_state, rgb=kind_rgb):
     m = np.array(armature_object.matrix_world, dtype=np.float64)
     positions = np.array(points, dtype=np.float64) @ m[:3, :3].T + m[:3, 3]
     return positions.astype(np.float32), np.array(colors, dtype=np.float32)
+
+
+def line_underlay(colors):
+    """The colours ((2k, 4) float32) of the black lines drawn under lines of ``colors`` (`chain_lines`): alpha
+    UNDERLAY_ALPHA times theirs."""
+    result = np.zeros((len(colors), 4), dtype=np.float32)
+    result[:, 3] = UNDERLAY_ALPHA * np.asarray(colors, dtype=np.float32)[:, 3]
+    return result
 
 
 def overlay_meshes(context, armature_object):
@@ -333,7 +354,7 @@ class _Tint:
     """The tint of one mesh object."""
 
     __slots__ = ("co", "normals", "tris", "data", "weights", "weights_key", "colors", "colors_key", "batch",
-                 "built", "moved", "reweigh")
+                 "built", "weighed", "weigh_cost", "moved", "reweigh")
 
     def __init__(self):
         self.co = None              # world space positions, as displayed
@@ -345,7 +366,9 @@ class _Tint:
         self.colors = None          # `chain_colors`
         self.colors_key = None      # the chains' kinds, the active chain and the kinds' colours they were made with
         self.batch = None           # what's drawn: None to be built, False when nothing is tinted
-        self.built = 0.0            # time.perf_counter() the mesh was last read at
+        self.built = 0.0            # time.perf_counter() the positions were last read at
+        self.weighed = 0.0          # time.perf_counter() the weights were last read at
+        self.weigh_cost = 0.0       # seconds that read took
         self.moved = True           # positions to be read again
         self.reweigh = True         # weights to be read again
 
@@ -353,7 +376,7 @@ class _Tint:
 class _Lines:
     """The lines of one armature's chain bones (`chain_lines`)."""
 
-    __slots__ = ("uid", "data", "positions", "colors", "key", "batch", "moved")
+    __slots__ = ("uid", "data", "positions", "colors", "key", "batch", "underlay", "moved")
 
     def __init__(self, armature_object):
         self.uid = armature_object.session_uid
@@ -362,6 +385,7 @@ class _Lines:
         self.colors = None
         self.key = None             # the chains' bones and kinds, the active chain and the kinds' colours
         self.batch = None           # what's drawn: None to be built, False when there are no lines
+        self.underlay = None        # the black lines under them (`line_underlay`), built with ``batch``
         self.moved = True           # the armature was posed or moved since the lines were made
 
 
@@ -429,8 +453,9 @@ def _refresh_lines(context, armature_object):
 
 def _refresh(context, armature_object, meshes):
     """Bring the tints of ``meshes`` (`overlay_meshes` of ``armature_object``) up to date and forget the view
-    layer's others. A mesh that changed less than REBUILD_INTERVAL after it was last read waits, and a timer
-    redraws the views when it's due. Returns True when one waits."""
+    layer's others. Positions that changed less than REBUILD_INTERVAL after they were last read wait, and so do
+    weights less than REBUILD_INTERVAL or WEIGH_WAIT times their last read's time after it, whichever is
+    longer; a timer redraws the views when they're due. Returns True when one waits."""
     tints = _layer_tints(context)
     shown = {obj.session_uid for obj in meshes}
     for uid in [uid for uid in tints if uid not in shown]:
@@ -446,28 +471,42 @@ def _refresh(context, armature_object, meshes):
         tint = tints.get(obj.session_uid)
         if tint is None:
             tint = tints[obj.session_uid] = _Tint()
+        count = len(obj.data.vertices)
         weights_key = (bones, tuple(group.name for group in obj.vertex_groups))
         if tint.data != obj.data.session_uid or tint.weights_key != weights_key:
             tint.reweigh = True
-        if tint.moved or tint.reweigh:
-            left = tint.built + REBUILD_INTERVAL - now
-            if tint.co is not None and left > 0.0:
+        if tint.reweigh:
+            # Weights that don't fit the mesh any more are read at once; else when the last read is long enough
+            # ago, longer for a mesh slow to read.
+            left = 0.0
+            if tint.weights is not None and len(tint.weights) == count:
+                left = tint.weighed + max(REBUILD_INTERVAL, WEIGH_WAIT * tint.weigh_cost) - now
+            if left > 0.0:
                 wait = left if wait is None else min(wait, left)
             else:
-                if tint.reweigh:
-                    tint.weights = chain_weights(obj, rig)
-                    tint.data, tint.weights_key = obj.data.session_uid, weights_key
-                    tint.colors_key = None
-                if tint.moved or tint.co is None or len(tint.co) != len(tint.weights):
-                    if depsgraph is None:
-                        depsgraph = context.evaluated_depsgraph_get()
-                    geometry = read_geometry(obj, depsgraph, source='DISPLAYED')
-                    # A paint stroke lists the hair's geometry as updated too: keep what didn't move.
-                    if not _same_place(tint, geometry.co, geometry.tris):
-                        tint.co, tint.tris = geometry.co, geometry.tris
-                        tint.normals = _evaluated_normals(obj, depsgraph)
-                        tint.batch = None
-                tint.moved = tint.reweigh = False
+                started = time.perf_counter()
+                tint.weights = chain_weights(obj, rig)
+                tint.weigh_cost = time.perf_counter() - started
+                tint.weighed = now
+                tint.data, tint.weights_key = obj.data.session_uid, weights_key
+                tint.colors_key = None
+                tint.reweigh = False
+        if tint.moved or tint.co is None or len(tint.co) != count:
+            left = 0.0
+            if tint.co is not None and len(tint.co) == count:
+                left = tint.built + REBUILD_INTERVAL - now
+            if left > 0.0:
+                wait = left if wait is None else min(wait, left)
+            else:
+                if depsgraph is None:
+                    depsgraph = context.evaluated_depsgraph_get()
+                geometry = read_geometry(obj, depsgraph, source='DISPLAYED')
+                # A paint stroke lists the hair's geometry as updated too: keep what didn't move.
+                if not _same_place(tint, geometry.co, geometry.tris):
+                    tint.co, tint.tris = geometry.co, geometry.tris
+                    tint.normals = _evaluated_normals(obj, depsgraph)
+                    tint.batch = None
+                tint.moved = False
                 tint.built = now
         if tint.colors_key != colors_key and len(tint.weights) == len(tint.co):
             tint.colors = chain_colors(tint.weights, kinds, rig.active)
@@ -565,6 +604,17 @@ def view_shows_chains(space):
     return shading.type != 'SOLID' or not shading.show_xray
 
 
+def bone_lines_shown(space, view_layer, armature_object):
+    """Whether the chain bones' lines are drawn in ``space`` (a 3D view the overlay is drawn in): with its Bones
+    overlay on, for an armature visible there (``view_layer``, the viewport's hidden collections and objects,
+    and its local view when it has one). The tint doesn't depend on it."""
+    if not space.overlay.show_bones:
+        return False
+    if not armature_object.visible_get(view_layer=view_layer, viewport=space):
+        return False
+    return space.local_view is None or armature_object.local_view_get(space)
+
+
 @contextmanager
 def _drawing_state(state):
     """Blend by alpha, depth-test LESS_EQUAL without writing depth, through ``state`` (`gpu.state`), and put
@@ -597,13 +647,15 @@ def _draw():
     meshes = overlay_meshes(context, armature)
     _refresh(context, armature, meshes)
     tints = _layer_tints(context)
-    lines = _refresh_lines(context, armature)
+    lines = None
+    if bone_lines_shown(context.space_data, context.view_layer, armature):
+        lines = _refresh_lines(context, armature)
 
     with _drawing_state(gpu.state):
         shader = gpu.shader.from_builtin('SMOOTH_COLOR')
         for obj in meshes:
             tint = tints.get(obj.session_uid)
-            if tint is None or tint.colors is None:
+            if tint is None or tint.colors is None or len(tint.colors) != len(tint.co):
                 continue
             if tint.batch is None:
                 positions, colors, indices = tint_arrays(tint)
@@ -611,16 +663,23 @@ def _draw():
                                               indices=indices) if len(indices) else False
             if tint.batch:
                 tint.batch.draw(shader)
-        # The chain bones, in front of everything.
+        if lines is None:
+            return
+        # The chain bones, in front of everything, each over a wider black line.
         shader = gpu.shader.from_builtin('POLYLINE_SMOOTH_COLOR')
         if lines.batch is None:
-            lines.batch = False
+            lines.batch = lines.underlay = False
             if len(lines.positions):
                 lines.batch = batch_for_shader(shader, 'LINES', {"pos": lines.positions, "color": lines.colors})
+                lines.underlay = batch_for_shader(shader, 'LINES', {"pos": lines.positions,
+                                                                    "color": line_underlay(lines.colors)})
         if lines.batch:
             gpu.state.depth_test_set('ALWAYS')
+            pixel = context.preferences.system.pixel_size
             shader.uniform_float("viewportSize", gpu.state.viewport_get()[2:])
-            shader.uniform_float("lineWidth", LINE_WIDTH * context.preferences.system.pixel_size)
+            shader.uniform_float("lineWidth", (LINE_WIDTH + UNDERLAY_WIDTH) * pixel)
+            lines.underlay.draw(shader)
+            shader.uniform_float("lineWidth", LINE_WIDTH * pixel)
             lines.batch.draw(shader)
 
 
