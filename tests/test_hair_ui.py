@@ -95,12 +95,12 @@ def drawn_texts(settings, rig_state):
     return drawn
 
 
-HAIR_MAIN = {"hair_hang_start", "hair_hang_length", "hair_neck_weight"}
+HAIR_MAIN = {"hair_hang_start", "hair_hang_length", "hair_neck_weight", "hair_chain_spacing"}
 
 
 def hair_panel_props(context, settings):
-    """Which of Hang Start, Hang Length and Neck Weight are drawn below the brush's mode (Properties > Tool),
-    in the tool header's Options Hair section and in the Hair Weights panel."""
+    """Which of Hang Start, Hang Length, Neck Weight and Chain Spacing are drawn below the brush's mode
+    (Properties > Tool), in the tool header's Options Hair section and in the Hair Weights panel."""
     def props(draw):
         drawn = []
         draw(Recorder(drawn))
@@ -351,9 +351,11 @@ def steps():
           "own skeleton: Rebuild Chains says what it does")
     env.screenshot("hair_custom_chains.png", whole_window=True)
 
-    # --- The panels: the hair's own skeleton works out where hair hangs, so only Neck Weight stays.
+    # --- The panels: the hair's own skeleton works out where hair hangs, so only Neck Weight stays. The button
+    # building it also shows Chain Spacing; the brush builds no chains.
     hang = ["hair_hang_start", "hair_hang_length", "hair_neck_weight"]
     neck = ["hair_neck_weight"]
+    spaced = ["hair_chain_spacing"]
 
     def plain_mesh(name):
         mesh = bpy.data.objects.new(name, bpy.data.meshes.new(name))
@@ -366,11 +368,11 @@ def steps():
     game.magic_fit_hair.skeleton = other
     game.magic_fit_hair.custom = False
     cases = [
-        ("unweighted hair, Own Skeleton", unweighted, 'CUSTOM', neck, neck),
+        ("unweighted hair, Own Skeleton", unweighted, 'CUSTOM', neck, neck + spaced),
         ("unweighted hair, Best Match", unweighted, 'AUTO', hang, hang),
         ("unweighted hair, Pick", unweighted, 'PICK', hang, hang),
         # The brush paints a game-skeleton hair with Hang Start and Hang Length, whatever the dropdown says.
-        ("game skeleton hair, Own Skeleton", game, 'CUSTOM', hang, hang),
+        ("game skeleton hair, Own Skeleton", game, 'CUSTOM', hang, hang + spaced),
         # The brush on hair with its own skeleton doesn't use them; the button (Best Match) does.
         ("own skeleton hair, Best Match", obj, 'AUTO', neck, hang),
     ]

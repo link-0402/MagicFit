@@ -269,14 +269,17 @@ def _draw_smooth_main(layout, settings):
     layout.prop(settings, "smooth_max_groups")
 
 
-def _draw_hair_main(layout, settings, hang=True):
+def _draw_hair_main(layout, settings, hang=True, spacing=False):
     """The Hair settings that decide how much hangs from the hair bones. Hang Start and Hang Length only
-    when ``hang``: the hair's own skeleton works out where hair hangs from the hair's shape."""
+    when ``hang``: the hair's own skeleton works out where hair hangs from the hair's shape. Chain Spacing
+    only when ``spacing``: for the button that builds the hair's own skeleton."""
     if hang:
         col = layout.column(align=True)
         col.prop(settings, "hair_hang_start")
         col.prop(settings, "hair_hang_length")
     layout.prop(settings, "hair_neck_weight", slider=True)
+    if spacing:
+        layout.prop(settings, "hair_chain_spacing")
 
 
 def _brush_hangs(context, settings):
@@ -1053,7 +1056,8 @@ class VIEW3D_PT_hair_weights_sidebar(tabs.TabPanel, bpy.types.Panel):
             row.prop(settings, "hair_skeleton", text="EST Entry")
             row.operator(MAGIC_FIT_OT_pick_hair_skeleton.bl_idname, text="", icon='VIEWZOOM')
             self.draw_pick_hint(col, settings)
-        _draw_hair_main(col, settings, hang=_button_hangs(context, settings))
+        _draw_hair_main(col, settings, hang=_button_hangs(context, settings),
+                        spacing=settings.hair_skeleton_mode == 'CUSTOM')
         if settings.group_mode == 'ACTIVE':
             # Hair Weights needs All Groups, and no other panel on this tab has the choice.
             _draw_choice(col, settings, "group_mode")

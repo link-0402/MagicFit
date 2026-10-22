@@ -38,7 +38,8 @@ def check(condition, message):
 def use_settings(**values):
     settings = bpy.context.scene.magic_fit
     defaults = dict(hair_race='c0201', hair_skeleton_mode='AUTO', hair_skeleton=0, hair_hang_start=0.025,
-                    hair_hang_length=0.07, hair_neck_weight=0.3, hair_chain_stretch=0.5, hair_joint_blend=0.30,
+                    hair_hang_length=0.07, hair_neck_weight=0.3, hair_chain_spacing=0.06, hair_chain_stretch=0.5,
+                    hair_joint_blend=0.30,
                     hair_layer_range=0.01, hair_ears=True, hair_max_groups=8, hair_apply_to_selected=False,
                     group_mode='ALL', mode='HAIR')
     defaults.update(values)
@@ -951,6 +952,28 @@ def test_custom_reuses_rig():
           "reuse: Rebuild puts the bone back on its joint")
 
 
+def test_custom_chain_spacing():
+    # Chain Spacing reaches the chains as they are built, and Rebuild Chains builds them with the new value.
+    obj, _parts, settings = own_skeleton_hair(hair_chain_spacing=0.04)
+    seen = []
+    plan_rig = hairrig.plan_rig
+
+    def recording(*args, **kwargs):
+        seen.append(kwargs.get("spacing"))
+        return plan_rig(*args, **kwargs)
+
+    hairrig.plan_rig = recording
+    try:
+        hair_weights_reports()
+        settings.hair_chain_spacing = 0.09
+        result = bpy.ops.magic_fit.hair_weights(rebuild=True)
+    finally:
+        hairrig.plan_rig = plan_rig
+    check(result == {'FINISHED'} and len(seen) == 2 and seen[0] is not None and seen[1] is not None
+          and abs(seen[0] - 0.04) < 1e-6 and abs(seen[1] - 0.09) < 1e-6,
+          "chain spacing: the chains are built with Chain Spacing ({})".format(seen))
+
+
 def test_race_change_rebuilds():
     obj, _parts, _settings = own_skeleton_hair()
     hair_weights_reports()
@@ -1285,7 +1308,8 @@ def main():
                      test_best_match_unchanged, test_chains, test_layers, test_ears, test_matching, test_button,
                      test_existing_armature, test_customize_plus, test_armature_out_of_view_layer, test_parts,
                      test_selected, test_replace, test_masks, test_pick, test_brush, test_readiness,
-                     test_custom_button, test_custom_reuses_rig, test_race_change_rebuilds, test_nothing_hangs,
+                     test_custom_button, test_custom_reuses_rig, test_custom_chain_spacing, test_race_change_rebuilds,
+                     test_nothing_hangs,
                      test_custom_brush, test_custom_view_layer, test_custom_parts, test_custom_parts_one_after_another,
                      test_custom_other_race_parts, test_custom_parts_thick_cap):
             print("==", test.__name__)

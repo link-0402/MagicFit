@@ -398,7 +398,8 @@ def test_pivot_at_root():
     model_rig = rig()
     for name, co, tris in chain_fixtures():
         locks = hairrig.find_locks(co, tris, model_rig)
-        chains = hairrig.plan_rig(co, tris, model_rig)
+        # No spacing rule: each chain from one lock.
+        chains = hairrig.plan_rig(co, tris, model_rig, spacing=0.0)
         gaps = []
         for chain in chains:
             lock = lock_of(chain, locks)
@@ -414,7 +415,7 @@ def test_even_joints():
     model_rig = rig()
     for name, co, tris in chain_fixtures():
         locks = hairrig.find_locks(co, tris, model_rig)
-        chains = hairrig.plan_rig(co, tris, model_rig)
+        chains = hairrig.plan_rig(co, tris, model_rig, spacing=0.0)
         spreads, short = [], []
         for chain in chains:
             lock = lock_of(chain, locks)
@@ -445,10 +446,11 @@ def test_kinds():
 def test_budget():
     model_rig = rig()
     co, tris, _parts = one_piece_long_hair()
-    # Room for three of the sheet's five chains (4 or 5 bones each, hanging from the hairline).
+    # Room for three of the sheet's five chains (4 or 5 bones each, hanging from the hairline). No spacing
+    # rule: only the budget merges.
     budget = 14
-    free = hairrig.plan_rig(co, tris, model_rig)
-    chains = hairrig.plan_rig(co, tris, model_rig, max_bones=budget)
+    free = hairrig.plan_rig(co, tris, model_rig, spacing=0.0)
+    chains = hairrig.plan_rig(co, tris, model_rig, max_bones=budget, spacing=0.0)
     describe_chains(chains, co, hairrig.find_locks(co, tris, model_rig))
     total = sum(len(chain.joints) for chain in chains)
     check(sum(len(chain.joints) for chain in free) > budget, "budget: the sheet takes more than {:d} bones unbudgeted "
@@ -480,10 +482,17 @@ def card_hair(count, seed=0):
 
 def test_card_hair_kinds():
     # Card hair: 300 cards, each its own loose part kept whole (a single strand), 4 bones each: merged down to
-    # the budget, the locks are slices of the hair around the back, not ponytails.
+    # the budget (no spacing rule), the locks are slices of the hair around the back, not ponytails.
     model_rig = rig()
     co, tris = card_hair(300)
-    chains = hairrig.plan_rig(co, tris, model_rig)
+    spaced = hairrig.plan_rig(co, tris, model_rig)
+    describe_chains(spaced, co, [])
+    far = [off_hair(chain, co) for chain in spaced]
+    check(spaced and sum(len(chain.joints) for chain in spaced) <= hairrig.MAX_HAIR_BONES
+          and max(far) <= hairrig.SPINE_REACH,
+          "card hair: spaced out, within the budget and on the hair ({:d} chains, up to {:.4f} m off; {})".format(
+              len(spaced), max(far, default=math.nan), [chain.kind for chain in spaced]))
+    chains = hairrig.plan_rig(co, tris, model_rig, spacing=0.0)
     describe_chains(chains, co, [])
     check(len(chains) > 1 and sum(len(chain.joints) for chain in chains) <= hairrig.MAX_HAIR_BONES,
           "card hair: merged down to the budget ({:d} chains)".format(len(chains)))
@@ -492,15 +501,16 @@ def test_card_hair_kinds():
     behind = [chain for chain in chains if chain.angle > hairrig.SIDE_ANGLE]
     check(behind and all(chain.kind == "back" for chain in behind),
           "card hair: every chain behind the head is back hair ({})".format([chain.kind for chain in behind]))
-    # A ponytail in two layers, a tube in a tube (two loose parts, each kept whole): merged, it is still one
-    # ponytail.
+    # A ponytail in two layers, a tube in a tube (two loose parts, each kept whole, their roots twins): merged
+    # unbudgeted, it is still one ponytail.
     co, tris, _ranges = join([hair.cap(), hair.tube((0.0, 0.105, 1.53), (0.0, 0.16, 1.11), 0.035),
                               hair.tube((0.0, 0.105, 1.53), (0.0, 0.16, 1.11), 0.028)])
-    free = hairrig.plan_rig(co, tris, model_rig)
+    free = hairrig.plan_rig(co, tris, model_rig, spacing=0.0)
     chains = hairrig.plan_rig(co, tris, model_rig, max_bones=5)
     describe_chains(chains, co, [])
-    check(len(free) == 2 and len(chains) == 1 and chains[0].kind == "ponytail" and chains[0].whole,
-          "card hair: a ponytail in two layers merged stays one ponytail ({} -> {})".format(
+    check(len(free) == 1 and free[0].kind == "ponytail" and free[0].whole and len(chains) == 1
+          and chains[0].kind == "ponytail" and chains[0].whole,
+          "card hair: a ponytail in two layers merged stays one ponytail ({}, {})".format(
               [chain.kind for chain in free], [chain.kind for chain in chains]))
 
 
@@ -723,30 +733,72 @@ def ring_strip(azimuths, bottom, outward=0.0):
     return verts, quads
 
 
-def test_twins_merge_first():
+def off_hair(chain, co):
+    """How far a chain's joints and tip lie from its hair at most (metres)."""
+    own = co[chain.vertices]
+    return max(float(np.min(np.linalg.norm(own - point, axis=1))) for point in np.vstack((chain.joints, chain.tip)))
+
+
+def test_twins_merge():
     # The neck sheet (two back locks), a strip down the side doubled 0.3 mm apart (twin layers, each its own
-    # loose part) and a shorter strip on the other side, smaller than either twin. One merge over the budget:
-    # the twins merge, nothing else does.
+    # loose part) and a shorter strip on the other side. Far under the budget and without the spacing rule,
+    # the twins still merge: one chain of both layers, the other chains as they are without the double.
     model_rig = rig(MIQOTE)
-    co, tris, (_cap, _sheet, twin_ids, other_ids, short_ids) = join(neck_parts() + [
-        ring_strip((75.0, 90.0), 1.15), ring_strip((75.0, 90.0), 1.15, 0.0003), ring_strip((-75.0, -90.0), 1.30)])
-    free = hairrig.plan_rig(co, tris, model_rig)
-    describe_chains(free, co, hairrig.find_locks(co, tris, model_rig))
-    sizes = {name: [chain.area for chain in free if np.isin(chain.vertices, ids).all()]
-             for name, ids in (("twin", twin_ids), ("other", other_ids), ("short", short_ids))}
-    check(len(free) == 5 and all(len(v) == 1 for v in sizes.values()) and sizes["short"][0] < min(
-        sizes["twin"][0], sizes["other"][0]),
-        "twins: five chains unbudgeted, the short strip the smallest ({})".format(sizes))
-    budget = sum(len(chain.joints) for chain in free) - 1
-    chains = hairrig.plan_rig(co, tris, model_rig, max_bones=budget)
+    parts = neck_parts() + [ring_strip((75.0, 90.0), 1.15), ring_strip((75.0, 90.0), 1.15, 0.0003),
+                            ring_strip((-75.0, -90.0), 1.30)]
+    co, tris, (_cap, _sheet, twin_ids, other_ids, _short_ids) = join(parts)
+    chains = hairrig.plan_rig(co, tris, model_rig, spacing=0.0)
     describe_chains(chains, co, [])
+    single_co, single_tris, (_cap, _sheet, single_ids, _short_ids) = join(parts[:3] + parts[4:])
+    single = hairrig.plan_rig(single_co, single_tris, model_rig, spacing=0.0)
     both = [chain for chain in chains if np.isin(chain.vertices, twin_ids).any()
             and np.isin(chain.vertices, other_ids).any()]
-    kept = [chain for chain in free if not np.isin(chain.vertices, np.concatenate((twin_ids, other_ids))).any()]
-    check(len(chains) == 4 and len(both) == 1 and all(
+    kept = [chain for chain in single if not np.isin(chain.vertices, single_ids).any()]
+    check(len(chains) == 4 and len(single) == 4 and len(both) == 1 and all(
         any(np.array_equal(a.joints, b.joints) for b in chains) for a in kept),
-        "twins: over the budget the twin layers merge first, the other chains stay ({:d} chains)".format(
-            len(chains)))
+        "twins: unbudgeted the twin layers merge, the other chains stay ({:d} chains, {:d} without the double)".format(
+            len(chains), len(single)))
+    # A card doubled for its back faces, alone on the cap: one chain, not two.
+    co, tris, _ranges = join(neck_parts()[:1] + [ring_strip((75.0, 90.0), 1.15),
+                                                 ring_strip((75.0, 90.0), 1.15, 0.0003)])
+    chains = hairrig.plan_rig(co, tris, model_rig, spacing=0.0)
+    check(len(chains) == 1, "twins: a doubled card is one chain ({:d})".format(len(chains)))
+
+
+def test_merge_stays_on_hair():
+    # Three back strips: a narrow one straight down behind the head, one rooted 3 cm from it swinging out to
+    # the side, and one rooted 5 cm from it on the other side hanging alongside it. One merge over the budget
+    # (no spacing rule): the narrow strip's nearest by root is the swinging one, but merged with it the spine
+    # would run through the gap between them, so it merges with the one alongside instead.
+    model_rig = rig()
+    # The swinging strip in two pieces welded at their shared row: straight down beside the narrow one past
+    # where both leave the scalp, then out to the side.
+    co, tris, (narrow, swing_top, swing_bottom, beside) = join([
+        hair.strip((0.0, 0.08, 1.53), (0.0, 0.10, 1.30), 0.015, (1.0, 0.0, 0.0)),
+        hair.strip((-0.03, 0.08, 1.53), (-0.03, 0.09, 1.40), 0.02, (1.0, 0.0, 0.0)),
+        hair.strip((-0.03, 0.09, 1.40), (-0.22, 0.10, 1.30), 0.02, (1.0, 0.0, 0.0)),
+        hair.strip((0.05, 0.08, 1.53), (0.05, 0.10, 1.30), 0.02, (1.0, 0.0, 0.0))])
+    swing = np.concatenate((swing_top, swing_bottom))
+    free = hairrig.plan_rig(co, tris, model_rig, spacing=0.0)
+    describe_chains(free, co, [])
+    mine = {name: [chain for chain in free if np.isin(chain.vertices, ids).all()]
+            for name, ids in (("narrow", narrow), ("swing", swing), ("beside", beside))}
+    ready = len(free) == 3 and all(len(v) == 1 for v in mine.values())
+    gaps = {name: float(np.linalg.norm(mine[name][0].joints[0] - mine["narrow"][0].joints[0])) if ready else math.nan
+            for name in ("swing", "beside")}
+    check(ready and all(chain.kind == "back" for chain in free)
+          and min(free, key=lambda chain: chain.area) is mine["narrow"][0] and gaps["swing"] < gaps["beside"],
+          "on the hair: three back chains, the narrow the smallest, the swinging one nearest by root ({}, {})".format(
+              [chain.kind for chain in free], {name: round(gap, 3) for name, gap in gaps.items()}))
+    chains = hairrig.plan_rig(co, tris, model_rig, spacing=0.0, max_bones=sum(len(chain.joints) for chain in free) - 1)
+    describe_chains(chains, co, [])
+    merged = [chain for chain in chains if np.isin(chain.vertices, narrow).any()]
+    check(len(chains) == 2 and len(merged) == 1 and np.isin(merged[0].vertices, beside).any()
+          and not np.isin(merged[0].vertices, swing).any(),
+          "on the hair: over the budget the narrow strip merges with the one alongside ({:d} chains)".format(len(chains)))
+    far = [off_hair(chain, co) for chain in chains]
+    check(chains and max(far) <= hairrig.SPINE_REACH,
+          "on the hair: every chain within SPINE_REACH of its hair ({} m)".format([round(f, 4) for f in far]))
 
 
 def test_lone_kind_survives():
@@ -755,12 +807,14 @@ def test_lone_kind_survives():
     model_rig = rig(MIQOTE)
     fringe = hair.patch(np.arange(35.0, 116.0, 5.0), np.arange(165.0, 196.0, 7.5), 0.012, MIQOTE)
     co, tris, (_cap, _sheet, fringe_ids) = join(neck_parts() + [fringe])
-    free = hairrig.plan_rig(co, tris, model_rig)
+    # No spacing rule: only the budget merges.
+    free = hairrig.plan_rig(co, tris, model_rig, spacing=0.0)
     describe_chains(free, co, [])
     smallest = min(free, key=lambda chain: chain.area) if free else None
     check(len(free) >= 3 and smallest.kind == "bangs" and sum(chain.kind == "bangs" for chain in free) == 1,
           "lone kind: one bangs chain, the smallest, among back chains ({})".format([chain.kind for chain in free]))
-    chains = hairrig.plan_rig(co, tris, model_rig, max_bones=sum(len(chain.joints) for chain in free) - 1)
+    chains = hairrig.plan_rig(co, tris, model_rig, max_bones=sum(len(chain.joints) for chain in free) - 1,
+                              spacing=0.0)
     describe_chains(chains, co, [])
     bangs = [chain for chain in chains if chain.kind == "bangs"]
     check(len(chains) == len(free) - 1 and len(bangs) == 1 and np.isin(bangs[0].vertices, fringe_ids).all(),
@@ -800,6 +854,19 @@ def test_maeve_chains():
                                                                   len(natural), max(natural, default=math.nan)))
     lowest = min(float(chain.joints[0][2]) for chain in chains) if chains else math.nan
     check(chains and lowest >= 1.36, "maeve: no chain starts below z 1.36 ({:.3f})".format(lowest))
+    # Spaced out (CHAIN_SPACING) and on the hair: no chain runs through the hair from one lock to another.
+    far = [off_hair(chain, points) for chain in chains]
+    check(chains and max(far) <= hairrig.SPINE_REACH,
+          "maeve: every chain's joints and tip within SPINE_REACH of its hair (up to {:.4f} m)".format(
+              max(far, default=math.nan)))
+    check(any(chain.kind == "bangs" for chain in chains), "maeve: a bangs chain ({})".format(
+        [chain.kind for chain in chains]))
+    print("      {:d} chains, {:d} bones".format(len(chains), sum(len(chain.joints) for chain in chains)))
+    check(5 <= len(chains) <= 10, "maeve: 5 to 10 chains ({:d})".format(len(chains)))
+    dense = hairrig.plan_rig(points, tris, maeve, cap=cap, spacing=0.03)
+    sparse = hairrig.plan_rig(points, tris, maeve, cap=cap, spacing=0.10)
+    check(len(dense) > len(chains) >= len(sparse), "maeve: more chains at spacing 0.03, fewer or as many at 0.10 "
+          "({:d}, {:d}, {:d})".format(len(dense), len(chains), len(sparse)))
 
 
 def test_maeve_weights():
@@ -1410,7 +1477,8 @@ def main():
                      test_parted_locks, test_long_hair_chains, test_bangs_chain, test_pivot_at_root, test_even_joints,
                      test_kinds, test_budget, test_card_hair_kinds, test_card_hair_time, test_moved_hair,
                      test_flat_fringe, test_neck_layer, test_neck_only_layer, test_cap_rim, test_bun,
-                     test_roots_near_scalp, test_twins_merge_first, test_lone_kind_survives, test_maeve_chains,
+                     test_roots_near_scalp, test_twins_merge, test_merge_stays_on_hair, test_lone_kind_survives,
+                     test_maeve_chains,
                      test_maeve_weights, test_armature_rig, test_weights_follow_locks,
                      test_edited_rig_is_kept, test_branch_starts_chain, test_bones_hash, test_kind_change_writes_json,
                      test_state_keeps_light, test_old_rig_state, test_chain_along, test_ramp_from_first_joint,

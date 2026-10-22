@@ -551,6 +551,18 @@ class MagicFitSettings(bpy.types.PropertyGroup):
         min=0.0,
         max=1.0,
     )
+    hair_chain_spacing: FloatProperty(
+        name="Chain Spacing",
+        description=(
+            "How far apart the chains of the hair's own skeleton start. Higher: fewer chains. Used when the "
+            "chains are built"
+        ),
+        subtype='DISTANCE',
+        default=hairrig.CHAIN_SPACING,
+        min=0.02,
+        soft_max=0.15,
+        precision=3,
+    )
     hair_chain_stretch: FloatProperty(
         name="Chain Stretch",
         description=(
