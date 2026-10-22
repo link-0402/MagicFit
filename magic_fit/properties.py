@@ -877,7 +877,8 @@ def _hair_rig_kind_changed(self, _context):
 
 
 class HairRigChain(bpy.types.PropertyGroup):
-    """A chain of the hair's own skeleton (Object.magic_fit_hair_rig): its kind and bones, root to tip."""
+    """A chain of the hair's own skeleton (Object.magic_fit_hair_rig): its kind and bones, root to tip, and
+    whether it is light (`hairrig.Lock`; not shown and not in xiv_hair_rig, it only changes the weights)."""
     kind: EnumProperty(
         name="Kind",
         description="How the game swings this chain",
@@ -889,6 +890,11 @@ class HairRigChain(bpy.types.PropertyGroup):
         name="Bones",
         description="The chain's bones, root to tip, separated by commas",
         default="",
+    )
+    light: BoolProperty(
+        name="Light",
+        description="The chain's lock stands off the cap rather than leaving the scalp at the hairline",
+        default=False,
     )
 
 
@@ -911,6 +917,12 @@ class HairRigState(bpy.types.PropertyGroup):
         name="Bones Hash",
         description="A hash of the hair's bones as Hair Weights left them, to tell whether they were edited since",
         default="",
+    )
+    cap_depth: FloatProperty(
+        name="Cap Depth",
+        description="How far the hair's cap lies off the head, measured when the chains were built (-1: unknown)",
+        subtype='DISTANCE',
+        default=-1.0,
     )
 
 

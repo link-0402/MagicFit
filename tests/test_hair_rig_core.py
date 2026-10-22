@@ -805,18 +805,31 @@ def test_maeve_chains():
 # -----------------------------------------------------------------------------
 # The rig on the armature
 
-def rig_scene():
+def rig_scene(bun=False):
     """The long hair (`hair.build`) deformed by a new armature with c0201's j_kao, j_kubi and j_sebo_c (made by
-    `hairing.ensure_bones`), and its chains built on the armature: (hair object, armature, plans, bone
-    names, points, triangles, part index of each point, part names)."""
+    `hairing.ensure_bones`), and its chains built on the armature with the hair's cap depth, as Hair Weights
+    builds them: (hair object, armature, plans, bone names, points, triangles, part index of each point, part
+    names). With ``bun``, the bun on c0801 (`bun_hair`) instead."""
     hair.clear_scene()
-    co, tris, part, names = long_hair()
-    obj, _ranges = hair.build()
+    race = MIQOTE if bun else hair.RACE
+    if bun:
+        co, tris, ids = bun_hair()
+        names = ["cap", "bun"]
+        part = np.zeros(len(co), dtype=np.int64)
+        part[ids["bun"]] = 1
+        mesh = bpy.data.meshes.new("Bun")
+        mesh.from_pydata([tuple(p) for p in co], [], [tuple(int(k) for k in t) for t in tris])
+        obj = bpy.data.objects.new("Bun", mesh)
+        bpy.context.scene.collection.objects.link(obj)
+    else:
+        co, tris, part, names = long_hair()
+        obj, _ranges = hair.build()
     armature = hairing.new_armature(bpy.context, "Armature", bpy.context.scene.collection)
-    hairing.ensure_bones(bpy.context, armature, rig(), [hairing.HEAD, hairing.NECK, hairing.UPPER_BACK])
+    hairing.ensure_bones(bpy.context, armature, rig(race), [hairing.HEAD, hairing.NECK, hairing.UPPER_BACK])
     hairing.add_armature_modifier(obj, armature)
-    plans = hairrig.plan_rig(co, tris, rig())
-    bones = hairrig.build_armature_rig(bpy.context, armature, plans, hair.RACE)
+    cap = hairing.cap_depth(co, tris, rig(race))
+    plans = hairrig.plan_rig(co, tris, rig(race), cap=cap)
+    bones = hairrig.build_armature_rig(bpy.context, armature, plans, race, cap_depth=cap)
     return obj, armature, plans, bones, co, tris, part, names
 
 
@@ -1089,6 +1102,79 @@ def test_kind_change_writes_json():
           "kind change: the rig property follows")
 
 
+def test_state_keeps_light():
+    _obj, armature, plans, _bones, co, tris, _part, _names = rig_scene(bun=True)
+    state = armature.magic_fit_hair_rig
+    cap = hairing.cap_depth(co, tris, rig(MIQOTE))
+    first = hairrig.bone_name(0, 0)
+
+    def kept(when):
+        custom = hairrig.custom_rig(armature, MIQOTE)
+        check(abs(state.cap_depth - cap) < 1e-6 and cap > 0.0 and [chain.light for chain in state.chains] == [True],
+              "light: the state keeps the cap depth and the bun's light chain, {:s} ({:.4f}, {})".format(
+                  when, state.cap_depth, [chain.light for chain in state.chains]))
+        check(custom.light == {first} and custom.cap_depth is not None and abs(custom.cap_depth - cap) < 1e-6
+              and custom.moved(np.zeros(3)).light == {first} and custom.moved(np.zeros(3)).cap_depth == custom.cap_depth,
+              "light: custom_rig carries them, also moved, {:s} ({}, {})".format(when, custom.light, custom.cap_depth))
+
+    check(len(plans) == 1 and plans[0].light, "light: the bun's one chain is planned light")
+    kept("built")
+    check(json.dumps(rig_json(armature)).find("light") < 0 and json_matches_state(armature),
+          "light: the rig property doesn't list it")
+    hairrig.sync_rig(bpy.context, armature, MIQOTE)
+    kept("after sync_rig")
+    # A chain the user adds (its first bone named for the hair) is not light; the bun's stays light.
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='EDIT')
+    edit_bones = armature.data.edit_bones
+    added = edit_bones.new("j_ex_hair_new")
+    added.head, added.tail = (0.0, 0.10, 1.55), (0.0, 0.12, 1.42)
+    added.parent = edit_bones[hairing.HEAD]
+    hairrig.sync_rig(bpy.context, armature, MIQOTE)
+    check([chain.light for chain in state.chains] == [True, False] and abs(state.cap_depth - cap) < 1e-6,
+          "light: a chain the user adds isn't light ({})".format([chain.light for chain in state.chains]))
+    # The bun's chain deleted and a new one added in its place: the new one takes its number, not its light.
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='EDIT')
+    edit_bones = armature.data.edit_bones
+    for edit in [edit for edit in edit_bones if edit.name.startswith(hairrig.BONE_PREFIX)]:
+        edit_bones.remove(edit)
+    added = edit_bones.new("j_ex_hair_new")
+    added.head, added.tail = (0.0, 0.10, 1.55), (0.0, 0.12, 1.42)
+    added.parent = edit_bones[hairing.HEAD]
+    hairrig.sync_rig(bpy.context, armature, MIQOTE)
+    check(state_chains(armature) == [("back", [first])] and [chain.light for chain in state.chains] == [False],
+          "light: a new chain taking a deleted light chain's number isn't light ({}, {})".format(
+              state_chains(armature), [chain.light for chain in state.chains]))
+    # Built again over the hair (a part joining), keeping the kinds.
+    again = hairrig.keep_kinds(armature, hairrig.plan_rig(co, tris, rig(MIQOTE), cap=cap))
+    hairrig.build_armature_rig(bpy.context, armature, again, MIQOTE, cap_depth=cap)
+    kept("after the rebuild")
+
+
+def test_old_rig_state():
+    _obj, armature, plans, _bones, _co, _tris, _part, _names = rig_scene()
+    # Built without a cap depth (as before it was kept).
+    hairrig.build_armature_rig(bpy.context, armature, plans, hair.RACE)
+    state = armature.magic_fit_hair_rig
+    check(state.cap_depth == -1.0, "old rig: built without a cap depth, the state has none ({})".format(
+        state.cap_depth))
+    # A rig state from a file made before the light flags.
+    for chain in state.chains:
+        chain.light = False
+    custom = hairrig.custom_rig(armature, hair.RACE)
+    check(custom.cap_depth is None and not custom.light, "old rig: unknown cap, nothing light ({}, {})".format(
+        custom.cap_depth, custom.light))
+    hairrig.sync_rig(bpy.context, armature, hair.RACE)
+    check(state.cap_depth == -1.0 and not any(chain.light for chain in state.chains),
+          "old rig: ...also after sync_rig")
+    # A rig from another tool (no state, only the property): nothing is light.
+    state.chains.clear()
+    hairrig.sync_rig(bpy.context, armature, hair.RACE)
+    check(len(state.chains) == len(plans) and not any(chain.light for chain in state.chains),
+          "old rig: a rig read from the property has no light chain")
+
+
 def main():
     magic_fit.register()
     try:
@@ -1098,7 +1184,8 @@ def main():
                      test_flat_fringe, test_neck_layer, test_neck_only_layer, test_cap_rim, test_bun,
                      test_roots_near_scalp, test_twins_merge_first, test_lone_kind_survives, test_maeve_chains,
                      test_armature_rig, test_weights_follow_locks,
-                     test_edited_rig_is_kept, test_branch_starts_chain, test_bones_hash, test_kind_change_writes_json):
+                     test_edited_rig_is_kept, test_branch_starts_chain, test_bones_hash, test_kind_change_writes_json,
+                     test_state_keeps_light, test_old_rig_state):
             print("==", test.__name__)
             try:
                 test()

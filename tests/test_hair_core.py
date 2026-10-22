@@ -1190,6 +1190,55 @@ def test_custom_parts_one_after_another():
               "{:.3f} of all)".format(ratio, float(own.mean())))
 
 
+def pieces_object(name, pieces):
+    """(vertices, faces) ``pieces`` as one mesh, active and the only one selected."""
+    verts, faces = [], []
+    for v, f in pieces:
+        start = len(verts)
+        verts += [tuple(p) for p in v]
+        faces += [tuple(start + i for i in face) for face in f]
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(verts, [], faces)
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    for other in bpy.context.selected_objects:
+        other.select_set(False)
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+    return obj
+
+
+def test_custom_parts_thick_cap():
+    # A hair with a thick cap (5 cm off the head) weighted first, its bones edited, then another layer of the
+    # cap 6 cm off the head in a mesh of its own: within the hair's cap depth, it hangs nowhere.
+    hair.clear_scene()
+    use_settings(hair_skeleton_mode='CUSTOM')
+    long = {name: (v, f) for name, v, f in hair.parts(long=True)}
+    first = pieces_object("Hair", [hair.cap(gap=0.05), long["lock_l"], long["lock_r"], long["ponytail"]])
+    hair_weights_reports()
+    armature = hair_armature(first)
+    chains = rig_chains(armature) if armature is not None else []
+    state = armature.magic_fit_hair_rig if armature is not None else None
+    check(chains and abs(state.cap_depth - 0.05) < 0.005,
+          "thick cap: the rig keeps the hair's cap depth ({})".format(state.cap_depth if state else None))
+    if not chains:
+        return
+    for name, old in (("Layer", False), ("Old Layer", True)):
+        if old:
+            # A rig built before the cap depth was kept: measured from the joining part.
+            state.cap_depth = -1.0
+        move_bone_head(first, armature, chains[0][1][0], (0.005, 0.0, 0.0))
+        second = pieces_object(name, [hair.cap(gap=0.06, lowest=80.0)])
+        result, reports = hair_weights_reports()
+        check(result == {'FINISHED'} and hair_armature(second) == armature and rig_chains(armature) == chains,
+              "thick cap{:s}: the layer joins the hair's armature, the edited bones kept".format(
+                  " (old rig)" if old else ""))
+        check(not [text for text in reports if "hangs where no chain may reach" in text],
+              "thick cap{:s}: no warning for the layer within the cap".format(" (old rig)" if old else ""))
+        check(state.cap_depth == -1.0 if old else abs(state.cap_depth - 0.05) < 0.005,
+              "thick cap{:s}: the stored cap depth stays ({:.4f})".format(" (old rig)" if old else "", state.cap_depth))
+
+
 def main():
     magic_fit.register()
     try:
@@ -1199,7 +1248,7 @@ def main():
                      test_selected, test_replace, test_masks, test_pick, test_brush, test_readiness,
                      test_custom_button, test_custom_reuses_rig, test_race_change_rebuilds, test_nothing_hangs,
                      test_custom_brush, test_custom_view_layer, test_custom_parts, test_custom_parts_one_after_another,
-                     test_custom_other_race_parts):
+                     test_custom_other_race_parts, test_custom_parts_thick_cap):
             print("==", test.__name__)
             try:
                 test()

@@ -2486,23 +2486,25 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
             # A mesh joining chains built without it gets them built again over the whole hair, unless the
             # user edited the bones: those are kept, and the mesh hangs from them as they are.
             again = bool(joining) and have and not hairrig.rig_edited(armature)
-            # How far the hair's cap lies off the head: measured over the whole hair when its chains are built.
-            cap = None
             if custom and joining and have and not again:
+                # How far the hair's cap lies off the head, as kept when its chains were built; for a rig built
+                # before it was kept, measured from the joining part.
+                stored = armature.magic_fit_hair_rig.cap_depth
                 unreached = [obj for obj, rest in zip(targets, rests) if obj in joining and hairrig.hangs(
-                    rest.co, rig, cap=cap)]
+                    rest.co, rig, cap=stored if stored >= 0.0 else hairing.cap_depth(rest.co, rest.tris, rig))]
             if custom and (self.rebuild or again or not have):
                 # Built over the whole hair, its other parts too, as the matching sees it.
                 points = np.concatenate([rest.co for rest in whole])
                 starts = np.cumsum([0] + [len(rest.co) for rest in whole[:-1]])
                 tris = np.concatenate([np.asarray(rest.tris, dtype=np.int64).reshape(-1, 3) + start
                                        for rest, start in zip(whole, starts)])
+                # How far the hair's cap lies off the head, measured over the whole hair; the rig state keeps it.
                 cap = hairing.cap_depth(points, tris, rig)
                 plans = hairrig.plan_rig(points, tris, rig, cap=cap)
                 if again and not self.rebuild:
                     # Built again only because a part joined: the chains the user picked kinds for keep them.
                     plans = hairrig.keep_kinds(armature, plans)
-                built = hairrig.build_armature_rig(context, armature, plans, race)
+                built = hairrig.build_armature_rig(context, armature, plans, race, cap_depth=cap)
             elif custom:
                 # The chains as the user left them: moved, deleted or added bones; new ones get names.
                 renamed = hairrig.sync_rig(context, armature, race)

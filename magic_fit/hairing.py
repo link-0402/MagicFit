@@ -439,9 +439,12 @@ class HairRig:
     """The bones a hair can hang from, for one race and hair skeleton, in Blender model space (moved by
     ``offset`` when the hair's armature has its head elsewhere). ``skeleton`` names the bones of the hair
     skeleton (the others are the body's). A ``custom`` rig's skeleton is the hair's own (`hairrig`): a chain
-    for every lock that hangs, so the body's hair bones take none of it."""
+    for every lock that hangs, so the body's hair bones take none of it. Its ``cap_depth`` is the hair's
+    (`cap_depth`, kept when its chains were built; None when that isn't known) and ``light`` holds the first
+    bone names of its light chains (`hairrig.Lock`)."""
 
-    def __init__(self, race, number, bones, head, skeleton, offset=None, custom=False):
+    def __init__(self, race, number, bones, head, skeleton, offset=None, custom=False, cap_depth=None,
+                 light=frozenset()):
         self.race = race
         self.number = number
         self.bones = bones
@@ -450,9 +453,12 @@ class HairRig:
         self.skeleton = list(skeleton)
         self.offset = np.zeros(3) if offset is None else np.asarray(offset, dtype=np.float64)
         self.custom = custom
+        self.cap_depth = cap_depth
+        self.light = frozenset(light)
 
     def moved(self, offset):
-        return HairRig(self.race, self.number, self.bones, self.head_field, self.skeleton, offset, self.custom)
+        return HairRig(self.race, self.number, self.bones, self.head_field, self.skeleton, offset, self.custom,
+                       self.cap_depth, self.light)
 
     def hair_bones(self):
         """The bones hair hangs from: the body's j_kami_* (unless the rig is ``custom``) and the hair
