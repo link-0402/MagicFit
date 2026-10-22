@@ -15,10 +15,10 @@
   chain of a kind darker, the chain picked in the list at full strength and the others faded. Weight on j_kao,
   the neck, the upper back or the ears gives no tint. The tint is drawn on the displayed (posed) hair, nudged
   a little off it either way along its (displayed) normals, depth-tested with the scene. A mesh's tint is built
-  again when it moves or changes (depsgraph updates), at most every REBUILD_INTERVAL (its weights less often
-  when they are slow to read: WEIGH_WAIT), and only what changed: its normals only when the hair moved, its
-  colours only when its weights or the chains changed. Nothing is written to the meshes. No tint on a mesh in
-  Edit Mode.
+  again when it moves or changes (depsgraph updates), at most every REBUILD_INTERVAL (its weights only once a
+  paint stroke is over, SETTLE, and less often when they are slow to read, WEIGH_WAIT), and only what changed:
+  its normals only when the hair moved, its colours only when its weights or the chains changed. Nothing is
+  written to the meshes. No tint on a mesh in Edit Mode.
 - Over the tint, in front of everything and in every mode, the overlay draws each chain bone of the current
   armature as a line from its head to its tail (`chain_lines`: posed, or the edit bones in Edit Mode), in the
   colour its chain's tint has, the picked chain at full strength and the others a little fainter (LINE_FLOOR),
@@ -73,6 +73,9 @@ REBUILD_INTERVAL = 0.25
 # A mesh's weights are read again at most every WEIGH_WAIT times as long as reading them took last time (and
 # not more often than REBUILD_INTERVAL), so painting a large hair doesn't spend most of its time on the tint.
 WEIGH_WAIT = 5
+# Seconds a mesh's data must go without updates (a paint stroke sends one per dab) before its weights are read
+# again: the tint catches up after a stroke instead of stuttering through it.
+SETTLE = 0.2
 # Width of the chain bones' lines, in pixels at the default resolution scale.
 LINE_WIDTH = 3.0
 # Opacity of the lines of the chains not picked in the list (the picked one's is 1): the tint's FADE would
@@ -354,7 +357,7 @@ class _Tint:
     """The tint of one mesh object."""
 
     __slots__ = ("co", "normals", "tris", "data", "weights", "weights_key", "colors", "colors_key", "batch",
-                 "built", "weighed", "weigh_cost", "moved", "reweigh")
+                 "built", "weighed", "weigh_cost", "marked", "moved", "reweigh")
 
     def __init__(self):
         self.co = None              # world space positions, as displayed
@@ -369,6 +372,7 @@ class _Tint:
         self.built = 0.0            # time.perf_counter() the positions were last read at
         self.weighed = 0.0          # time.perf_counter() the weights were last read at
         self.weigh_cost = 0.0       # seconds that read took
+        self.marked = 0.0           # time.perf_counter() an update of the mesh data last reached it
         self.moved = True           # positions to be read again
         self.reweigh = True         # weights to be read again
 
@@ -453,9 +457,10 @@ def _refresh_lines(context, armature_object):
 
 def _refresh(context, armature_object, meshes):
     """Bring the tints of ``meshes`` (`overlay_meshes` of ``armature_object``) up to date and forget the view
-    layer's others. Positions that changed less than REBUILD_INTERVAL after they were last read wait, and so do
-    weights less than REBUILD_INTERVAL or WEIGH_WAIT times their last read's time after it, whichever is
-    longer; a timer redraws the views when they're due. Returns True when one waits."""
+    layer's others. Positions that changed less than REBUILD_INTERVAL after they were last read wait. Weights
+    wait until the mesh data had no update for SETTLE, and REBUILD_INTERVAL or WEIGH_WAIT times their last
+    read's time after it, whichever is longer; the old tint stays meanwhile. A timer redraws the views when
+    they're due. Returns True when one waits."""
     tints = _layer_tints(context)
     shown = {obj.session_uid for obj in meshes}
     for uid in [uid for uid in tints if uid not in shown]:
@@ -476,11 +481,12 @@ def _refresh(context, armature_object, meshes):
         if tint.data != obj.data.session_uid or tint.weights_key != weights_key:
             tint.reweigh = True
         if tint.reweigh:
-            # Weights that don't fit the mesh any more are read at once; else when the last read is long enough
-            # ago, longer for a mesh slow to read.
+            # Weights that don't fit the mesh any more are read at once; else after the stroke (the mesh data
+            # settled) and when the last read is long enough ago, longer for a mesh slow to read.
             left = 0.0
             if tint.weights is not None and len(tint.weights) == count:
-                left = tint.weighed + max(REBUILD_INTERVAL, WEIGH_WAIT * tint.weigh_cost) - now
+                left = max(tint.marked + SETTLE,
+                           tint.weighed + max(REBUILD_INTERVAL, WEIGH_WAIT * tint.weigh_cost)) - now
             if left > 0.0:
                 wait = left if wait is None else min(wait, left)
             else:
@@ -556,11 +562,13 @@ def _on_depsgraph_update(_scene, depsgraph):
                     if lines.uid == uid:
                         lines.moved = True
         elif isinstance(data, bpy.types.Mesh):
-            # Weights live on the mesh data: posing doesn't list it, painting does.
+            # Weights live on the mesh data: posing doesn't list it, painting does (each dab).
+            now = time.perf_counter()
             for tints in _tints.values():
                 for tint in tints.values():
                     if tint.data == data.session_uid:
                         tint.reweigh = True
+                        tint.marked = now
         elif isinstance(data, bpy.types.Armature):
             for lines in _lines.values():
                 if lines.data == data.session_uid:

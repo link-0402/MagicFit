@@ -482,6 +482,7 @@ def test_overlay_rebuilds():
         check(tint.reweigh, "overlay: a weight change marks the weights")
         tint.built -= hairview.REBUILD_INTERVAL
         tint.weighed -= 10.0   # the weights have their own clock (WEIGH_WAIT)
+        tint.marked -= 10.0    # ...and wait for the mesh to settle (SETTLE)
         hairview._refresh(context, armature, meshes)
         check(not tint.reweigh and not np.array_equal(tint.weights, weights_before), "overlay: weights read again")
 
@@ -690,6 +691,7 @@ def test_normals_only_when_moved():
         check(tint.reweigh and tint.moved, "normals: a weight change marks weights and positions")
         tint.built -= hairview.REBUILD_INTERVAL
         tint.weighed -= 10.0
+        tint.marked -= 10.0
         hairview._refresh(context, armature, meshes)
         check(len(calls) == 1 and tint.co is positions and not tint.reweigh and not tint.moved,
               "normals: not read again when a weight change leaves the hair where it was ({:d})".format(len(calls)))
@@ -805,6 +807,7 @@ def test_adaptive_reweigh():
         now = time.perf_counter()
         tint.built = now - hairview.REBUILD_INTERVAL - 0.01
         tint.weighed = now - (hairview.REBUILD_INTERVAL + wait) / 2
+        tint.marked = now - hairview.SETTLE - 0.01   # settled: only WEIGH_WAIT holds it
         put_off = hairview._refresh(context, armature, meshes)
         check(put_off and len(reads) == 1 and tint.reweigh,
               "reweigh: put off until WEIGH_WAIT times the last read ({:d} reads)".format(len(reads)))
@@ -820,8 +823,70 @@ def test_adaptive_reweigh():
         paint(0.5)
         tint.weighed = time.perf_counter() - hairview.REBUILD_INTERVAL - 0.01
         tint.built = tint.weighed
+        tint.marked = time.perf_counter() - hairview.SETTLE - 0.01
         put_off = hairview._refresh(context, armature, meshes)
         check(not put_off and not tint.reweigh, "reweigh: a fast read waits REBUILD_INTERVAL only")
+    finally:
+        hairview.chain_weights = original
+        if bpy.app.timers.is_registered(hairview._tag_views):
+            bpy.app.timers.unregister(hairview._tag_views)
+        wm.magic_fit_show_chains = False
+        hairview.clear()
+
+
+def test_settle_reweigh():
+    obj, armature = rig_scene()
+    context = bpy.context
+    wm = context.window_manager
+    rig = armature.magic_fit_hair_rig
+    original = hairview.chain_weights
+    reads = []
+
+    def counted(*args):
+        reads.append(time.perf_counter())
+        return original(*args)
+
+    hairview.chain_weights = counted
+    wm.magic_fit_show_chains = True
+    try:
+        check(hairview.SETTLE == 0.2, "settle: SETTLE 0.2")
+        meshes = hairview.overlay_meshes(context, armature)
+        hairview._refresh(context, armature, meshes)
+        tint = hairview._layer_tints(context)[obj.session_uid]
+        check(len(reads) == 1, "settle: the first tint reads the weights at once")
+        group = obj.vertex_groups[rig.chains[0].bones.split(",")[0]]
+        count = len(obj.data.vertices)
+        colors = tint.colors
+        # A stroke: dabs closer together than SETTLE, long after the last read.
+        for dab in range(4):
+            group.add(list(range(dab * 50, dab * 50 + 50)), 0.3, 'REPLACE')
+            obj.data.update()
+            context.view_layer.update()
+            tint.weighed -= 10.0
+            tint.built -= 10.0      # positions are read at once: only the weights wait
+            if bpy.app.timers.is_registered(hairview._tag_views):
+                bpy.app.timers.unregister(hairview._tag_views)
+            put_off = hairview._refresh(context, armature, meshes)
+            due = tint.marked + hairview.SETTLE
+            check(put_off and tint.reweigh and len(reads) == 1 and tint.colors is colors,
+                  "settle: dab {:d} reads nothing, the old tint stays".format(dab + 1))
+            check(bpy.app.timers.is_registered(hairview._tag_views) and hairview._tag_due is not None
+                  and abs(hairview._tag_due - due) < 0.02,
+                  "settle: dab {:d}: the redraw is set for when the mesh settles ({})".format(
+                      dab + 1, None if hairview._tag_due is None else round(hairview._tag_due - due, 4)))
+        # SETTLE after the last dab: one read.
+        tint.marked -= hairview.SETTLE + 0.01
+        put_off = hairview._refresh(context, armature, meshes)
+        check(not put_off and len(reads) == 2 and not tint.reweigh and tint.colors is not colors,
+              "settle: one read once the mesh settled ({:d} reads)".format(len(reads)))
+        hairview._refresh(context, armature, meshes)
+        check(len(reads) == 2, "settle: ...and no more")
+        # Weights that don't fit the mesh any more are read at once, settled or not.
+        tint.weights = tint.weights[:-1]
+        tint.reweigh = True
+        tint.marked = time.perf_counter()
+        hairview._refresh(context, armature, meshes)
+        check(len(reads) == 3 and len(tint.weights) == count, "settle: a vertex count mismatch reads at once")
     finally:
         hairview.chain_weights = original
         if bpy.app.timers.is_registered(hairview._tag_views):
@@ -884,7 +949,8 @@ def main():
                  test_in_front_new_current, test_undo_redo_in_front, test_unregister_turns_off, test_chain_colors,
                  test_chain_weights, test_chain_weights_edge_cases, test_overlay_meshes, test_overlay_rebuilds,
                  test_chain_lines, test_line_rebuilds, test_normals_only_when_moved, test_xray_skips,
-                 test_gpu_state_reset, test_bone_lines_shown, test_adaptive_reweigh)
+                 test_gpu_state_reset, test_bone_lines_shown, test_adaptive_reweigh,
+                 test_settle_reweigh)
         if hairview is None:
             check(False, "magic_fit.hairview exists")
             tests = ()
