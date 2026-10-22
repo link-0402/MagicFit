@@ -482,7 +482,7 @@ def card_hair(count, seed=0):
 
 def test_card_hair_kinds():
     # Card hair: 300 cards, each its own loose part kept whole (a single strand), 4 bones each: merged down to
-    # the budget (no spacing rule), the locks are slices of the hair around the back, not ponytails.
+    # the budget (no spacing rule), the merged locks are slices of the hair around the back, not ponytails.
     model_rig = rig()
     co, tris = card_hair(300)
     spaced = hairrig.plan_rig(co, tris, model_rig)
@@ -492,15 +492,41 @@ def test_card_hair_kinds():
           and max(far) <= hairrig.SPINE_REACH,
           "card hair: spaced out, within the budget and on the hair ({:d} chains, up to {:.4f} m off; {})".format(
               len(spaced), max(far, default=math.nan), [chain.kind for chain in spaced]))
+    # Their kinds: side hair toward the ears, back hair behind, no bangs. A single card long enough for a
+    # ponytail and without one of its kind within the spacing keeps its own ponytail chain (a follow-up).
+    card = len(card_hair(1)[0])
+    kinds = [(chain.kind, round(chain.angle, 1), len(chain.vertices)) for chain in spaced]
+    print("      spaced kinds (kind, angle, vertices; {:d} per card):".format(card), kinds)
+    check(spaced and all((kind == "side") == (angle <= hairrig.SIDE_ANGLE) for kind, angle, _count in kinds)
+          and all(kind in ("side", "back") or (kind == "ponytail" and count <= 2 * card)
+                  for kind, _angle, count in kinds),
+          "card hair: spaced out, side hair to the side and back hair behind, a ponytail only a card or two "
+          "({})".format(kinds))
+    # At the slider's minimum spacing, the budget merges most of the cards: every merge still keeps its chain
+    # on the hair.
+    dense = hairrig.plan_rig(co, tris, model_rig, spacing=0.02)
+    far = [off_hair(chain, co) for chain in dense]
+    check(dense and sum(len(chain.joints) for chain in dense) <= hairrig.MAX_HAIR_BONES
+          and max(far) <= hairrig.SPINE_REACH,
+          "card hair: at spacing 0.02 within the budget and on the hair ({:d} chains, up to {:.4f} m off)".format(
+              len(dense), max(far, default=math.nan)))
     chains = hairrig.plan_rig(co, tris, model_rig, spacing=0.0)
     describe_chains(chains, co, [])
-    check(len(chains) > 1 and sum(len(chain.joints) for chain in chains) <= hairrig.MAX_HAIR_BONES,
-          "card hair: merged down to the budget ({:d} chains)".format(len(chains)))
-    check(not [chain for chain in chains if chain.kind == "ponytail"],
-          "card hair: no ponytail chains ({})".format([chain.kind for chain in chains]))
+    far = [off_hair(chain, co) for chain in chains]
+    check(len(chains) > 1 and sum(len(chain.joints) for chain in chains) <= hairrig.MAX_HAIR_BONES
+          and max(far) <= hairrig.SPINE_REACH,
+          "card hair: merged down to the budget, on the hair ({:d} chains, up to {:.4f} m off)".format(
+              len(chains), max(far, default=math.nan)))
+    # A long single card with none of its kind it could merge with on the hair keeps its own ponytail chain,
+    # as with the spacing (a follow-up); no merged lock is one.
+    check(all(chain.kind != "ponytail" or len(chain.vertices) <= 2 * card for chain in chains),
+          "card hair: no ponytail chains but single cards ({})".format(
+              [(chain.kind, len(chain.vertices)) for chain in chains if chain.kind == "ponytail"]))
     behind = [chain for chain in chains if chain.angle > hairrig.SIDE_ANGLE]
-    check(behind and all(chain.kind == "back" for chain in behind),
-          "card hair: every chain behind the head is back hair ({})".format([chain.kind for chain in behind]))
+    check(behind and all(chain.kind == "back" or (chain.kind == "ponytail" and len(chain.vertices) <= 2 * card)
+                         for chain in behind),
+          "card hair: every chain behind the head is back hair, or a single card's ponytail ({})".format(
+              [chain.kind for chain in behind]))
     # A ponytail in two layers, a tube in a tube (two loose parts, each kept whole, their roots twins): merged
     # unbudgeted, it is still one ponytail.
     co, tris, _ranges = join([hair.cap(), hair.tube((0.0, 0.105, 1.53), (0.0, 0.16, 1.11), 0.035),
@@ -799,6 +825,16 @@ def test_merge_stays_on_hair():
     far = [off_hair(chain, co) for chain in chains]
     check(chains and max(far) <= hairrig.SPINE_REACH,
           "on the hair: every chain within SPINE_REACH of its hair ({} m)".format([round(f, 4) for f in far]))
+    # The same in the spacing step, unbudgeted: the swinging strip is the narrow one's nearest of its kind,
+    # within the spacing, but the narrow strip merges with the one alongside.
+    spaced = hairrig.plan_rig(co, tris, model_rig)
+    describe_chains(spaced, co, [])
+    merged = [chain for chain in spaced if np.isin(chain.vertices, narrow).any()]
+    far = [off_hair(chain, co) for chain in spaced]
+    check(len(merged) == 1 and np.isin(merged[0].vertices, beside).any()
+          and not np.isin(merged[0].vertices, swing).any() and max(far) <= hairrig.SPINE_REACH,
+          "on the hair: spaced out, the narrow strip merges with the one alongside, every chain on the hair "
+          "({:d} chains, {} m)".format(len(spaced), [round(f, 4) for f in far]))
 
 
 def test_lone_kind_survives():

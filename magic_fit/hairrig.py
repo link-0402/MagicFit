@@ -51,7 +51,8 @@ Then it plans a chain of bones down each lock:
 - A merge (other than of twins) stays on the hair: it is refused when the merged lock's chain has a joint or
   its tip farther than SPINE_REACH from the lock's own hair (two locks far apart, its spine running through
   the space between them), and the next nearest is tried. A lock with no partner that keeps it on the hair
-  stays as it is, unless the rig is over the budget: then it merges into the nearest after all.
+  stays as it is; over the budget the next smallest lock merges instead, and only when no lock has a merge
+  that stays on the hair does the smallest merge into the nearest after all.
 - The merged lock hangs from the roots of both (its root is their mean) and is planned again. It is kept
   whole only when both locks were and one's roots lie within the other's, no wider than WHOLE_WIDTH: layers
   of one ponytail. Strands or cards merged side by side make back hair.
@@ -653,8 +654,9 @@ def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES
     kind. While the chains then take more than ``max_bones`` bones, the smallest lock that shares its kind
     with another merges into the nearest (by root) of that kind; when no two share a kind, the smallest into
     the nearest of any kind. A merge other than of twins whose chain leaves the hair (`_on_hair`) is refused
-    and the next nearest tried; when none is left, the lock stays as it is, or over the budget merges into
-    the nearest after all."""
+    and the next nearest tried; when none is left, the lock stays as it is. Over the budget the next smallest
+    lock is tried then, and only when no lock has a merge that stays on the hair does the smallest merge into
+    its nearest after all."""
     points = np.asarray(points, dtype=np.float64)
     mesh = _welded(points, tris, weld)
     if mesh is None:
@@ -689,6 +691,8 @@ def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES
         kin[start:start + 512] = gap[at, kin_to[start:start + 512]]
     # Locks no merge within the spacing keeps on the hair: they stay, until a merge brings another lock near.
     settled = np.zeros(len(planned), dtype=bool)
+    # How many locks merged into each.
+    version = np.zeros(len(planned), dtype=np.int64)
 
     def gaps(k):
         """The distances of the locks left from lock ``k``'s root (infinite to itself and the merged ones)."""
@@ -715,6 +719,7 @@ def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES
         nonlocal left, bones
         bones -= len(planned[into][1].joints) + len(planned[small][1].joints)
         planned[into] = (merged, chain)
+        version[into] += 1
         alive[small] = False
         left -= 1
         if chain is None:
@@ -769,25 +774,41 @@ def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES
             if _on_hair(points, merged, chain):
                 join(small, int(into), merged, chain)
                 break
+    # Merges over the budget found to leave the hair, as (small, its version, into, its version): a lock's
+    # version counts the merges into it, so a pair is tried again only once one of the two changed.
+    refused = set()
     while left > 1 and bones > max_bones:
         if merge_twins():
             continue
         shared = alive & (np.bincount(kinds[alive], minlength=len(KINDS))[kinds] >= 2)
-        small = int(np.argmin(np.where(shared if shared.any() else alive, areas, math.inf)))
-        gap = gaps(small)
-        if shared.any():
-            gap[kinds != kinds[small]] = math.inf
-        nearest = None
-        for into in np.argsort(gap, kind='stable')[:int(np.isfinite(gap).sum())]:
-            merged, chain = try_merge(small, int(into))
-            if nearest is None:
-                nearest = (int(into), merged, chain)
-            if _on_hair(points, merged, chain):
-                join(small, int(into), merged, chain)
+        eligible = np.flatnonzero(shared if shared.any() else alive)
+        # The smallest lock first; when none of its merges keeps it on the hair, the next smallest.
+        order = eligible[np.argsort(areas[eligible], kind='stable')]
+        done = False
+        for small in order.tolist():
+            gap = gaps(small)
+            if shared.any():
+                gap[kinds != kinds[small]] = math.inf
+            for into in np.argsort(gap, kind='stable')[:int(np.isfinite(gap).sum())].tolist():
+                key = (small, int(version[small]), into, int(version[into]))
+                if key in refused:
+                    continue
+                merged, chain = try_merge(small, into)
+                if _on_hair(points, merged, chain):
+                    join(small, into, merged, chain)
+                    done = True
+                    break
+                refused.add(key)
+            if done:
                 break
-        else:
-            # No merge keeps the lock on the hair: the budget wins.
-            join(small, *nearest)
+        if not done:
+            # No lock has a merge that keeps it on the hair: the budget wins, the smallest into its nearest.
+            small = int(order[0])
+            gap = gaps(small)
+            if shared.any():
+                gap[kinds != kinds[small]] = math.inf
+            into = int(np.argmin(gap))
+            join(small, into, *try_merge(small, into))
     planned = [pair for pair, keep in zip(planned, alive) if keep]
     # A merged lock's root moved: back in name order, as find_locks sorts.
     planned.sort(key=lambda pair: (round(pair[0].angle, 6), pair[0].root[0]))
