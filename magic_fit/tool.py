@@ -270,10 +270,12 @@ def _draw_smooth_main(layout, settings):
 
 
 def _draw_hair_main(layout, settings):
-    """The Hair settings that decide how much hangs from the hair bones."""
-    col = layout.column(align=True)
-    col.prop(settings, "hair_hang_start")
-    col.prop(settings, "hair_hang_length")
+    """The Hair settings that decide how much hangs from the hair bones. Own Skeleton works out where hair
+    hangs from the hair's shape, so it shows Neck Weight only."""
+    if settings.hair_skeleton_mode != 'CUSTOM':
+        col = layout.column(align=True)
+        col.prop(settings, "hair_hang_start")
+        col.prop(settings, "hair_hang_length")
     layout.prop(settings, "hair_neck_weight", slider=True)
 
 

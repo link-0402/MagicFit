@@ -329,6 +329,17 @@ def steps():
           "own skeleton: Rebuild Chains says what it does")
     env.screenshot("hair_custom_chains.png", whole_window=True)
 
+    # --- The panel: Own Skeleton works out where hair hangs, so only Neck Weight stays.
+    for mode, expected in (('CUSTOM', ["hair_neck_weight"]),
+                           ('AUTO', ["hair_hang_start", "hair_hang_length", "hair_neck_weight"]),
+                           ('PICK', ["hair_hang_start", "hair_hang_length", "hair_neck_weight"])):
+        settings.hair_skeleton_mode = mode
+        main = []
+        tool._draw_hair_main(Recorder(main), settings)
+        props = [args[1] for call, _text, args, _item in main if call == 'prop']
+        check(props == expected, "panel: {} draws {}".format(mode, ", ".join(props)))
+    settings.hair_skeleton_mode = 'CUSTOM'
+
 
 def run():
     watch()
