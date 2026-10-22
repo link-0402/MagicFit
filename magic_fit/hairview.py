@@ -6,10 +6,12 @@
   the chain's kind, one per kind (KIND_PALETTES), when the chains are built or read back (`hairrig._fill_state`)
   and when a chain's kind changes in the list. They are saved with the file; exporters ignore them.
 - Show Chains (`WindowManager.magic_fit_show_chains`, runtime: off after a file opens, and after the add-on is
-  turned off and on): while it's on, the hair's armature (`current_armature`) is drawn In Front, and so is an
-  armature that becomes current while it's on. What In Front was before is kept by armature (its session uid,
-  so a renamed one counts), at runtime, and comes back when the toggle goes off. Files are saved with it as it
-  was before, and an undo or redo that brings back In Front from while the toggle was on is put right.
+  turned off and on): while it's on, the hair's armature (`current_armature`) is drawn In Front with its chain
+  bones' collection (`hairrig.CHAIN_COLLECTION`) soloed, so Blender draws only the chain bones, and so is an
+  armature that becomes current while it's on (from a timer, never from the draw callback). What In Front and
+  the collections' solo were before is kept by armature (its session uid, so a renamed one counts), at
+  runtime, and comes back when the toggle goes off. Files are saved with them as they were before, and an
+  undo or redo that brings back In Front or the solo from while the toggle was on is put right.
 - While it's on, an overlay tints every shown mesh the current armature deforms that has its own skeleton
   (`overlay_meshes`) by the chain that moves it (`chain_colors`): each chain in its kind's colour, every second
   chain of a kind darker, the chain picked in the list at full strength and the others faded. Weight on j_kao,
@@ -92,12 +94,14 @@ UNDERLAY_ALPHA = 0.6
 # deformed hair then keeps its normals (a paint stroke doesn't move it, up to rounding).
 MOVE_TOLERANCE = 1e-6
 
-# {armature object's session uid: its In Front before Show Chains turned it on}
+# {armature object's session uid: (its In Front, its data's session uid, {its bone collections' names: their
+# is_solo}) before Show Chains turned it on}. Armature objects sharing their data share its solo state: the
+# first one's is kept for all.
 _in_front = {}
-# {armature object's session uid: the In Front Show Chains gave back when it went off}, until it goes on again
-# or a file opens: put back after an undo or redo that brought back the In Front of while it was on.
+# {armature object's session uid: what Show Chains gave back when it went off, as in _in_front}, until it goes
+# on again or a file opens: put back after an undo or redo that brought back the view of while it was on.
 _restored = {}
-# Session uids of armatures that became current while Show Chains is on, to draw In Front from a timer.
+# Session uids of armatures that became current while Show Chains is on, to show from a timer.
 _pending = set()
 # {(scene name, view layer name): {mesh object's session uid: _Tint}}
 _tints = {}
@@ -151,33 +155,87 @@ def current_armature(context):
 
 
 # -----------------------------------------------------------------------------
-# In Front
+# In Front and the chain bones solo
 
 def _object(uid):
     """The object with session uid ``uid``, or None."""
     return next((obj for obj in bpy.data.objects if obj.session_uid == uid), None)
 
 
-def _set_in_front(values):
-    """Set the In Front of the armatures in ``values`` ({session uid: In Front}) that are still there."""
-    for uid, value in values.items():
-        obj = _object(uid)
-        if obj is not None and obj.type == 'ARMATURE' and obj.show_in_front != value:
-            obj.show_in_front = value
+def _armature(uid):
+    """The armature object with session uid ``uid``, or None."""
+    obj = _object(uid)
+    return obj if obj is not None and obj.type == 'ARMATURE' else None
+
+
+def _set_view(armature_object, in_front, solos):
+    """Set ``armature_object``'s In Front and its bone collections' solo: ``solos`` ({name: is_solo}; a
+    collection not in it is not soloed), or None to leave them."""
+    if armature_object.show_in_front != in_front:
+        armature_object.show_in_front = in_front
+    if solos is None:
+        return
+    for collection in armature_object.data.collections_all:
+        solo = solos.get(collection.name, False)
+        if collection.is_solo != solo:
+            collection.is_solo = solo
+
+
+def _view_before(armature_object):
+    """What ``armature_object`` shows now, as _in_front keeps it; the solo state of its data as kept for
+    another armature object sharing it, when there is one."""
+    data = armature_object.data.session_uid
+    solos = next((saved[2] for saved in _in_front.values() if saved[1] == data), None)
+    if solos is None:
+        solos = {collection.name: collection.is_solo for collection in armature_object.data.collections_all}
+    return armature_object.show_in_front, data, solos
+
+
+def _show_view(armature_object):
+    """Draw ``armature_object`` In Front with its chain bones' collection (`hairrig.CHAIN_COLLECTION`) soloed,
+    when it has one."""
+    collections = armature_object.data.collections_all
+    solos = None
+    if collections.get(hairrig.CHAIN_COLLECTION) is not None:
+        solos = {collection.name: collection.name == hairrig.CHAIN_COLLECTION for collection in collections}
+    _set_view(armature_object, True, solos)
 
 
 def _draw_in_front(armature_object):
-    """Draw ``armature_object`` In Front, keeping what it was the first time."""
+    """Show ``armature_object``'s chains (`_show_view`), keeping what it showed the first time."""
     uid = armature_object.session_uid
     if uid not in _in_front:
-        _in_front[uid] = armature_object.show_in_front
-    if not armature_object.show_in_front:
-        armature_object.show_in_front = True
+        _in_front[uid] = _view_before(armature_object)
+    _show_view(armature_object)
+
+
+def _show_again():
+    """Show the chains again on every armature Show Chains shows (after a save, an undo or a rebuild)."""
+    for uid in _in_front:
+        obj = _armature(uid)
+        if obj is not None:
+            _show_view(obj)
+
+
+def _give_back(values):
+    """Give the armatures in ``values`` (as _in_front) that are still there what they showed: In Front, and
+    the solo state when their data is still the one it was kept for."""
+    for uid, (in_front, data, solos) in values.items():
+        obj = _armature(uid)
+        if obj is not None:
+            _set_view(obj, in_front, solos if obj.data.session_uid == data else None)
 
 
 def _restore_in_front():
-    """Give the armatures Show Chains drew In Front their In Front back."""
-    _set_in_front(_in_front)
+    """Give the armatures Show Chains showed their In Front and solo state back."""
+    _give_back(_in_front)
+
+
+def chains_changed(armature_object):
+    """The chain bones of ``armature_object`` were built or read again (`hairrig._fill_state`): while Show
+    Chains shows it, its chain bones' collection is soloed, made just now or not."""
+    if _showing(bpy.context.window_manager) and armature_object.session_uid in _in_front:
+        _show_view(armature_object)
 
 
 def _showing(wm):
@@ -185,8 +243,8 @@ def _showing(wm):
 
 
 def show_chains_changed(wm, context):
-    """Property update callback of Show Chains: on, the hair's armature is drawn In Front; off, every armature
-    it drew In Front gets its In Front back."""
+    """Property update callback of Show Chains: on, the hair's armature is drawn In Front with only its chain
+    bones (`_show_view`); off, every armature it showed gets its In Front and solo state back."""
     if wm.magic_fit_show_chains:
         _restored.clear()
         armature = current_armature(context)
@@ -204,7 +262,8 @@ def show_chains_changed(wm, context):
 
 def follow_current(context):
     """The armature whose chains are shown (`current_armature`), or None. While Show Chains is on, one not
-    drawn In Front yet is drawn so soon, from a timer: the draw callback this is called from mustn't write it."""
+    shown yet (`_show_view`) is shown so soon, from a timer: the draw callback this is called from mustn't
+    write it."""
     armature = current_armature(context)
     if armature is not None and _showing(context.window_manager) and armature.session_uid not in _in_front:
         _pending.add(armature.session_uid)
@@ -711,13 +770,13 @@ def _draw():
 
 @persistent
 def _on_save_pre(_dummy=None):
-    # The file keeps each armature's In Front as it was before Show Chains.
+    # The file keeps each armature's In Front and solo state as they were before Show Chains.
     _restore_in_front()
 
 
 @persistent
 def _on_save_post(_dummy=None):
-    _set_in_front(dict.fromkeys(_in_front, True))
+    _show_again()
 
 
 @persistent
@@ -734,12 +793,12 @@ def _on_load(_dummy=None):
 
 @persistent
 def _on_undo_redo(_scene=None, _depsgraph=None):
-    # An undo step keeps In Front as it was then: while on, the shown armatures stay in front; while off, they
-    # keep what off gave back (else a file saved after it keeps In Front on).
+    # An undo step keeps In Front and the solo state as they were then: while on, the shown armatures stay
+    # shown; while off, they keep what off gave back (else a file saved after it keeps them on).
     if _showing(bpy.context.window_manager):
-        _set_in_front(dict.fromkeys(_in_front, True))
+        _show_again()
     else:
-        _set_in_front(_restored)
+        _give_back(_restored)
     # The meshes and armatures may have changed in any way.
     for tints in _tints.values():
         for tint in tints.values():

@@ -153,6 +153,39 @@ def test_toggle_in_front():
     armature.show_in_front = False
 
 
+def chains_collection(armature):
+    return armature.data.collections_all.get(hairrig.CHAIN_COLLECTION)
+
+
+def test_toggle_solo():
+    _obj, armature = rig_scene()
+    wm = bpy.context.window_manager
+    chains = chains_collection(armature)
+    check(chains is not None and not chains.is_solo, "solo: the hair has its Hair Chains collection, not soloed")
+    if chains is None:
+        return
+    # The user soloed a collection of their own before.
+    body = armature.data.collections.new("Body")
+    body.assign(armature.data.bones[hairing.HEAD])
+    body.is_solo = True
+    wm.magic_fit_show_chains = True
+    check(chains.is_solo and not body.is_solo, "solo: on solos Hair Chains alone")
+    wm.magic_fit_show_chains = False
+    check(not chains.is_solo and body.is_solo, "solo: off brings back the solo from before")
+    body.is_solo = False
+    wm.magic_fit_show_chains = True
+    wm.magic_fit_show_chains = False
+    check(not chains.is_solo and not body.is_solo, "solo: nothing soloed before, nothing after")
+    # Rebuilt while shown: the chains stay soloed, and off still brings back what was before.
+    wm.magic_fit_show_chains = True
+    result = bpy.ops.magic_fit.hair_weights(rebuild=True)
+    chains = chains_collection(armature)
+    check(result == {'FINISHED'} and chains.is_solo, "solo: Rebuild Chains while shown keeps them soloed")
+    wm.magic_fit_show_chains = False
+    check(not chains.is_solo, "solo: ...and off gives the solo back")
+    armature.data.collections.remove(body)
+
+
 def test_toggle_drawn():
     obj, armature = rig_scene()
     wm = bpy.context.window_manager
@@ -181,8 +214,10 @@ def test_save_keeps_in_front_off():
         path = os.path.join(folder, "chains.blend")
         bpy.ops.wm.save_as_mainfile(filepath=path)
         check(bpy.data.objects[name].show_in_front, "save: still in front after saving")
+        check(chains_collection(bpy.data.objects[name]).is_solo, "save: the chains still soloed after saving")
         bpy.ops.wm.open_mainfile(filepath=path)
         check(not bpy.data.objects[name].show_in_front, "save: not in front in the file")
+        check(not chains_collection(bpy.data.objects[name]).is_solo, "save: the chains not soloed in the file")
         check(not bpy.context.window_manager.magic_fit_show_chains, "save: Show Chains is off after opening")
         # What was kept before opening (not in front) is forgotten: off restores what the file has.
         bpy.data.objects[name].show_in_front = True
@@ -241,11 +276,21 @@ def test_in_front_new_current():
     if bpy.app.timers.is_registered(hairview._apply_pending_in_front):
         bpy.app.timers.unregister(hairview._apply_pending_in_front)
     check(other.show_in_front and armature.show_in_front, "new current: the timer draws it in front")
+    check(chains_collection(other).is_solo, "new current: ...with its chains soloed")
     hairview.follow_current(bpy.context)
     check(not bpy.app.timers.is_registered(hairview._apply_pending_in_front),
           "new current: no timer for an armature already in front")
     wm.magic_fit_show_chains = False
     check(not other.show_in_front and not armature.show_in_front, "new current: off restores both")
+    # The two share their data: the solo from before Show Chains comes back, not the one it set.
+    check(not chains_collection(other).is_solo, "new current: off gives the shared data its solo back")
+    # Not soloed while off, from the draw callback either.
+    wm.magic_fit_show_chains = True
+    wm.magic_fit_show_chains = False
+    layer.objects.active = other
+    hairview.follow_current(bpy.context)
+    check(not chains_collection(other).is_solo and not bpy.app.timers.is_registered(hairview._apply_pending_in_front),
+          "new current: nothing soloed while off")
     layer.objects.active = obj
 
 
@@ -264,14 +309,22 @@ def test_undo_redo_in_front():
     armature.show_in_front = True
     hairview._on_undo_redo()
     check(not armature.show_in_front, "undo: ...again on redo")
+    # The same for the chains' solo.
+    chains = chains_collection(armature)
+    chains.is_solo = True
+    hairview._on_undo_redo()
+    check(not chains.is_solo, "undo: with the toggle off, the chains aren't soloed again")
     wm.magic_fit_show_chains = True
     check(not hairview._restored, "undo: on forgets what off restored")
     # Undo past the toggle going on.
     armature.show_in_front = False
+    chains.is_solo = False
     hairview._on_undo_redo()
     check(armature.show_in_front, "undo: with the toggle on, the shown armatures stay in front")
+    check(chains.is_solo, "undo: ...and their chains soloed")
     wm.magic_fit_show_chains = False
     check(not armature.show_in_front, "undo: off still restores what was before")
+    check(not chains.is_solo, "undo: ...the solo too")
 
 
 def test_unregister_turns_off():
@@ -1092,7 +1145,7 @@ def main():
     magic_fit.register()
     try:
         tests = (test_palettes, test_bones_colored_by_kind, test_current_armature, test_toggle_in_front,
-                 test_toggle_drawn, test_save_keeps_in_front_off, test_renamed_armature_restored,
+                 test_toggle_solo, test_toggle_drawn, test_save_keeps_in_front_off, test_renamed_armature_restored,
                  test_in_front_new_current, test_undo_redo_in_front, test_unregister_turns_off, test_chain_colors,
                  test_chain_weights, test_chain_weights_edge_cases, test_overlay_meshes, test_overlay_rebuilds,
                  test_chain_lines, test_line_rebuilds, test_normals_only_when_moved, test_xray_skips,

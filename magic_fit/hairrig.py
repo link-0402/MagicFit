@@ -62,7 +62,8 @@ and the user can move, delete or add some in Edit Mode; `sync_rig` reads them ba
 new ones; the rig state keeps a hash of the bones (`bones_hash`) to tell whether the user edited them since,
 and for the weights the hair's cap depth and which chains are light (kept by chain number, like the kinds).
 Each bone's Z axis points away from the head's axis, and its bone colour is its chain's kind's
-(`hairview.color_bones`). The armature carries the rig as RIG_PROPERTY, written from
+(`hairview.color_bones`). Every hair bone, the user's new ones too, is in the armature's CHAIN_COLLECTION bone
+collection, and only they are (`collect_hair_bones`); Show Chains solos it. The armature carries the rig as RIG_PROPERTY, written from
 `Object.magic_fit_hair_rig` after every change, for exporters (Instant Edit) to make the hair skeleton. A
 hair bone points along its X axis in the game and along its Y axis in Blender: ALONG_X turns one into the
 other, here (`custom_rig`) and in the exporter.
@@ -146,6 +147,9 @@ RIG_PROPERTY = "xiv_hair_rig"
 # root): j_ex_hair_01_a. Exporters accept no other names (BONE_PATTERN).
 BONE_PREFIX = "j_ex_hair_"
 BONE_PATTERN = re.compile(r"j_ex_hair_([0-9]{2})_([a-z])")
+# The bone collection on the armature that holds every hair bone (BONE_PREFIX), made when missing; Show Chains
+# solos it (`hairview`).
+CHAIN_COLLECTION = "Hair Chains"
 # The most chains the names allow.
 MAX_CHAINS = 99
 # Decimals (of metres, and of the bones' Z axes) `bones_hash` rounds the hair's bones to.
@@ -919,6 +923,25 @@ def _fill_state(armature_object, race, chains, cap_depth=None):
     state.active = min(max(state.active, 0), max(len(state.chains) - 1, 0))
     write_rig_property(armature_object)
     hairview.color_bones(armature_object)
+    collect_hair_bones(armature_object)
+    hairview.chains_changed(armature_object)
+
+
+def collect_hair_bones(armature_object):
+    """Put every hair bone (BONE_PREFIX) of ``armature_object`` into its CHAIN_COLLECTION bone collection (made
+    when missing), its edit bones while the armature is in Edit Mode, and take the others out of it. No other
+    collection changes."""
+    data = armature_object.data
+    collection = data.collections_all.get(CHAIN_COLLECTION)
+    if collection is None:
+        collection = data.collections.new(CHAIN_COLLECTION)
+    bones = data.edit_bones if armature_object.mode == 'EDIT' else data.bones
+    for bone in bones:
+        inside = bone.collections.get(CHAIN_COLLECTION) is not None
+        if bone.name.startswith(BONE_PREFIX) and not inside:
+            collection.assign(bone)
+        elif inside and not bone.name.startswith(BONE_PREFIX):
+            collection.unassign(bone)
 
 
 def build_armature_rig(context, armature_object, plans, race, cap_depth=-1.0):

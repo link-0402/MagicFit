@@ -1186,6 +1186,51 @@ def test_branch_starts_chain():
           "branch: still every hair bone in exactly one chain")
 
 
+def collection_bones(armature, name):
+    """The names of the bones in ``armature``'s bone collection ``name`` (None when it has none), in Object
+    Mode."""
+    collection = armature.data.collections_all.get(name)
+    return None if collection is None else sorted(bone.name for bone in collection.bones)
+
+
+def test_chain_collection():
+    _obj, armature, plans, bones, _co, _tris, _part, _names = rig_scene()
+    check(collection_bones(armature, hairrig.CHAIN_COLLECTION) == sorted(bones),
+          "chain collection: after the build, exactly the hair bones are in it ({})".format(
+              collection_bones(armature, hairrig.CHAIN_COLLECTION)))
+    # The body's bones in a collection of their own, as an imported skeleton has them: built again, the hair
+    # bones are in Hair Chains, and the body's collection keeps its bones.
+    body = armature.data.collections.new("Body")
+    for name in (hairing.HEAD, hairing.NECK):
+        body.assign(armature.data.bones[name])
+    bones = hairrig.build_armature_rig(bpy.context, armature, plans, hair.RACE)
+    body_bones = collection_bones(armature, "Body")
+    check(collection_bones(armature, hairrig.CHAIN_COLLECTION) == sorted(bones)
+          and [name for name in body_bones if not name.startswith(hairrig.BONE_PREFIX)]
+          == sorted((hairing.HEAD, hairing.NECK)),
+          "chain collection: built again, the hair bones are in it, Body keeps its bones ({})".format(body_bones))
+    # A bone the user adds below chain 01, and chain 02's first bone renamed to something else.
+    first = state_chains(armature)[0][1]
+    second = state_chains(armature)[1][1][0]
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='EDIT')
+    edit_bones = armature.data.edit_bones
+    added = edit_bones.new("Strand")
+    added.head = edit_bones[first[-1]].tail
+    added.tail = added.head - Vector((0.0, 0.0, 0.05))
+    added.parent = edit_bones[first[-1]]
+    edit_bones[second].name = "My Bone"
+    hairrig.sync_rig(bpy.context, armature, hair.RACE)
+    bpy.ops.object.mode_set(mode='OBJECT')
+    have = collection_bones(armature, hairrig.CHAIN_COLLECTION)
+    hair_bones = sorted(bone.name for bone in armature.data.bones if bone.name.startswith(hairrig.BONE_PREFIX))
+    new_name = state_chains(armature)[0][1][-1]
+    check(have == hair_bones and new_name not in first and new_name in have and "My Bone" not in have,
+          "chain collection: sync_rig adds the user's new chain bone ({:s}) and drops the renamed one".format(
+              new_name))
+    check(collection_bones(armature, "Body") == body_bones, "chain collection: sync_rig leaves Body as it was")
+
+
 def test_bones_hash():
     _obj, armature, _plans, bones, _co, _tris, _part, _names = rig_scene()
     check(armature.magic_fit_hair_rig.bones_hash == hairrig.bones_hash(armature) and not hairrig.rig_edited(armature),
@@ -1480,7 +1525,8 @@ def main():
                      test_roots_near_scalp, test_twins_merge, test_merge_stays_on_hair, test_lone_kind_survives,
                      test_maeve_chains,
                      test_maeve_weights, test_armature_rig, test_weights_follow_locks,
-                     test_edited_rig_is_kept, test_branch_starts_chain, test_bones_hash, test_kind_change_writes_json,
+                     test_edited_rig_is_kept, test_branch_starts_chain, test_chain_collection, test_bones_hash,
+                     test_kind_change_writes_json,
                      test_state_keeps_light, test_old_rig_state, test_chain_along, test_ramp_from_first_joint,
                      test_cap_stays, test_bun_light, test_own_neck_weight, test_ramp_follows_edited_bone):
             print("==", test.__name__)
