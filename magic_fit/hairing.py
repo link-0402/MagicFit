@@ -228,14 +228,18 @@ class Bone:
 
 class HeadField:
     """The signed distance to a race's head (metres, negative inside): from a grid of 1 cm cells near the
-    head, and from points spread over its surface beyond the grid's reach (12.7 cm)."""
+    head, and from points spread over its surface beyond the grid's reach (12.7 cm). ``scalp_share`` gives
+    each of those points its scalp share (0..1): the share of the game's hairstyles that hold hair there on
+    the head, 0 on the front of the face (see tools/make_scalp_map.py); all 0 without a scalp map."""
 
-    def __init__(self, origin, step, grid, surface):
+    def __init__(self, origin, step, grid, surface, scalp=None):
         self.origin = np.asarray(origin, dtype=np.float64)
         self.step = float(step)
         self.grid = np.asarray(grid, dtype=np.float32) / 1000.0
         self.reach = float(self.grid.max()) - 0.002
         self.surface = np.asarray(surface, dtype=np.float64)
+        self.scalp_share = (np.zeros(len(self.surface)) if scalp is None
+                            else np.asarray(scalp, dtype=np.float64))
         self._tree = None
 
     def distance(self, points):
@@ -300,7 +304,8 @@ class Reference:
             shape = tuple(int(s) for s in d["sdf_shape"][index])
             start = int(d["sdf_offset"][index])
             grid = d["sdf_data"][start:start + int(np.prod(shape))].reshape(shape)
-            self._heads[race] = HeadField(d["sdf_origin"][index], step, grid, d["head_points"][index])
+            scalp = d["head_scalp"][index] if "head_scalp" in d else None
+            self._heads[race] = HeadField(d["sdf_origin"][index], step, grid, d["head_points"][index], scalp)
 
     def skeletons(self, race):
         """The hair skeleton numbers the game has for ``race``, ascending."""
