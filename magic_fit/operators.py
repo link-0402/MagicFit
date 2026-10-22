@@ -2575,7 +2575,7 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
             chains = armature.magic_fit_hair_rig.chains
             bone_count = sum(len([name for name in chain.bones.split(",") if name]) for chain in chains)
             if built is not None and not len(chains):
-                self.report({'INFO'}, "Nothing hangs far enough from the head to swing: no chains built")
+                self.report({'INFO'}, "No hair hangs from the head: no chains built")
             elif built is not None:
                 self.report({'INFO'}, "Built {:s} with {:s} for the hair".format(
                     hairrig.counted(len(chains), "chain"), hairrig.counted(bone_count, "bone")))
@@ -2584,6 +2584,10 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
                     armature.name, hairrig.counted(len(chains), "chain"), hairrig.counted(bone_count, "bone")))
             if renamed:
                 self.report({'INFO'}, "Renamed {:s}".format(", ".join(renamed)))
+            if built is None and len(chains) and armature.magic_fit_hair_rig.cap_depth < 0.0:
+                # Chains built before the hair's shape set where they start: kept until the user rebuilds them.
+                self.report({'WARNING'}, "Chains from an older version: Rebuild Chains to place them by the "
+                                         "hair's shape")
             for obj in unreached:
                 self.report({'WARNING'}, "'{:s}' hangs where no chain may reach: Rebuild Chains to include it "
                                          "(your bone edits are lost)".format(obj.name))

@@ -994,7 +994,7 @@ def test_nothing_hangs():
         return
     data = json.loads(armature.get(hairrig.RIG_PROPERTY, "{}"))
     check(data == {"race": 'c0201', "chains": []}, "nothing hangs: the rig property lists no chains ({})".format(data))
-    check("Nothing hangs far enough from the head to swing: no chains built" in reports,
+    check("No hair hangs from the head: no chains built" in reports,
           "nothing hangs: says so")
     custom = hair.by_name(obj)
     # A ponytail joined to the cap later: the rig without chains has no bones to keep, so it is built again.
@@ -1273,6 +1273,9 @@ def test_custom_parts_thick_cap():
               "thick cap{:s}: no warning for the layer within the cap".format(" (old rig)" if old else ""))
         check(state.cap_depth == -1.0 if old else abs(state.cap_depth - 0.05) < 0.005,
               "thick cap{:s}: the stored cap depth stays ({:.4f})".format(" (old rig)" if old else "", state.cap_depth))
+        older = [text for text in reports if text.startswith("Chains from an older version")]
+        check(bool(older) == old, "thick cap{:s}: {:s} to rebuild the chains ({})".format(
+            " (old rig)" if old else "", "asked" if old else "not asked", older))
 
 
 def main():
