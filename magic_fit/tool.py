@@ -188,7 +188,7 @@ def _weight_sections(context, settings, where):
     def hair(layout):
         if where == 'POPOVER':
             # Properties > Tool shows these right below the mode.
-            _draw_hair_main(layout, settings)
+            _draw_hair_main(layout, settings, hang=_brush_hangs(context, settings))
         _draw_hair_more(layout, settings)
 
     def face(layout):
@@ -269,14 +269,29 @@ def _draw_smooth_main(layout, settings):
     layout.prop(settings, "smooth_max_groups")
 
 
-def _draw_hair_main(layout, settings):
-    """The Hair settings that decide how much hangs from the hair bones. Own Skeleton works out where hair
-    hangs from the hair's shape, so it shows Neck Weight only."""
-    if settings.hair_skeleton_mode != 'CUSTOM':
+def _draw_hair_main(layout, settings, hang=True):
+    """The Hair settings that decide how much hangs from the hair bones. Hang Start and Hang Length only
+    when ``hang``: the hair's own skeleton works out where hair hangs from the hair's shape."""
+    if hang:
         col = layout.column(align=True)
         col.prop(settings, "hair_hang_start")
         col.prop(settings, "hair_hang_length")
     layout.prop(settings, "hair_neck_weight", slider=True)
+
+
+def _brush_hangs(context, settings):
+    """Whether Hang Start and Hang Length shape the Hair brush's weights: not on hair with its own skeleton.
+    The active hair's own weights decide, else (no mesh active) the settings' skeleton mode."""
+    obj = getattr(context, "active_object", None)
+    if obj is not None and obj.type == 'MESH':
+        return not hairing.uses_custom_rig(obj, settings)
+    return settings.hair_skeleton_mode != 'CUSTOM'
+
+
+def _button_hangs(context, settings):
+    """Whether the Hair Weights panel shows Hang Start and Hang Length: the button reads them unless it
+    builds the hair's own skeleton, and the brush reads them on hair weighted with a game skeleton."""
+    return settings.hair_skeleton_mode != 'CUSTOM' or _brush_hangs(context, settings)
 
 
 def _draw_hair_more(layout, settings):
@@ -377,14 +392,14 @@ _WHOLE_MESH_BUTTONS = {
 }
 
 
-def _draw_mode_main(layout, settings):
+def _draw_mode_main(context, layout, settings):
     """The settings of the Skirt or Heels mode that belong right below the mode."""
     if settings.mode == 'SKIRT':
         _draw_skirt_main(layout, settings)
     elif settings.mode == 'HEELS':
         _draw_heels_main(layout, settings)
     elif settings.mode == 'HAIR':
-        _draw_hair_main(layout, settings)
+        _draw_hair_main(layout, settings, hang=_brush_hangs(context, settings))
     elif settings.mode == 'FACE':
         _draw_face_main(layout, settings)
     elif settings.mode == 'SMOOTH':
@@ -420,7 +435,7 @@ def _draw_weight_settings(context, layout):
         return
     if settings.mode == 'STRAIGHTEN':
         _draw_straighten_hint(col)
-    _draw_mode_main(col, settings)
+    _draw_mode_main(context, col, settings)
     _draw_weight_brush(context, layout, col, settings, 'TOOL')
 
 
@@ -1038,7 +1053,7 @@ class VIEW3D_PT_hair_weights_sidebar(tabs.TabPanel, bpy.types.Panel):
             row.prop(settings, "hair_skeleton", text="EST Entry")
             row.operator(MAGIC_FIT_OT_pick_hair_skeleton.bl_idname, text="", icon='VIEWZOOM')
             self.draw_pick_hint(col, settings)
-        _draw_hair_main(col, settings)
+        _draw_hair_main(col, settings, hang=_button_hangs(context, settings))
         if settings.group_mode == 'ACTIVE':
             # Hair Weights needs All Groups, and no other panel on this tab has the choice.
             _draw_choice(col, settings, "group_mode")

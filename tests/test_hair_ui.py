@@ -70,7 +70,8 @@ def watch():
 
 class Recorder:
     """Stands in for a UILayout: keeps what is drawn on it, as (call, text, args, the Recorder it returned).
-    An operator's settings are the attributes set on its Recorder."""
+    An operator's settings are the attributes set on its Recorder. ``panel`` returns a header and a body,
+    as UILayout.panel does."""
 
     def __init__(self, drawn):
         object.__setattr__(self, "drawn", drawn)
@@ -79,7 +80,7 @@ class Recorder:
         def call(*args, **kwargs):
             item = Recorder(self.drawn)
             self.drawn.append((name, kwargs.get("text"), args, item))
-            return item
+            return (item, Recorder(self.drawn)) if name == "panel" else item
         return call
 
 
@@ -92,6 +93,27 @@ def drawn_texts(settings, rig_state):
         chains.draw_item(SimpleNamespace(layout_type='DEFAULT'), bpy.context, Recorder(drawn), rig_state,
                          rig_state.chains[0], 0, rig_state, "active", 0)
     return drawn
+
+
+HAIR_MAIN = {"hair_hang_start", "hair_hang_length", "hair_neck_weight"}
+
+
+def hair_panel_props(context, settings):
+    """Which of Hang Start, Hang Length and Neck Weight are drawn below the brush's mode (Properties > Tool),
+    in the tool header's Options Hair section and in the Hair Weights panel."""
+    def props(draw):
+        drawn = []
+        draw(Recorder(drawn))
+        return [args[1] for call, _text, args, _item in drawn
+                if call == 'prop' and len(args) > 1 and args[1] in HAIR_MAIN]
+
+    panel = tool.VIEW3D_PT_hair_weights_sidebar
+    section = next(draw for idname, _label, draw in tool._weight_sections(context, settings, 'POPOVER')
+                   if idname == "magic_fit_hair")
+    return (props(lambda layout: tool._draw_mode_main(context, layout, settings)),
+            props(section),
+            props(lambda layout: panel.draw(SimpleNamespace(layout=layout, draw_pick_hint=panel.draw_pick_hint,
+                                                            draw_result=panel.draw_result), context)))
 
 
 class Env:
@@ -329,16 +351,43 @@ def steps():
           "own skeleton: Rebuild Chains says what it does")
     env.screenshot("hair_custom_chains.png", whole_window=True)
 
-    # --- The panel: Own Skeleton works out where hair hangs, so only Neck Weight stays.
-    for mode, expected in (('CUSTOM', ["hair_neck_weight"]),
-                           ('AUTO', ["hair_hang_start", "hair_hang_length", "hair_neck_weight"]),
-                           ('PICK', ["hair_hang_start", "hair_hang_length", "hair_neck_weight"])):
+    # --- The panels: the hair's own skeleton works out where hair hangs, so only Neck Weight stays.
+    hang = ["hair_hang_start", "hair_hang_length", "hair_neck_weight"]
+    neck = ["hair_neck_weight"]
+
+    def plain_mesh(name):
+        mesh = bpy.data.objects.new(name, bpy.data.meshes.new(name))
+        bpy.context.scene.collection.objects.link(mesh)
+        return mesh
+
+    unweighted = plain_mesh("Unweighted Hair")
+    game = plain_mesh("Game Skeleton Hair")
+    game.magic_fit_hair.race = settings.hair_race
+    game.magic_fit_hair.skeleton = other
+    game.magic_fit_hair.custom = False
+    cases = [
+        ("unweighted hair, Own Skeleton", unweighted, 'CUSTOM', neck, neck),
+        ("unweighted hair, Best Match", unweighted, 'AUTO', hang, hang),
+        ("unweighted hair, Pick", unweighted, 'PICK', hang, hang),
+        # The brush paints a game-skeleton hair with Hang Start and Hang Length, whatever the dropdown says.
+        ("game skeleton hair, Own Skeleton", game, 'CUSTOM', hang, hang),
+        # The brush on hair with its own skeleton doesn't use them; the button (Best Match) does.
+        ("own skeleton hair, Best Match", obj, 'AUTO', neck, hang),
+    ]
+    DRAW_ERRORS.clear()
+    for label, active, mode, brush_expected, panel_expected in cases:
         settings.hair_skeleton_mode = mode
-        main = []
-        tool._draw_hair_main(Recorder(main), settings)
-        props = [args[1] for call, _text, args, _item in main if call == 'prop']
-        check(props == expected, "panel: {} draws {}".format(mode, ", ".join(props)))
+        bpy.context.view_layer.objects.active = active
+        with env.override(sidebar):
+            brush, popover, panel = hair_panel_props(bpy.context, settings)
+        check(brush == brush_expected and popover == brush_expected,
+              "panels: {}: the brush draws {}".format(label, ", ".join(brush)))
+        check(panel == panel_expected, "panels: {}: Hair Weights draws {}".format(label, ", ".join(panel)))
+    check(not DRAW_ERRORS, "panels: drew without errors")
     settings.hair_skeleton_mode = 'CUSTOM'
+    bpy.context.view_layer.objects.active = obj
+    for mesh in (unweighted, game):
+        bpy.data.objects.remove(mesh)
 
 
 def run():
