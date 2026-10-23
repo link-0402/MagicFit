@@ -2407,16 +2407,20 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
         targets = hair_targets(context, settings)
         reference = hairing.Reference.get()
         race = settings.hair_race
-        if self.rebuild and self.skeleton < 0:
-            settings.hair_skeleton_mode = 'CUSTOM'
         # Own Skeleton: chains built from the hair's shape on its armature, kept as the user edits them.
-        custom = self.skeleton < 0 and settings.hair_skeleton_mode == 'CUSTOM'
+        # Rebuild Chains picks it (once it worked), whatever the mode was.
+        custom = self.skeleton < 0 and (self.rebuild or settings.hair_skeleton_mode == 'CUSTOM')
         armature = next((found for found in map(hairing.weighted_armature, targets) if found is not None), None)
         # One hair has one EST entry: parts of it weighted before (on its armature, or in its collection
         # while this part has none yet) are matched along, and lend it their armature.
         parts = hairing.hair_parts(context, targets, armature, race)
         if armature is None and parts:
             armature = hairing.weighted_armature(parts[0])
+        # The poll checks this in Own Skeleton mode only; Rebuild Chains may come from another mode.
+        if custom and armature is not None and context.view_layer.objects.get(armature.name) is None:
+            self.report({'ERROR'}, "Armature '{:s}' is not in the view layer: Own Skeleton edits its bones".format(
+                armature.name))
+            return {'CANCELLED'}
         offset = hairing.armature_offset(armature, reference.rig(race, 0))
         matches = None
         best = not custom and self.skeleton < 0 and settings.hair_skeleton_mode != 'PICK'
@@ -2634,6 +2638,8 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
             if fraction < hairing.MIN_HANGING:
                 self.report({'INFO'}, "Nothing hangs far enough from the head to swing: lower Hang Start to let "
                                       "hair close to it (bangs) move too")
+        if custom:
+            settings.hair_skeleton_mode = 'CUSTOM'
         return {'FINISHED'}
 
 
@@ -4285,6 +4291,12 @@ class _SquishKeyChange(_SquishKeys):
                 squish.data.foreach_get("co", squished)
                 value = 0.0 if squish.mute else squish.value
                 merged = (basis + value * (squished - basis)).astype(np.float32)
+                # Keys added since Set Up take the squish too, so they still differ from Basis as before.
+                for other in keys.key_blocks:
+                    if other != keys.reference_key and other != squish:
+                        shape = np.empty(count * 3, dtype=np.float32)
+                        other.data.foreach_get("co", shape)
+                        other.data.foreach_set("co", shape + (merged - basis))
                 keys.reference_key.data.foreach_set("co", merged)
                 obj.data.vertices.foreach_set("co", merged)
                 obj.data.update()

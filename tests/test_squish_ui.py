@@ -285,6 +285,32 @@ def test_apply_value(env):
     check(top.mode == 'EDIT', "back in Edit Mode")
 
 
+def test_apply_later_key(env):
+    # A key added after Set Up takes the squish too: it still differs from Basis as before.
+    clear_scene()
+    body, top = torso_and_top()
+    select_only(top)
+    bpy.context.scene.squish_brush.body = body
+    with env.override():
+        bpy.ops.magic_fit.squish_setup()
+        bpy.ops.object.mode_set(mode='OBJECT')
+    basis = local_co(top, "Basis")
+    squished = basis.copy()
+    squished[:, :2] *= 1.1
+    top.data.shape_keys.key_blocks["Squish"].data.foreach_set("co", squished.astype(np.float32).ravel())
+    later = top.shape_key_add(name="Later", from_mix=False)
+    bigger = basis.copy()
+    bigger[:, 2] += 0.01
+    later.data.foreach_set("co", bigger.astype(np.float32).ravel())
+    with env.override():
+        result = bpy.ops.magic_fit.squish_apply()
+    check(result == {'FINISHED'}, "Apply Squish runs with a later key")
+    check(key_names(top) == ["Basis", "Later"], "the later key stays ({})".format(key_names(top)))
+    offset = local_co(top, "Later") - local_co(top, "Basis")
+    check(np.abs(local_co(top, "Basis") - squished).max() < 1e-6, "Basis is squished")
+    check(np.abs(offset - (bigger - basis)).max() < 1e-6, "the later key moves Basis as before")
+
+
 def test_remove(env):
     clear_scene()
     body, top = torso_and_top()
@@ -624,7 +650,7 @@ def steps():
     env.event('ESC', 'RELEASE', middle)
     yield 0.3
     for test in (test_setup, test_setup_shows_key, test_no_faces, test_restrictions, test_presets, test_hidden_body,
-                 test_frozen_basis, test_apply_value, test_apply_hidden, test_remove, test_not_ready, test_stroke,
+                 test_frozen_basis, test_apply_value, test_apply_later_key, test_apply_hidden, test_remove, test_not_ready, test_stroke,
                  test_posed_stroke, test_mirror_stroke, test_selected_only_stroke, test_transforms_stroke):
         print("--", test.__name__)
         try:

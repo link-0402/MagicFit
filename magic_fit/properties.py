@@ -885,6 +885,9 @@ HAIR_RIG_KINDS = tuple((kind, kind.capitalize(), _HAIR_RIG_KIND_DESCRIPTIONS[kin
 
 
 def _hair_rig_kind_changed(self, _context):
+    # A chain without bones is being filled in (hairrig._fill_state sets the kind first): that writes it all once.
+    if not self.bones:
+        return
     hairrig.write_rig_property(self.id_data)
     hairview.color_bones(self.id_data)
     hairview.redraw_views()

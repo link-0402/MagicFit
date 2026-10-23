@@ -307,10 +307,11 @@ def match_sliders(body, other):
     best, a, y = _settle(fit, now, low, high, a, y)
     enough = _gaps(fit, best, vertices)[0] + CLOSE
     main = np.array([name.lstrip("- ").lower() in MAIN for name in names])
-    for free, step in ((used & main, ROUND), (used, ROUND), (used, STEP)):
+    # The main keys alone (the others held as they are), then all of them from the best fit.
+    for main_only, free, step in ((True, used & main, ROUND), (False, used, ROUND), (False, used, STEP)):
         if not free.any():
             continue
-        if free is used:
+        if not main_only:
             values, rows = best, (a, y)
         else:
             pinned_low, pinned_high = np.where(free, low, now), np.where(free, high, now)

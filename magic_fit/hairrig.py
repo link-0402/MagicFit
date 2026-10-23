@@ -404,8 +404,8 @@ def find_locks(points, tris, rig, *, cap=None, weld=None):
     target = np.where(alive, np.arange(len(drafts)), -1)
     if alive.any():
         for small in np.flatnonzero(~alive):
-            gap = np.linalg.norm(roots_at - roots_at[small], axis=1)
-            into = int(np.argmin(np.where(alive, gap, np.inf)))
+            apart = np.linalg.norm(roots_at - roots_at[small], axis=1)
+            into = int(np.argmin(np.where(alive, apart, np.inf)))
             target[small] = into
             sizes[into] += sizes[small]
     joined = (owner >= 0) & ~alive[np.maximum(owner, 0)]
@@ -551,7 +551,9 @@ def plan_chain(points, lock, rig=None):
     marks = at[-1] * np.arange(count) / count
     joints = np.column_stack([np.interp(marks, at, line[:, k]) for k in range(3)])
     # Only a round lock can be a ponytail (PONYTAIL_ROUND); a flat card stays whole for merging all the same.
-    kind = chain_kind(lock.angle, length, lock.whole and _round(points, lock))
+    # Roundness is measured only where it decides (chain_kind's last test): plan_rig plans every merge tried.
+    kind = chain_kind(lock.angle, length, lock.whole and lock.angle > SIDE_ANGLE and length >= PONYTAIL_LENGTH
+                      and _round(points, lock))
     if kind == "side" and rig is not None and _angle(rig, line[-1]) > SIDE_ANGLE:
         kind = "back"
     return ChainPlan(kind, joints, line[-1].copy(), lock.area, lock.whole,
@@ -968,9 +970,10 @@ def _fill_state(armature_object, race, chains, cap_depth=None):
     state.chains.clear()
     for kind, names, light in chains:
         chain = state.chains.add()
+        # The kind before the bones: its update callback skips a chain without bones.
+        chain.kind = kind
         chain.bones = ",".join(names)
         chain.light = light
-        chain.kind = kind
     state.active = min(max(state.active, 0), max(len(state.chains) - 1, 0))
     write_rig_property(armature_object)
     hairview.color_bones(armature_object)

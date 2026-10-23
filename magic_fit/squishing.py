@@ -537,11 +537,12 @@ class SquishStroke:
         self.residual = self.goal[self.body_count:] - self.start[self.body_count:] - self._ride(self.goal)
         self.progress = np.zeros(len(cloth_basis))
 
-    def _ride(self, positions):
-        """How far each clothing vertex rides along with the skin, for the skin at the body rows of ``positions``."""
-        rep = self.welded_rep
-        moved = positions[rep] - self.start[rep]
-        return self.bind_share[:, None] * np.einsum("ij,ijk->ik", self.bind_bary, moved[self.bind_corners])
+    def _ride(self, positions, rows=slice(None)):
+        """How far each clothing vertex (of ``rows``) rides along with the skin, for the skin at the body rows of
+        ``positions``."""
+        corners = self.welded_rep[self.bind_corners[rows]]
+        moved = positions[corners] - self.start[corners]
+        return self.bind_share[rows, None] * np.einsum("ij,ijk->ik", self.bind_bary[rows], moved)
 
     def dab(self, center, radius, strength, falloff='SMOOTH'):
         """Apply one dab around the world space point ``center``: everything under it moves ``strength`` x the
@@ -567,7 +568,7 @@ class SquishStroke:
         if len(cloth_rows):
             take = np.where(self.bind_movable[cloth_rows], strength * cloth_weight[cloth_rows], 0.0)
             self.progress[cloth_rows] += take * (1.0 - self.progress[cloth_rows])
-            ride = self._ride(self.co)[cloth_rows]
+            ride = self._ride(self.co, cloth_rows)
             # The clothing's own fade, toward its own vertices that may not move.
             fade = self.fade[n + cloth_rows, None]
             self.co[n + cloth_rows] = self.start[n + cloth_rows] + fade * (

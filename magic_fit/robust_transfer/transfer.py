@@ -217,13 +217,12 @@ def match_target(target, source_vertices, source_triangles, source_normals,
     spans = weighttransfer.crease_bridges(
         target['vertices'], target['triangles'], match.points, match.distances, cosines,
         weighttransfer.find_vertex_merge_map(target['vertices'], weld_distance(settings)))
-    walls, _share = weighttransfer.between_walls(
+    # Not cast at all for fingers and toes: between_walls leaves vertices spanning nothing as they are.
+    spans[digit_share >= weighttransfer.DIGIT_SHARE[0]] = 0.0
+    match.weights, _share = weighttransfer.between_walls(
         target['vertices'], match.points, match.distances, match.normals, match.weights, source_vertices,
         source_triangles, source_weights, surface_bvh, MAX_DISTANCE, spans,
         spans * weighttransfer.edge_on(target['normals'], match.normals))
-    keep = digit_share >= weighttransfer.DIGIT_SHARE[0]
-    walls[keep] = match.weights[keep]
-    match.weights = walls
     # Over fingers and toes, Combined doesn't link parts whose outsides face each other, like the plates on
     # two fingers of a glove.
     outward = weighttransfer.outward_normals(target['vertices'], target['triangles'], target['normals'],
