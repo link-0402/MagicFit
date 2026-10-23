@@ -12,8 +12,13 @@ each vertex of the other body should lie on the body's surface, at the spot clos
 values, so the fit is made again from where it got to, until it settles (point-to-plane ICP, with only the slider
 values to find, each kept in its key's slider range).
 
-Keys that don't move where the other body lies (the feet's Heels, for a torso) are left as they are. A body whose
-keys nothing drives at all has every one as a slider.
+Mods mostly set round values, so they are tried first: the chest's Squeeze, Squish and Push-Up in steps of 0.05,
+the others left as they are; then every slider in steps of 0.05; then in steps of 0.01. The first that fits as well
+as the best fit of them all (CLOSE) is taken.
+
+Keys that don't move where the other body lies (the feet's Heels, for a torso) are left as they are, and so are the
+nipple keys (Nip Nops, Better Nipples): neither they nor the nipples they move are matched. A body whose keys nothing
+drives at all has every one as a slider.
 """
 
 import numpy as np
@@ -30,6 +35,14 @@ MIN_MOVE = 0.0001
 # tell apart).
 STEP = 0.01
 SNAP = 0.02
+# Round values tried first (see the module's notes), for these keys first (their names without the devkit's dashes,
+# lowercase).
+ROUND = 0.05
+MAIN = ("squeeze", "squish", "push-up")
+# Round values are taken while their mean gap is no more than this over the best fit's (meters).
+CLOSE = 1e-5
+# Keys with this in their name (lowercase) shape the nipples, left out of the match.
+NIPPLE = "nip"
 # The fit is made again until no value changes more than this, at most ROUNDS times.
 SETTLED = 1e-4
 ROUNDS = 20
@@ -99,6 +112,9 @@ class _Fit:
             moves.append(delta @ matrix[:3, :3].T)
         # Vertex, key, axis.
         self.moves = np.stack(moves, axis=1)
+        self.nipple_keys = np.array([NIPPLE in name.lower() for name in names])
+        # The body's vertices the nipple keys move.
+        self.nipples = np.linalg.norm(self.moves[:, self.nipple_keys], axis=2).max(axis=1, initial=0.0) > NOISE
         self.tris = _tris(body.data)
         self.points, other_tris = _surface(other)
         self.area = (_vertex_areas(self.points, other_tris) if len(other_tris)
@@ -129,11 +145,11 @@ class _Fit:
 
     def rows(self, values):
         """The fit's equations for ``values``: (A, y, vertices, distances), A @ values ~ y along each spot's normal,
-        for the vertices on what the sliders move."""
+        for the vertices on what the sliders move, but the nipples."""
         found, tris, weights, normals, distances = self.nearest(values)
         # How each slider moves each spot: vertex, key, axis.
         moves = np.einsum("vc,vckd->vkd", weights, self.moves[tris])
-        moved = np.abs(moves).max(axis=(1, 2)) > 0.0
+        moved = (np.abs(moves).max(axis=(1, 2)) > 0.0) & ~self.nipples[tris].any(axis=1)
         found, tris, weights, normals, distances, moves = (
             found[moved], tris[moved], weights[moved], normals[moved], distances[moved], moves[moved])
         base = np.einsum("vc,vcd->vd", weights, self.base[tris])
@@ -218,6 +234,38 @@ def _keep_unneeded(a, y, values, now):
     return values
 
 
+def _settle(fit, values, low, high, a, y):
+    """(The values between ``low`` and ``high`` fitting best, from ``values`` and their equations ``a``, ``y``; the
+    equations at them), the fit made again from where it got to until it settles."""
+    for _round in range(ROUNDS):
+        after = _bounded_least_squares(a, y, low, high, values)
+        settled = np.abs(after - values).max() < SETTLED
+        values = after
+        if settled:
+            break
+        a, y = fit.rows(values)[:2]
+    return values, a, y
+
+
+def _nudge(a, y, values, low, high, free, step):
+    """``values`` with the ``free`` keys moved a ``step`` at a time while that fits better (by the fit's equations
+    ``a``, ``y``): rounding the best fit misses the best round values where keys move vertices alike."""
+    def error(x):
+        return float(np.sum((a @ x - y) ** 2))
+
+    least = error(values)
+    better = True
+    while better:
+        better = False
+        for index in np.flatnonzero(free):
+            for way in (-step, step):
+                x = values.copy()
+                x[index] = np.clip(x[index] + way, low[index], high[index])
+                if error(x) < least - 1e-18:
+                    values, least, better = x, error(x), True
+    return values
+
+
 def _gaps(fit, values, vertices):
     """(Mean over their area, largest) distance of the other body's ``vertices`` from the body with ``values``."""
     found, _tris, _weights, _normals, distances = fit.nearest(values)
@@ -250,25 +298,30 @@ def match_sliders(body, other):
     if len(vertices) < MIN_VERTICES:
         raise ResizeError("'{:s}' doesn't lie on what the sliders of '{:s}' move".format(other.name, body.name))
     # Keys that move nothing under the other body stay as they are.
-    used = np.linalg.norm(moves, axis=2).max(axis=0) > MIN_MOVE
+    used = (np.linalg.norm(moves, axis=2).max(axis=0) > MIN_MOVE) & ~fit.nipple_keys
     if not used.any():
         raise ResizeError("'{:s}' doesn't lie on what the sliders of '{:s}' move".format(other.name, body.name))
     low = np.array([block.slider_min for block in blocks])
     high = np.array([block.slider_max for block in blocks])
     low[~used] = high[~used] = now[~used]
-    values = now.copy()
-    for _round in range(ROUNDS):
-        after = _bounded_least_squares(a, y, low, high, values)
-        settled = np.abs(after - values).max() < SETTLED
-        values = after
-        if settled:
+    best, a, y = _settle(fit, now, low, high, a, y)
+    enough = _gaps(fit, best, vertices)[0] + CLOSE
+    main = np.array([name.lstrip("- ").lower() in MAIN for name in names])
+    for free, step in ((used & main, ROUND), (used, ROUND), (used, STEP)):
+        if not free.any():
+            continue
+        if free is used:
+            values, rows = best, (a, y)
+        else:
+            pinned_low, pinned_high = np.where(free, low, now), np.where(free, high, now)
+            values, *rows = _settle(fit, now, pinned_low, pinned_high, *fit.rows(now)[:2])
+        rounded = np.round(values / step) * step
+        rounded[np.abs(rounded) < SNAP] = 0.0
+        rounded = np.clip(rounded, low, high)
+        rounded[~free] = now[~free]
+        rounded = _keep_unneeded(*rows, _nudge(*rows, rounded, low, high, free, step), now)
+        if _gaps(fit, rounded, vertices)[0] <= enough:
             break
-        a, y, _vertices, _distances, _moves = fit.rows(values)
-    rounded = np.round(values / STEP) * STEP
-    rounded[np.abs(rounded) < SNAP] = 0.0
-    rounded = np.clip(rounded, low, high)
-    rounded[~used] = now[~used]
-    rounded = _keep_unneeded(a, y, rounded, now)
     changed = {block.name: round(float(value), 6) for block, value, old in zip(blocks, rounded, now)
                if abs(value - old) > 1e-6}
     fitted = [block.name for block, use in zip(blocks, used) if use]

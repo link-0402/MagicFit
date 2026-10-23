@@ -2044,7 +2044,8 @@ def test_resizer():
 
 def slider_body():
     """The devkit body (see resize.devkit_body) with sliders: '- Squeeze' (at 0.3, muted past the Large chest),
-    '- Push-Up' and 'Far' (moving only the chest's right edge, at 0.4), keys nothing drives; and a game key
+    '- Push-Up', 'Far' (moving only the chest's right edge, at 0.4) and '- Nip Nops' (a band of the chest, at 1),
+    keys nothing drives; and a game key
     'shpx_test'. Returns the body."""
     body, _garments = resize.devkit_body()
     large, _small, _quads = resize.body_shapes()
@@ -2054,6 +2055,7 @@ def slider_body():
         "- Push-Up": large + 0.006 * (x / 0.17) ** 2 * front + 0.003 * np.clip(z / 0.1, 0.0, 1.0) * (0.0, 0.0, 1.0),
         "Far": large + 0.01 * np.clip((x - 0.12) / 0.05, 0.0, 1.0) * front,
         "shpx_test": large + 0.005 * front,
+        "- Nip Nops": large + 0.003 * ((x > 0.04) & (x < 0.07)) * front,
     }
     for name, co in shapes.items():
         block = body.shape_key_add(name=name, from_mix=False)
@@ -2061,6 +2063,7 @@ def slider_body():
         block.value = 0.0
     keys = body.data.shape_keys
     keys.key_blocks["Far"].value = 0.4
+    keys.key_blocks["- Nip Nops"].value = 1.0
     # (The plain body's own key, muted: muted keys aren't sliders.)
     keys.key_blocks["Small"].mute = True
     resize.drive(keys, "- Push-Up", 'mute', "size != 0", (("size", "chest_size"),))
@@ -2084,15 +2087,19 @@ def mod_body(body, values, keep=None, offset=(0.0, 0.0, 0.0), name="Mod Body"):
 def test_match_sliders():
     body = slider_body()
     keys = body.data.shape_keys
-    check(sliders.sliders(body) == ["- Squeeze", "- Push-Up", "Far"],
+    check(sliders.sliders(body) == ["- Squeeze", "- Push-Up", "Far", "- Nip Nops"],
           "sliders: the keys nothing drives, not the game's ({!s})".format(sliders.sliders(body)))
-    other = mod_body(body, {"- Squeeze": 0.7, "- Push-Up": 0.4}, keep=lambda co: co[:, 0] < 0.1)
+    # (Its nipples aren't the body's: they aren't matched.)
+    other = mod_body(body, {"- Squeeze": 0.7, "- Push-Up": 0.4, "- Nip Nops": 0.0}, keep=lambda co: co[:, 0] < 0.1)
     before = key_states(body)
     match = sliders.match_sliders(body, other)
     check(match.values == {"- Squeeze": 0.7, "- Push-Up": 0.4},
           "match: the mod's slider values found ({!s})".format(match.values))
     check("Far" not in match.sliders and set(match.sliders) == {"- Squeeze", "- Push-Up"},
-          "match: a key moving nothing under the mod's body stays as it is")
+          "match: a key moving nothing under the mod's body, or the nipples, stays as it is")
+    odd = sliders.match_sliders(body, mod_body(body, {"- Squeeze": 0.66, "- Push-Up": 0.4}, name="Odd Body"))
+    check(odd.values == {"- Squeeze": 0.66, "- Push-Up": 0.4},
+          "match: odd values where round ones don't fit as well ({!s})".format(odd.values))
     check(match.gap < 1e-5 and match.gap_before > 1e-4,
           "match: the gap closed ({:.2g} m, was {:.2g} m)".format(match.gap, match.gap_before))
     check(key_states(body) == before, "match: nothing changed until applied")
@@ -2125,7 +2132,7 @@ def test_match_sliders():
 
     bpy.context.scene.ya_devkit_props.mannequin_state.chest_size = "1"
     bpy.context.view_layer.update()
-    check(sliders.sliders(body) == ["Far"], "sliders: those of other sizes, muted, aren't ({!s})".format(
+    check(sliders.sliders(body) == ["Far", "- Nip Nops"], "sliders: those of other sizes, muted, aren't ({!s})".format(
         sliders.sliders(body)))
     bpy.context.scene.ya_devkit_props.mannequin_state.chest_size = "0"
     bpy.context.view_layer.update()
