@@ -492,16 +492,14 @@ def test_card_hair_kinds():
           and max(far) <= hairrig.SPINE_REACH,
           "card hair: spaced out, within the budget and on the hair ({:d} chains, up to {:.4f} m off; {})".format(
               len(spaced), max(far, default=math.nan), [chain.kind for chain in spaced]))
-    # Their kinds: side hair toward the ears, back hair behind, no bangs. A single card long enough for a
-    # ponytail and without one of its kind within the spacing keeps its own ponytail chain (a follow-up).
+    # Their kinds: side hair toward the ears, back hair behind, no bangs. A card is flat, never a ponytail
+    # (PONYTAIL_ROUND).
     card = len(card_hair(1)[0])
     kinds = [(chain.kind, round(chain.angle, 1), len(chain.vertices)) for chain in spaced]
     print("      spaced kinds (kind, angle, vertices; {:d} per card):".format(card), kinds)
     check(spaced and all((kind == "side") == (angle <= hairrig.SIDE_ANGLE) for kind, angle, _count in kinds)
-          and all(kind in ("side", "back") or (kind == "ponytail" and count <= 2 * card)
-                  for kind, _angle, count in kinds),
-          "card hair: spaced out, side hair to the side and back hair behind, a ponytail only a card or two "
-          "({})".format(kinds))
+          and all(kind in ("side", "back") for kind, _angle, _count in kinds),
+          "card hair: spaced out, side hair to the side and back hair behind ({})".format(kinds))
     # At the slider's minimum spacing, the budget merges most of the cards: every merge still keeps its chain
     # on the hair.
     dense = hairrig.plan_rig(co, tris, model_rig, spacing=0.02)
@@ -517,16 +515,9 @@ def test_card_hair_kinds():
           and max(far) <= hairrig.SPINE_REACH,
           "card hair: merged down to the budget, on the hair ({:d} chains, up to {:.4f} m off)".format(
               len(chains), max(far, default=math.nan)))
-    # A long single card with none of its kind it could merge with on the hair keeps its own ponytail chain,
-    # as with the spacing (a follow-up); no merged lock is one.
-    check(all(chain.kind != "ponytail" or len(chain.vertices) <= 2 * card for chain in chains),
-          "card hair: no ponytail chains but single cards ({})".format(
-              [(chain.kind, len(chain.vertices)) for chain in chains if chain.kind == "ponytail"]))
     behind = [chain for chain in chains if chain.angle > hairrig.SIDE_ANGLE]
-    check(behind and all(chain.kind == "back" or (chain.kind == "ponytail" and len(chain.vertices) <= 2 * card)
-                         for chain in behind),
-          "card hair: every chain behind the head is back hair, or a single card's ponytail ({})".format(
-              [chain.kind for chain in behind]))
+    check(behind and all(chain.kind == "back" for chain in behind),
+          "card hair: every chain behind the head is back hair ({})".format([chain.kind for chain in behind]))
     # A ponytail in two layers, a tube in a tube (two loose parts, each kept whole, their roots twins): merged
     # unbudgeted, it is still one ponytail.
     co, tris, _ranges = join([hair.cap(), hair.tube((0.0, 0.105, 1.53), (0.0, 0.16, 1.11), 0.035),
@@ -898,7 +889,16 @@ def test_maeve_chains():
     check(any(chain.kind == "bangs" for chain in chains), "maeve: a bangs chain ({})".format(
         [chain.kind for chain in chains]))
     print("      {:d} chains, {:d} bones".format(len(chains), sum(len(chain.joints) for chain in chains)))
-    check(5 <= len(chains) <= 10, "maeve: 5 to 10 chains ({:d})".format(len(chains)))
+    check(4 <= len(chains) <= 8, "maeve: 4 to 8 chains ({:d})".format(len(chains)))
+    # The back is two sheets, parted down the middle: a chain each, and its flat centre cards are back hair, not
+    # a ponytail swinging on its own between them.
+    behind = [chain.kind for chain in chains if chain.angle > hairrig.SIDE_ANGLE]
+    check(behind.count("back") <= 2 and "ponytail" not in behind,
+          "maeve: at most 2 back chains and no ponytail ({})".format(behind))
+    # A lock rooted by the ear that falls back over the shoulder is back hair: as side hair its own chain would
+    # swing a piece of the back.
+    tips = [round(hairrig._angle(maeve, chain.tip), 1) for chain in chains if chain.kind == "side"]
+    check(all(angle <= hairrig.SIDE_ANGLE for angle in tips), "maeve: every side chain ends to the side ({})".format(tips))
     dense = hairrig.plan_rig(points, tris, maeve, cap=cap, spacing=0.03)
     sparse = hairrig.plan_rig(points, tris, maeve, cap=cap, spacing=0.10)
     check(len(dense) > len(chains) >= len(sparse), "maeve: more chains at spacing 0.03, fewer or as many at 0.10 "

@@ -40,7 +40,8 @@ Then it plans a chain of bones down each lock:
   mixes neighbouring rows, and the centroids zig-zag). A spine shorter than MIN_CHAIN_LENGTH gets no chain.
 - The chain has a bone per BONE_SPACING of spine (2 to 5), its joints spread evenly along the spine from the
   root, the last bone ending at the spine's end.
-- Its kind (bangs, side, back or ponytail) comes from where the lock leaves the head and how long it is.
+- Its kind (bangs, side, back or ponytail) comes from where the lock leaves the head and how long it is; only
+  a round lock (PONYTAIL_ROUND) is a ponytail, a flat card lying on back hair is back hair.
 - Then locks merge. Twin layers always do: of two locks whose roots lie within TWIN_REACH of each other (a
   mesh doubled for its back faces), the smaller merges into the larger. Locks of one kind whose roots lie
   closer than the chain spacing (CHAIN_SPACING, the Chain Spacing setting) merge too: the smallest such lock
@@ -124,7 +125,7 @@ MAX_HAIR_BONES = 48
 TWIN_REACH = 0.005
 # Locks of one kind whose roots lie closer than this (metres) merge, budget or not: the chains follow the
 # hair's layout, not every card (plan_rig's ``spacing``, the Chain Spacing setting).
-CHAIN_SPACING = 0.06
+CHAIN_SPACING = 0.10
 # A merge is refused when the merged lock's chain has a joint or its tip farther than this (metres) from the
 # lock's own hair: its spine would run through the space between the two locks.
 SPINE_REACH = 0.03
@@ -139,8 +140,12 @@ BANGS_ANGLE = 45.0
 BANGS_LENGTH = 0.20
 # Side: a root this close to the front (degrees); farther round it is back hair.
 SIDE_ANGLE = 110.0
-# Ponytail: a lock kept whole (WHOLE_WIDTH) with a spine at least this long (metres).
+# Ponytail: a lock kept whole (WHOLE_WIDTH) with a spine at least this long (metres)...
 PONYTAIL_LENGTH = 0.30
+# ...and round: its hair spreads at least this far (metres, the square root of the second eigenvalue of its
+# vertices about the spine) across the spine both ways. A flat card lying on back hair is back hair: Maeve's
+# centre cards spread at most 0.0074, a tube ponytail 0.017.
+PONYTAIL_ROUND = 0.01
 # The custom property on the armature object that holds the rig for exporters, as JSON: {"race": "c0801",
 # "chains": [{"kind": "back", "bones": ["j_ex_hair_01_a", ...]}]}, each chain's bones root to tip.
 RIG_PROPERTY = "xiv_hair_rig"
@@ -489,30 +494,51 @@ def _smooth(line):
     return smooth
 
 
+def _bands(points, lock, step):
+    """The lock's own (not joined) vertices, their areas, which ``step``-wide band of distance from the root
+    each is in, and each band's area-weighted centroid (nearest band first, empty bands skipped)."""
+    own = ~np.asarray(lock.joined, dtype=bool)
+    vertices = lock.vertices[own]
+    weight = (np.ones(len(vertices)) if lock.areas is None else lock.areas[own]) + 1e-12
+    bands, band = np.unique(np.floor(lock.distance[own] / step).astype(np.int64), return_inverse=True)
+    total = np.bincount(band, weight, minlength=len(bands))
+    centroids = np.column_stack([np.bincount(band, weight * points[vertices, k], minlength=len(bands)) / total
+                                 for k in range(3)])
+    return vertices, weight, band, centroids
+
+
 def spine(points, lock, step=SPINE_STEP):
     """The middle line of ``lock`` down the hair ((m, 3), world space like ``points``, root to end): the
     lock's root, then the area-weighted centroid of its vertices in each ``step``-wide band of distance from
     the root, nearest first (empty bands are skipped), smoothed (SPINE_SMOOTHING). Joined vertices (crumbs,
     measured in a straight line) are left out: they would pull the line toward wherever the crumb is."""
     points = np.asarray(points, dtype=np.float64)
-    own = ~np.asarray(lock.joined, dtype=bool)
-    vertices = lock.vertices[own]
-    weight = (np.ones(len(vertices)) if lock.areas is None else lock.areas[own]) + 1e-12
     root = np.asarray(lock.root, dtype=np.float64).reshape(1, 3)
+    vertices, _weight, _band, centroids = _bands(points, lock, step)
     if not len(vertices):
         return root
-    bands, band = np.unique(np.floor(lock.distance[own] / step).astype(np.int64), return_inverse=True)
-    total = np.bincount(band, weight, minlength=len(bands))
-    centroids = np.column_stack([np.bincount(band, weight * points[vertices, k], minlength=len(bands)) / total
-                                 for k in range(3)])
     return _smooth(np.vstack((root, centroids)))
 
 
-def plan_chain(points, lock):
+def _round(points, lock):
+    """Whether ``lock``'s own hair spreads at least PONYTAIL_ROUND across its spine both ways: the square root
+    of the second eigenvalue of its vertices about their bands' centroids (`spine`). A tube is round, a flat
+    card or a sheet of cards isn't."""
+    points = np.asarray(points, dtype=np.float64)
+    vertices, weight, band, centroids = _bands(points, lock, SPINE_STEP)
+    if not len(vertices):
+        return False
+    offsets = points[vertices] - centroids[band]
+    spread = np.linalg.eigvalsh((offsets * weight[:, None]).T @ offsets / weight.sum())
+    return bool(spread[1] >= PONYTAIL_ROUND * PONYTAIL_ROUND)
+
+
+def plan_chain(points, lock, rig=None):
     """The chain for ``lock`` (`ChainPlan`), or None when its spine is shorter than MIN_CHAIN_LENGTH. Its
     clamp(ceil(length / BONE_SPACING), CHAIN_BONES) joints are spread evenly along the spine by length: the
     first on the root, the next ones one bone length further each, the last one bone length short of the
-    lock's end (the tip)."""
+    lock's end (the tip). With ``rig`` (`hairing.HairRig`), side hair whose tip lies behind SIDE_ANGLE is back
+    hair: it falls back over the shoulder, and as side hair it would keep a chain of its own there."""
     line = spine(points, lock)
     seg = np.linalg.norm(np.diff(line, axis=0), axis=1)
     length = float(seg.sum())
@@ -524,7 +550,11 @@ def plan_chain(points, lock):
     count = int(np.clip(math.ceil(length / BONE_SPACING), *CHAIN_BONES))
     marks = at[-1] * np.arange(count) / count
     joints = np.column_stack([np.interp(marks, at, line[:, k]) for k in range(3)])
-    return ChainPlan(chain_kind(lock.angle, length, lock.whole), joints, line[-1].copy(), lock.area, lock.whole,
+    # Only a round lock can be a ponytail (PONYTAIL_ROUND); a flat card stays whole for merging all the same.
+    kind = chain_kind(lock.angle, length, lock.whole and _round(points, lock))
+    if kind == "side" and rig is not None and _angle(rig, line[-1]) > SIDE_ANGLE:
+        kind = "back"
+    return ChainPlan(kind, joints, line[-1].copy(), lock.area, lock.whole,
                      lock.angle, lock.vertices, lock.light)
 
 
@@ -662,7 +692,7 @@ def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES
     if mesh is None:
         return []
     locks = find_locks(points, tris, rig, cap=cap, weld=mesh[0])
-    planned = [(lock, plan_chain(points, lock)) for lock in locks]
+    planned = [(lock, plan_chain(points, lock, rig)) for lock in locks]
     planned = [(lock, chain) for lock, chain in planned if chain is not None]
     # The locks stay in their places in ``planned``, the merged ones marked gone (not ``alive``), so the
     # smallest and the nearest are the first ones in the same order as among the locks left.
@@ -712,7 +742,7 @@ def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES
 
     def try_merge(small, into):
         merged = _merge(planned[into][0], planned[small][0], mesh, points, rig, graph)
-        return merged, plan_chain(points, merged)
+        return merged, plan_chain(points, merged, rig)
 
     def join(small, into, merged, chain):
         """Lock ``small`` merged into ``into`` as ``merged``, planned as ``chain``."""
