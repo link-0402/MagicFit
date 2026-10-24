@@ -154,6 +154,65 @@ class NumericalTests(unittest.TestCase):
         np.testing.assert_allclose(match.points, [[0.2, 0.2, 0]] * 2, atol=1e-6)
         np.testing.assert_allclose(match.normals, [[0, 0, 1]] * 2, atol=1e-6)
 
+    def test_lift_moves_straight_out_with_the_least_change(self):
+        # Three bones putting the vertex at different places; it has to move 2 mm along z.
+        weights = np.array([0.6, 0.3, 0.1])
+        places = np.array([[0.0, 0, 0], [0.01, 0, 0.02], [-0.01, 0, 0.02]])
+        step = transfer.solve_lift(weights, places, np.array([0, 0, 0.002]))
+        self.assertAlmostEqual(step.sum(), 0, places=9)
+        np.testing.assert_allclose(places.T @ step, [0, 0, 0.002], atol=1e-9)
+        self.assertTrue(np.all(weights + step >= -1e-12))
+        # The other two in equal parts, so it doesn't slide sideways.
+        self.assertAlmostEqual(step[1], step[2], places=9)
+        # Out of what the bones can reach: none.
+        self.assertIsNone(transfer.solve_lift(weights, places, np.array([0.002, 0.002, 0])))
+
+    def test_balance_mirrors_the_weights_where_the_mesh_is_symmetric(self):
+        # A strip across the middle, 1 mm off it, with a tab on one side only; bones a_l, a_r and c.
+        strip, sf = flat_grid(np.linspace(-0.019, 0.021, 21), np.linspace(0, 0.02, 5))
+        tab, tf = flat_grid(np.linspace(0.06, 0.08, 5), np.linspace(0, 0.02, 5))
+        vertices = np.vstack([strip, tab])
+        names = ['a_l', 'c', 'a_r']
+        weights = np.zeros((len(vertices), 3))
+        # Leaning to the left (+x) bone everywhere.
+        weights[:] = [0.3, 0.6, 0.1]
+        target = dict(vertices=vertices, triangles=np.vstack([sf, tf + len(strip)]), weights=weights.copy(),
+                      mirror=np.eye(4))
+        self.assertGreater(transfer.balance_sides(target, names), 0)
+        balanced = target['weights']
+        np.testing.assert_allclose(balanced.sum(axis=1), 1, atol=1e-9)
+        # Where the strip has a mirror image, both sides alike.
+        inside = np.flatnonzero(np.abs(vertices[:len(strip), 0]) < 0.017)
+        np.testing.assert_allclose(balanced[inside][:, [0, 2]], 0.2, atol=1e-6)
+        # The tab has nothing across from it and keeps its own.
+        np.testing.assert_allclose(balanced[len(strip):], weights[len(strip):])
+        # Not matched in the rest pose: nothing.
+        del target['mirror']
+        self.assertEqual(transfer.balance_sides(target, names), 0)
+
+    def test_lift_takes_a_buried_bridge_out_of_the_skin(self):
+        # Skin at z == 0 with 0.1 of bone b, which the template moves 20 mm up (the skin 2 mm); vertices with 0.05 of
+        # it 1 mm over the skin (it comes up level with the skin), 2 cm over it, and 2 mm under it.
+        skin, faces = flat_grid(np.linspace(-0.02, 0.02, 5), np.linspace(-0.02, 0.02, 5))
+        up = np.eye(4)
+        up[2, 3] = 0.02
+        names = ['a', 'b']
+        target = dict(vertices=np.array([[0.001, 0.001, 0.001], [0.001, 0.001, 0.02], [0.006, 0.001, -0.002]]),
+                      weights=np.tile([0.95, 0.05], (3, 1)), distances=np.array([0.001, 0.02, 0.002]),
+                      spans=np.ones(3), cplus=np.array([np.eye(4), up]),
+                      source=dict(vertices=skin, triangles=faces, weights=np.tile([0.9, 0.1], (len(skin), 1))))
+        self.assertEqual(transfer.lift_buried(target, names), 2)
+        lifted = target['weights']
+        np.testing.assert_allclose(lifted.sum(axis=1), 1, atol=1e-9)
+        # 1 mm + 20 mm * w_b clears the skin's 2 mm by LIFT_MARGIN, with no more of b than that needs.
+        np.testing.assert_allclose(0.001 + 0.02 * lifted[0, 1], 0.002 + transfer.LIFT_MARGIN, atol=1e-9)
+        # Clear of the skin: as it was. Too deep: no more than LIFT_MAX moves.
+        np.testing.assert_allclose(lifted[1], [0.95, 0.05])
+        np.testing.assert_allclose(lifted[2], [0.95 - transfer.LIFT_MAX, 0.05 + transfer.LIFT_MAX], atol=1e-9)
+        # Without a template (or the body it was matched against), nothing.
+        del target['cplus']
+        self.assertEqual(transfer.lift_buried(target, names), 0)
+
     def test_the_middle_of_a_crease_takes_both_walls(self):
         # Two walls 14 mm apart facing each other across x == 0, the one at -x weighted to the first bone.
         wall, wf = flat_grid(np.linspace(-0.05, 0.05, 11), np.linspace(-0.05, 0.05, 11))
@@ -2017,6 +2076,14 @@ class CreaseSmoothingTests(TransferScene, unittest.TestCase):
         np.testing.assert_allclose(weights.sum(axis=1), 1, atol=1e-5)
         # It moves with both sides alike instead of drifting after the wall one edge touches.
         self.assertLess(abs(weights[:, 0].mean() - weights[:, 1].mean()), 0.1)
+
+    def test_plain_transfer_balances_but_does_not_lift(self):
+        self.crease_scene()
+        with patch.object(transfer, 'lift_buried') as lift, \
+                patch.object(transfer, 'balance_sides', wraps=transfer.balance_sides) as balance:
+            self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        lift.assert_not_called()
+        balance.assert_called()
 
     def test_bridge_blends_but_what_lies_on_the_body_follows_it(self):
         rig, gusset, x = self.crease_scene(gusset=True)

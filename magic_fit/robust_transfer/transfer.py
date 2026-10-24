@@ -7,7 +7,9 @@
 # faces the body (weighttransfer.facing_cosines), Crease Smoothing is the
 # only matching (no Max Distance, normal angles, Inpaint Mode or smoothing
 # settings), and fingers and toes are handled on their own (digit_columns). Matches between two walls of a
-# crease take both walls' weights (weighttransfer.between_walls).
+# crease take both walls' weights (weighttransfer.between_walls). With Customize+, what bridges a crease is lifted
+# out where the template's skin would bury it (lift_buried), and meshes matched in the rest pose get
+# mirror-symmetric weights where they are symmetric themselves (balance_sides).
 import numpy as np
 from mathutils.bvhtree import BVHTree
 from scipy import sparse
@@ -41,6 +43,23 @@ WEIGHT_TOLERANCE = 1e-7
 # How far from the body a match counts, and Partial Reweight reaches. Farther, a vertex only anchors its
 # loose part. 2.5 or 10 cm gave the same weights on every garment tried.
 MAX_DISTANCE = 0.05
+# Lift (With Customize+ only): a mesh bridging a crease (a thong over the butt cleft) copies the skin around it, but
+# under a template (butt 2x) the cheeks swell over it and bury it: its weights followed them out 24 mm where the
+# cheek edge beside it went 27 mm, and 11 mm inwards. Where the template's skin would cover a bridging vertex, its
+# weights change as little as they can to move it straight out, LIFT_MARGIN clear of the skin, among the bones it has
+# and their other-side twins (the butt's jiggle bones moved the cleft's middle 66 mm out, the hips 21 mm). At most
+# LIFT_MAX of its weight moves. On 59 garments under the user's template that clipped 1-4 % less and stretched 5-7 %
+# more (up to 22 % without the template); a cap of 0.3, the skin's bones as well or the change spread over three rings
+# of neighbours stretched more. Against the built-in template (template_pose) it hardly helped, so plain Transfer
+# doesn't lift.
+LIFT_MARGIN = 0.001
+LIFT_MAX = 0.1
+# Balance: the body is symmetric, so a mesh matched in the rest pose is given mirror-symmetric weights wherever it is
+# symmetric itself: each vertex averages its weights with the mirrored ones at its mirror image on the mesh, fully
+# within the first distance of the mesh, fading out by the second. Under a template moving a cheek's skin 54 mm
+# sideways per unit of weight, a thong strip 1 mm off the middle with 0.13 of one cheek and 0.04 of the other slid
+# 7 mm into the other cheek.
+BALANCE_GAP = (0.002, 0.004)
 
 
 def armature_key(obj, fallback=None):
@@ -233,7 +252,7 @@ def match_target(target, source_vertices, source_triangles, source_normals,
     # prepare_batch works it out again over meshes sharing a solve.
     target.update(weights=match.weights, masked=masked, outward=outward, digit_share=digit_share,
                   distances=match.distances, cosines=cosines, points=match.points, point_normals=match.normals,
-                  closest_weights=match.weights.copy())
+                  closest_weights=match.weights.copy(), spans=spans)
     bridge_trust([target], settings)
     if strides is not None:
         # Where the body touches the mesh from outside, there's no leg under it to follow.
@@ -418,6 +437,111 @@ def cplus_follow(target):
             target['vertices'][rows], target['points'][rows], target['point_normals'][rows],
             target['closest_weights'][rows], target['weights'][rows], [target['cplus']])
     return pull
+
+
+def mirror_columns(names):
+    """For each of the bone ``names``, the column of its other-side twin (``_l`` and ``_r`` swapped), or its own."""
+    index = {name: column for column, name in enumerate(names)}
+    swap = {'_l': '_r', '_r': '_l'}
+    return np.array([index.get(name[:-2] + swap[name[-2:]], column) if name[-2:] in swap else column
+                     for column, name in enumerate(names)], dtype=np.int64)
+
+
+def lift_buried(target, names):
+    """Lift the vertices of ``target`` that bridge a crease out of the skin where its template (``target['cplus']``)
+    would bury them (see LIFT_MARGIN), with the body it was matched against (``target['source']``) skinned by it.
+    ``names``: the weight columns' bones. Returns how many vertices were lifted."""
+    matrices, source, spans = target.get('cplus'), target.get('source'), target.get('spans')
+    if matrices is None or source is None or spans is None:
+        return 0
+    weights = target['weights']
+    rows = np.flatnonzero((spans > 0) & (target['distances'] <= MAX_DISTANCE) & (weights.sum(axis=1) > 0))
+    if not len(rows):
+        return 0
+    skin = weighttransfer._skin(source['vertices'], weighttransfer._normalized_rows(source['weights']), matrices)
+    tree = BVHTree.FromPolygons(skin.tolist(), np.asarray(source['triangles']).tolist(), all_triangles=True)
+    current = weighttransfer._normalized_rows(weights[rows])
+    posed = weighttransfer._skin(target['vertices'][rows], current, matrices)
+    twins = mirror_columns(names)
+    homogeneous = np.append(target['vertices'][rows], np.ones((len(rows), 1)), axis=1)
+    lifted = 0
+    for k, row in enumerate(rows):
+        location, normal, _index, _distance = tree.find_nearest(posed[k].tolist())
+        if location is None:
+            continue
+        normal = np.asarray(normal)
+        needed = LIFT_MARGIN - float(np.dot(posed[k] - np.asarray(location), normal))
+        if needed <= 0:
+            continue
+        w = current[k]
+        columns = np.flatnonzero(w > 0)
+        columns = np.union1d(columns, twins[columns])
+        # Where each bone alone would put the vertex; the change moves it by needed along the normal, not across.
+        places = np.einsum('cij,j->ci', matrices[columns][:, :3], homogeneous[k])
+        step = solve_lift(w[columns], places, needed * normal)
+        if step is None:
+            continue
+        moved = np.abs(step).sum() / 2
+        if moved > LIFT_MAX:
+            step *= LIFT_MAX / moved
+        total = weights[row].sum()
+        weights[row] = 0.0
+        weights[row, columns] = np.clip(w[columns] + step, 0.0, None)
+        weights[row] *= total / max(weights[row].sum(), WEIGHT_TOLERANCE)
+        lifted += 1
+    return lifted
+
+
+def balance_sides(target, names):
+    """Make ``target``'s weights mirror-symmetric where the mesh is (see BALANCE_GAP), across the x == 0 plane of the
+    armature it was matched in the rest pose of (``target['mirror']``, its world matrix). ``names``: the weight
+    columns' bones. Returns how many vertices were balanced."""
+    frame = target.get('mirror')
+    twins = mirror_columns(names)
+    if frame is None or np.array_equal(twins, np.arange(len(names))):
+        return 0
+    vertices = np.asarray(target['vertices'], dtype=np.float64)
+    triangles = np.asarray(target['triangles'], dtype=np.int64)
+    flip = np.asarray(frame) @ np.diag([-1.0, 1.0, 1.0, 1.0]) @ np.linalg.inv(frame)
+    mirrored = vertices @ flip[:3, :3].T + flip[:3, 3]
+    tree = BVHTree.FromPolygons(vertices.tolist(), triangles.tolist(), all_triangles=True)
+    found = [tree.find_nearest(point, BALANCE_GAP[1]) for point in mirrored.tolist()]
+    rows = np.array([k for k, hit in enumerate(found) if hit[0] is not None], dtype=np.int64)
+    if not len(rows):
+        return 0
+    faces = np.array([found[k][2] for k in rows], dtype=np.int64)
+    gaps = np.array([found[k][3] for k in rows])
+    places = np.array([found[k][0][:] for k in rows])
+    weights = target['weights']
+    bary = weighttransfer._barycentric_coordinates(places, vertices[triangles[faces]])
+    other = weighttransfer.interpolate_attribute_from_bary(weights, bary, faces, triangles)[:, twins]
+    share = 0.5 * weighttransfer._smoothstep((BALANCE_GAP[1] - gaps) / (BALANCE_GAP[1] - BALANCE_GAP[0]))
+    weights[rows] = (1 - share[:, np.newaxis]) * weights[rows] + share[:, np.newaxis] * other
+    return int(np.count_nonzero(share > 0))
+
+
+def solve_lift(weights, places, offset):
+    """The smallest change (least squares) to ``weights`` (adding up to 1) that moves a vertex skinned with them by
+    ``offset``, each column putting it at ``places`` alone, leaving none negative. None if it can't."""
+    weights = np.asarray(weights, dtype=np.float64)
+    step = np.zeros(len(weights))
+    free = np.ones(len(weights), dtype=bool)
+    target = np.append(0.0, offset)
+    for _round in range(len(weights)):
+        system = np.vstack((np.ones(len(weights)), np.asarray(places, dtype=np.float64).T))
+        fixed_part = system[:, ~free] @ step[~free]
+        part = system[:, free]
+        solution = np.linalg.lstsq(part, target - fixed_part, rcond=None)[0]
+        if not np.allclose(part @ solution, target - fixed_part, atol=1e-6):
+            return None
+        step[free] = solution
+        below = free & (weights + step < -1e-12)
+        if not below.any():
+            return step
+        # Those that would go negative go to nothing, and the rest make up for them.
+        step[below] = -weights[below]
+        free &= ~below
+    return None
 
 
 def process_weights(target, settings):

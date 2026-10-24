@@ -238,6 +238,10 @@ def match_objects(context, settings, body, objects, cplus=None):
                                       strides, digits)
                 if matrices is not None:
                     target['cplus'] = matrices
+                if meshes is bound and fallback is not None:
+                    # Matched with the body in the rest pose: symmetric, and what lift_buried skins.
+                    target.update(mirror=np.array(fallback.matrix_world),
+                                  source=dict(vertices=vertices, triangles=triangles, weights=weights))
                 targets[obj] = target
             groups = (names, deform, included)
     return [targets[obj] for obj in objects], groups
@@ -276,6 +280,9 @@ class MAGIC_FIT_OT_transfer_weights(bpy.types.Operator):
             fallback = transfer.source_armature(source_original)
             transfer.solve_targets(targets, settings, fallback, partial=settings.partial_reweight)
             for target in targets:
+                if settings.use_cplus:
+                    transfer.lift_buried(target, names)
+                transfer.balance_sides(target, names)
                 transfer.process_weights(target, settings)
                 transfer.stage_weights(target, names, included, apply_mask=not settings.apply_to_selected,
                                        clear_others=True)
