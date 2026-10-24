@@ -139,12 +139,18 @@ def test_seam_kept():
     bmesh.ops.delete(bm, geom=[v for v in bm.verts if v.co.z > 0.145], context='VERTS')
     bm.to_mesh(mesh)
     bm.free()
-    start = heels.by_name(shoes)
-    paint_everything(new_stroke(shoes), shoes)
-    after = heels.by_name(shoes)
     co = heels.rest_co(shoes)
     seam = np.abs(co[:, 2] - 0.14) < 1e-4
     below = np.abs(co[:, 2] - 0.13) < 1e-4
+    # One seam vertex has no weights at all: it still needs some to export.
+    bare = int(np.flatnonzero(seam)[0])
+    for group in shoes.vertex_groups:
+        group.remove([bare])
+    seam[bare] = False
+    start = heels.by_name(shoes)
+    paint_everything(new_stroke(shoes), shoes)
+    after = heels.by_name(shoes)
+    check(bone_total({n: v[[bare]] for n, v in after.items()})[0] > 0.99, "seam: a vertex without weights gets them")
     check(seam.any() and all(np.array_equal(after[n][seam], start[n][seam]) for n in start),
           "seam: the open edge above the ankle keeps its weights")
     check(below.any() and any(not np.allclose(after[n][below], start[n][below]) for n in start),

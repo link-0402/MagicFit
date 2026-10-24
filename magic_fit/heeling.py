@@ -19,7 +19,7 @@ Heels mode does just that, in the rest pose:
   should bend there.
 - The rest is the vertex's own leg weights (anything but the foot's bones), as fractions of one, or the
   calf when it has none. So applying Heels again changes nothing.
-- Open edges above the ankle joint keep their weights: that's where a shoe's skin or stockings meet the
+- Open edges above the ankle joint keep their weights, if they have any: that's where a shoe's skin or stockings meet the
   legs model (a few cm above the ankle), and a seam whose sides differ opens a gap.
 
 The foot's skin inside a shoe needs heel weights too, or it bends at the toes where the shoe doesn't and
@@ -199,7 +199,10 @@ class HeelsStroke(goals.GoalStroke):
         return groups.tolist()
 
     def _leave(self, current, group):
-        return self.foot_share[group] <= 0.0 or self.seam[group]  # above the ankle, or the seam
+        if self.foot_share[group] <= 0.0:
+            return True  # above the ankle
+        # The seam keeps its weights, but one without bone weights still gets them.
+        return bool(self.seam[group]) and any(g in self.bone_groups and w > 0.0 for g, w in current.items())
 
     def _goal(self, vert, group, _param, shares):
         leg_bones = self.rig.sides[self.side[group]]
