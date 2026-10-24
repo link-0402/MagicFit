@@ -19,6 +19,11 @@ Heels mode does just that, in the rest pose:
   should bend there.
 - The rest is the vertex's own leg weights (anything but the foot's bones), as fractions of one, or the
   calf when it has none. So applying Heels again changes nothing.
+- Open edges above the ankle joint keep their weights: that's where a shoe's skin or stockings meet the
+  legs model (a few cm above the ankle), and a seam whose sides differ opens a gap.
+
+The foot's skin inside a shoe needs heel weights too, or it bends at the toes where the shoe doesn't and
+pokes through it.
 
 Like `painting`, nothing here depends on the 3D view.
 """
@@ -68,6 +73,23 @@ def toe_fraction(forward, toe_bend):
     forward = np.asarray(forward, dtype=np.float64)
     share = toe_bend * smoothstep((np.nan_to_num(forward, nan=-np.inf) + TOE_BLEND) / TOE_BLEND)
     return np.where(np.isfinite(forward), share, 0.0)
+
+
+def open_groups(mesh, weld, weld_count):
+    """Which welded groups (``weld`` maps vertices to them) lie on an open edge of ``mesh``: an edge with
+    one face once split seams are welded."""
+    edges = np.empty(len(mesh.edges) * 2, dtype=np.int64)
+    mesh.edges.foreach_get("vertices", edges)
+    edges = np.sort(weld[edges.reshape(-1, 2)], axis=1)
+    loops = np.empty(len(mesh.loops), dtype=np.int64)
+    mesh.loops.foreach_get("edge_index", loops)
+    uses = np.bincount(loops, minlength=len(mesh.edges))
+    key = edges[:, 0] * weld_count + edges[:, 1]
+    _, inverse = np.unique(key, return_inverse=True)
+    faces = np.bincount(inverse, weights=uses)[inverse]
+    found = np.zeros(weld_count, dtype=bool)
+    found[edges[(faces == 1) & (edges[:, 0] != edges[:, 1])].reshape(-1)] = True
+    return found
 
 
 class HeelSide:
@@ -163,18 +185,21 @@ class HeelsStroke(goals.GoalStroke):
         self.foot_share = foot_fraction(self.height, ankle_height, ankle_blend)
         self.toe_share = self.foot_share * toe_fraction(self.ahead, toe_bend)
         self.foot_groups = {group.index for group in self.groups if group.name in rig.foot_names}
+        # shortcut: any open edge above the ankle counts as the seam, a strap's edge in the blend too;
+        # tell seams apart (by the legs model or the skin material) if straps show it.
+        self.seam = open_groups(self.mesh, self.weld, self.weld_count) & (self.height > 0.0)
         # What the stroke ran into, for the operator to report.
         self.painted_leg = False
         self.painted_foot = False
 
     def _prepare(self, groups):
-        foot = self.foot_share[groups] > 0.0
+        foot = (self.foot_share[groups] > 0.0) & ~self.seam[groups]
         self.painted_leg |= bool((~foot).any())
         self.painted_foot |= bool(foot.any())
         return groups.tolist()
 
     def _leave(self, current, group):
-        return self.foot_share[group] <= 0.0  # above the ankle
+        return self.foot_share[group] <= 0.0 or self.seam[group]  # above the ankle, or the seam
 
     def _goal(self, vert, group, _param, shares):
         leg_bones = self.rig.sides[self.side[group]]

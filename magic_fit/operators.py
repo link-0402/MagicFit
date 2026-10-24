@@ -2250,8 +2250,8 @@ class MAGIC_FIT_OT_skirt_weights(_WholeMeshWeights, bpy.types.Operator):
 
 
 class MAGIC_FIT_OT_heel_weights(_WholeMeshWeights, bpy.types.Operator):
-    """Make the whole mesh rigid below the ankle, so the foot only follows the ankle bone. Uses the same
-    Heels settings as the brush"""
+    """Make the whole mesh rigid below the ankle, so the foot only follows the ankle bone. Give it to the
+    foot's skin too, or the toes poke through. Uses the same Heels settings as the brush"""
     bl_idname = "magic_fit.heel_weights"
     bl_label = "Heel Weights"
     kind = 'HEELS'

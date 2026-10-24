@@ -118,7 +118,7 @@ def test_rigid_foot():
     leg = height > 0.02 + 0.06
     check(leg.any() and all(np.array_equal(after[name][leg], start[name][leg]) for name in start),
           "above the ankle: untouched")
-    band = ~foot & ~leg
+    band = ~foot & ~leg & ~stroke.seam[stroke.weld]  # the open back of the shoe above the ankle is kept
     share = heeling.foot_fraction(height, 0.02, 0.12)
     calf = np.where(side == 0, after["j_asi_c_l"], after["j_asi_c_r"])
     check(band.any() and float(np.abs(ankle[band] - share[band]).max()) < 1e-4
@@ -126,6 +126,29 @@ def test_rigid_foot():
           "ankle: the calf hands over to the ankle bone by height")
     check(float(np.abs(total - bone_total(start)).max()) < 1e-4, "totals kept")
     check(stroke.painted_foot and stroke.painted_leg, "the stroke saw both")
+
+
+def test_seam_kept():
+    import bmesh
+    rig, shoes = heels.build()
+    bpy.ops.object.mode_set(mode='OBJECT')
+    # Cut the strap off 5 cm above the ankle, in the blend: its open top is where the legs model meets it.
+    mesh = shoes.data
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    bmesh.ops.delete(bm, geom=[v for v in bm.verts if v.co.z > 0.145], context='VERTS')
+    bm.to_mesh(mesh)
+    bm.free()
+    start = heels.by_name(shoes)
+    paint_everything(new_stroke(shoes), shoes)
+    after = heels.by_name(shoes)
+    co = heels.rest_co(shoes)
+    seam = np.abs(co[:, 2] - 0.14) < 1e-4
+    below = np.abs(co[:, 2] - 0.13) < 1e-4
+    check(seam.any() and all(np.array_equal(after[n][seam], start[n][seam]) for n in start),
+          "seam: the open edge above the ankle keeps its weights")
+    check(below.any() and any(not np.allclose(after[n][below], start[n][below]) for n in start),
+          "seam: the row below it still gets heel weights")
 
 
 def rigid_error(rig, shoes, bone_name, rows):
