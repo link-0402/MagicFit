@@ -735,9 +735,9 @@ class MagicFitSettings(bpy.types.PropertyGroup):
             "How many earring bones each earring hangs from. 1: it swings as one stiff piece. More: it also bends, "
             "the bones sharing its length"
         ),
-        default=4,
+        default=5,
         min=1,
-        max=4,
+        max=5,
     )
     earring_use_joints: BoolProperty(
         name="Split at Joints",
@@ -755,7 +755,8 @@ class MagicFitSettings(bpy.types.PropertyGroup):
             ('A', "A", "Paint the top bone, at the earlobe (of the side painted)"),
             ('B', "B", "Paint the second bone (of the side painted)"),
             ('C', "C", "Paint the third bone (of the side painted)"),
-            ('D', "D", "Paint the lowest bone (of the side painted)"),
+            ('D', "D", "Paint the fourth bone (of the side painted)"),
+            ('E', "E", "Paint the lowest bone (of the side painted)"),
         ),
         default='AUTO',
     )

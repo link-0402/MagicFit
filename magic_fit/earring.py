@@ -4,10 +4,11 @@
 
 The game's own earring points (n_ear_a/b_l/r) are body bones; on Miqo'te and Viera they sit at the cat or
 rabbit ear, so earrings weighted to them pivot from there. The Earring Bones mod (made with Instant Edit's
-EarringBones tool) gives those faces eight face bones at the human earlobe:
+EarringBones tool) gives those faces ten face bones at the human earlobe:
 
 - j_ex_earring_a_l/r, parented to the head (j_kao), at the earlobe with their +X pointing straight down;
-- j_ex_earring_b, c and d, each JOINT below the one before, chained a > b > c > d.
+- j_ex_earring_b, c, d and e, each STEPS below the one before (a hook, then 1.5 cm parts), chained
+  a > b > c > d > e.
 
 The game's physics swings a from the lobe, and each joint below lets the earring bend once more. Only the
 bones the mod adds exist in game, and only with it on.
@@ -24,7 +25,7 @@ the chain by how far below the lobe it hangs, over the earring's own length (its
   middle of their share and blending linearly into the next across it. Everything at or above the lobe
   (the hook or stud) follows a.
 
-The bones themselves stay where the mod has them (JOINT apart); only the weights spread over the length,
+The bones themselves stay where the mod has them (STEPS apart); only the weights spread over the length,
 as long hair's are spread over chains shorter than it (see `hairing`).
 
 The brush paints toward those weights, or toward one bone picked by hand (the vertex's side of it).
@@ -40,25 +41,27 @@ from .goals import DEFAULT_MAX_GROUPS
 HEAD = hairing.HEAD
 # Where the earrings hang from, per race and face skeleton: the right earlobe in the head bone's rest space
 # (metres, the game's axes: +Z is the character's left, so the left lobe is the right one with Z negated).
-# Measured on the game's faces with Instant Edit's EarringBones tool (lobes.json), both checked in game
-# 2026-10-20. Each face skeleton needs the mod's bones built for it first: other Viera faces use other
-# skeletons (f0003 to f0005).
+# Measured on the game's faces with Instant Edit's EarringBones tool (lobes.json), Miqo'te and Viera checked
+# in game 2026-10-20. One lobe serves every face skeleton the mod has bones for: Viera faces 1 to 4 (f0002 to
+# f0005, measured on face 1), Au Ra faces 1 to 4 and 101 to 104 (f0002 to f0005, measured on face 101).
 LOBES = {
     ("c0801", "f0002"): ("Miqo'te Female", (0.001795, 0.008066, -0.057146)),
-    ("c1801", "f0002"): ("Viera Female (face 1)", (-0.013044, 0.020468, -0.057924)),
+    ("c1801", "f0002"): ("Viera Female", (-0.013044, 0.020468, -0.057924)),
+    ("c1401", "f0002"): ("Au Ra Female", (-0.005998, -0.000636, -0.058272)),
 }
 # Straight down, in the head bone's rest space, for every race above.
 DOWN = np.array((0.0, 1.0, 0.0))
-# The earring bones of each side, top down, each JOINT below the one before.
-LETTERS = ("a", "b", "c", "d")
+# The earring bones of each side, top down, and how far each of b to e sits below the one before (Instant
+# Edit's EarringBones lobes.json "chain", rebuilt 2026-10-23).
+LETTERS = ("a", "b", "c", "d", "e")
 MAX_BONES = len(LETTERS)
-JOINT = 0.01
+STEPS = (0.007, 0.015, 0.015, 0.015)
 SIDES = ("l", "r")
 # Vertices farther than this from both lobes (sideways, across the line down from each) aren't where an
 # earring hangs: the mesh is likely not lined up on this race's head.
 FAR = 0.03
-# Bones placed at a Blender armature are only this long, as far apart as the joints.
-BONE_LENGTH = JOINT
+# Bones placed at a Blender armature are only this long, as far apart as the closest joints.
+BONE_LENGTH = min(STEPS)
 # Loose parts whose heights overlap by more than this share of the shorter one's are one piece: a gem set in
 # a pendant overlaps it fully, links of a chain only where they hook into each other.
 PIECE_OVERLAP = 0.5
@@ -95,8 +98,7 @@ def race_of(key):
 
 def race_items():
     """Enum items of the races with earring bones (identifier, name, description), from LOBES."""
-    return [(race_key(race, skeleton), label,
-             "Earrings for {:s} ({:s}, face skeleton {:s})".format(label, race, skeleton))
+    return [(race_key(race, skeleton), label, "Earrings for {:s} ({:s})".format(label, race))
             for (race, skeleton), (label, _lobe) in LOBES.items()]
 
 
@@ -147,10 +149,10 @@ class EarringRig:
         for side, lobe in zip(SIDES, self.lobes):
             rest = head.rest @ _translation(lobe) @ _turn_down()
             parent = head.name
-            for letter in LETTERS:
+            for letter, step in zip(LETTERS, (0.0,) + STEPS):
+                rest = rest @ _translation((step, 0.0, 0.0))
                 name = bone_name(letter, side)
                 self.bones.append(hairing.Bone(name, parent, rest))
-                rest = rest @ _translation((JOINT, 0.0, 0.0))
                 parent = name
         self.by_name = {bone.name: bone for bone in self.bones}
 

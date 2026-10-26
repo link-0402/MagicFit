@@ -21,6 +21,7 @@ from magic_fit import earring, hairing, operators, straighten  # noqa: E402
 FAILURES = []
 MIQOTE = earring.race_key("c0801", "f0002")
 VIERA = earring.race_key("c1801", "f0002")
+AURA = earring.race_key("c1401", "f0002")
 
 
 def check(condition, message):
@@ -153,7 +154,7 @@ def test_even_spacing():
 
 
 def test_last_bone_holds_the_tail():
-    for count, letter, tail in ((4, "d", 0.035), (3, "c", 0.034), (2, "b", 0.03)):
+    for count, letter, tail in ((5, "e", 0.037), (4, "d", 0.035), (3, "c", 0.034), (2, "b", 0.03)):
         split = split_at([tail, 0.04], count=count)
         check(np.allclose(split.weights[:, column(split, letter, "r")], 1.0),
               "even: with {:d} bones, the last share of the length is all {:s}".format(count, letter))
@@ -252,11 +253,13 @@ def test_far():
 
 def test_race_table():
     items = earring.race_items()
-    check([item[0] for item in items] == [MIQOTE, VIERA], "races: built from the lobe table, Miqo'te then Viera")
-    check([item[1] for item in items] == ["Miqo'te Female", "Viera Female (face 1)"], "races: their names")
+    check([item[0] for item in items] == [MIQOTE, VIERA, AURA],
+          "races: built from the lobe table, Miqo'te, Viera, then Au Ra")
+    check([item[1] for item in items] == ["Miqo'te Female", "Viera Female", "Au Ra Female"], "races: their names")
     check(all("..." not in item[1] + item[2] and "…" not in item[1] + item[2] for item in items),
           "races: no ellipsis in the names or tooltips")
     check(np.allclose(earring.lobes(VIERA)[1], (-0.013044, 0.020468, -0.057924)), "races: Viera's right lobe")
+    check(np.allclose(earring.lobes(AURA)[1], (-0.005998, -0.000636, -0.058272)), "races: Au Ra's right lobe")
 
 
 # -----------------------------------------------------------------------------
@@ -273,25 +276,25 @@ def check_bones(armature, rig, label):
         down = head[:3, :3] @ earring.DOWN
         for k, letter in enumerate(earring.LETTERS):
             matrix = bone_matrix(armature, earring.bone_name(letter, side))
-            expected = (head @ np.append(lobe, 1.0))[:3] + down * earring.JOINT * k
+            expected = (head @ np.append(lobe, 1.0))[:3] + down * (0.0, 0.007, 0.022, 0.037, 0.052)[k]
             worst = max(worst, float(np.linalg.norm(matrix[:3, 3] - expected)))
             if letter == "a":
                 check(np.dot(matrix[:3, 0], (0.0, 0.0, -1.0)) > 0.999,
                       "{:s}: a_{:s} points +X straight down".format(label, side))
                 check(armature.data.bones[earring.bone_name(letter, side)].parent.name == earring.HEAD,
                       "{:s}: a_{:s} hangs from the head".format(label, side))
-    check(worst < 1e-4, "{:s}: the bone heads are at the head + lobe, 1 cm apart ({:.4f} mm off)".format(
+    check(worst < 1e-4, "{:s}: the bone heads are at the head + lobe, 0.7 cm then 1.5 cm apart ({:.4f} mm off)".format(
         label, worst * 1000.0))
 
 
 def test_bones_added():
     clear_scene()
-    for key in (MIQOTE, VIERA):
+    for key in (MIQOTE, VIERA, AURA):
         armature = new_armature(names=("j_kubi",))
         rig = earring.EarringRig.for_race(key)
         added = hairing.ensure_bones(bpy.context, armature, rig, [bone.name for bone in rig.bones])
         check(set(added) == earring.ALL_BONES | {earring.HEAD},
-              "bones: {:s}: the head and all eight earring bones are added".format(key))
+              "bones: {:s}: the head and all ten earring bones are added".format(key))
         check_bones(armature, rig, "bones " + key)
         reference_head = rig.head.head
         check(np.linalg.norm(bone_matrix(armature, earring.HEAD)[:3, 3] - reference_head) < 1e-6,
@@ -334,7 +337,7 @@ def test_button():
     select_only([obj], obj)
     check(bpy.ops.magic_fit.earring_weights.poll(), "button: ready with an earring mesh selected")
     check(bpy.ops.magic_fit.earring_weights() == {'FINISHED'}, "button: runs")
-    check(earring.ALL_BONES <= set(armature.data.bones.keys()), "button: all eight bones added, even with 2 used")
+    check(earring.ALL_BONES <= set(armature.data.bones.keys()), "button: all ten bones added, even with 2 used")
     weights = weights_of(obj)
     check("n_ear_a_l" not in weights, "button: the old weights are taken off")
     check(np.allclose(weights["j_kao"][hook], 0.3), "button: the locked group keeps its weights")
@@ -469,9 +472,9 @@ def test_registered():
     settings.weights_tab = 'EARRING'
     check(settings.mode == 'EARRING', "the Earrings sub-tab is the Earring mode")
     races = [item.identifier for item in settings.bl_rna.properties["earring_race"].enum_items]
-    check(races == [MIQOTE, VIERA], "the race list is the lobe table")
+    check(races == [MIQOTE, VIERA, AURA], "the race list is the lobe table")
     prop = settings.bl_rna.properties["earring_bones"]
-    check((prop.default, prop.hard_min, prop.hard_max) == (4, 1, 4), "Bones per Side: 1 to 4, 4 by default")
+    check((prop.default, prop.hard_min, prop.hard_max) == (5, 1, 5), "Bones per Side: 1 to 5, 5 by default")
     settings.weights_tab = 'GENERAL'
 
 
