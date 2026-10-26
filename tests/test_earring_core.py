@@ -159,8 +159,14 @@ def test_pinned_to_head():
           "pin: below its stud the chain fades out of {:s}, steadily down it".format(earring.HEAD))
     check(np.max(np.abs(np.diff(split.weights[chain_rows], axis=0))) < 0.1,
           "pin: no hard step from link to link, joints or not (they'd come apart)")
-    check(np.allclose(split.weights[chain_rows[-1], column(split, "d", "r")], 1.0),
-          "pin: the chain's end is all on the last bone")
+    # The chain hangs 3.4 cm below its stud: its end is between c (2.2 cm down) and d (3.7 cm).
+    end = split.weights[chain_rows[-1]]
+    check(np.isclose(end[column(split, "c", "r")] + end[column(split, "d", "r")], 1.0) and
+          end[column(split, "d", "r")] > 0.5, "pin: the chain's end is on the bones as deep as it hangs")
+    # The chain cut 6.5 mm below its stud, short of b at 7 mm.
+    short = earring.earring_weights(points[5:5 + 18], LOBES, 4, parts[5:5 + 18])
+    check(not short.weights[:, [column(short, letter, "r") for letter in "cd"]].any(),
+          "pin: a chain shorter than a's step stays on a and b")
     check(np.isclose(split.lengths[1], 0.03), "pin: the length is the drop's alone")
     ring = earring.earring_weights(points, LOBES, 4, [0] * len(points))
     check(not ring.pinned.any(), "pin: a part reaching the lobe swings whole")
@@ -268,6 +274,24 @@ def test_joints():
     check(off.joints[1] == 0 and not np.allclose(off.weights.max(1), 1.0), "joints: off, the length is shared evenly")
     whole = split_at(heights, parts=np.zeros(len(parts), dtype=int), count=4)
     check(whole.joints[1] == 0, "joints: an earring in one piece is shared evenly")
+
+
+def test_rigid():
+    # The pieced earring split evenly, its pendant and the gem set in it rigid (a separate mesh set to Rigid).
+    heights, parts = pieced_earring()
+    parts = np.array(parts)
+    lobe = LOBES[1]
+    points = np.array([lobe + (0.0, h, 0.0) for h in heights])
+    # Each piece touches the next where their heights meet, as linked parts do.
+    rigid = np.isin(parts, (3, 4))
+    split = earring.earring_weights(points, LOBES, 4, parts, use_joints=False, rigid=rigid)
+    free = earring.earring_weights(points, LOBES, 4, parts, use_joints=False)
+    held = split.weights[rigid]
+    check(np.allclose(held.max(1), 1.0) and (held.argmax(1) == held.argmax(1)[0]).all(),
+          "rigid: the pendant and its gem follow one bone, whole")
+    top = np.flatnonzero(rigid)[np.argmin(np.array(heights)[rigid])]
+    check(held.argmax(1)[0] == free.weights[top].argmax(), "rigid: the bone its top follows most")
+    check(np.allclose(split.weights[~rigid], free.weights[~rigid]), "rigid: the rest is as without it")
 
 
 def test_pick_joints():

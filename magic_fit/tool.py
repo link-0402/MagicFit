@@ -1167,6 +1167,9 @@ class VIEW3D_PT_earring_weights_sidebar(tabs.TabPanel, bpy.types.Panel):
         settings = context.scene.magic_fit
         col = layout.column()
         _draw_earring_main(col, settings)
+        if context.object is not None and context.object.type == 'MESH':
+            # Each mesh's own, shared with Weight Transfer and Resize.
+            col.prop(context.object.magic_fit_transfer, "rigid", text="Rigid (Active Mesh)")
         if settings.group_mode == 'ACTIVE':
             # Earring Weights needs All Groups, and no other panel on this tab has the choice.
             _draw_choice(col, settings, "group_mode")

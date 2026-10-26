@@ -2766,7 +2766,9 @@ class MAGIC_FIT_OT_earring_weights(bpy.types.Operator):
         # The meshes are one pair of earrings: their length, and the joints between their pieces, are found
         # across all of them.
         split = earring.earring_weights(np.concatenate([rig.local(rest.co) for rest in rests]), rig.lobes, count,
-                                        earring.object_parts(rests), settings.earring_use_joints)
+                                        earring.object_parts(rests), settings.earring_use_joints,
+                                        np.concatenate([np.full(len(rest.co), earring.is_rigid(obj))
+                                                        for obj, rest in zip(targets, rests)]))
         starts = np.cumsum([0] + [len(rest.co) for rest in rests]).tolist()
         changed = 0
         removed = []
