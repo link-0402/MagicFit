@@ -25,6 +25,13 @@ the chain by how far below the lobe it hangs, over the earring's own length (its
   middle of their share and blending linearly into the next across it. Everything at or above the lobe
   (the hook or stud) follows a.
 
+Things worn elsewhere on the ear (studs higher up, chains hung from those piercings: loose parts touching
+each other, none within PIN of the lobe or the line down from it) would leave the ear swung from the lobe.
+Where they're on the ear (the stud at the top, both ends of a chain hung between two piercings: pieces
+nothing touching them reaches above) is pinned to the head instead. Below it the head's share fades out
+down the hanging's own length into the bones, spread evenly over it: by height alone, so links stay together
+where they touch, even though the bones turn about the lobe rather than there.
+
 The bones themselves stay where the mod has them (STEPS apart); only the weights spread over the length,
 as long hair's are spread over chains shorter than it (see `hairing`).
 
@@ -35,7 +42,7 @@ Like `painting`, nothing here depends on the 3D view.
 
 import numpy as np
 
-from . import fitting, hairing, straighten
+from . import fitting, hairing, smoothing, straighten
 from .goals import DEFAULT_MAX_GROUPS
 
 HEAD = hairing.HEAD
@@ -60,6 +67,12 @@ SIDES = ("l", "r")
 # Vertices farther than this from both lobes (sideways, across the line down from each) aren't where an
 # earring hangs: the mesh is likely not lined up on this race's head.
 FAR = 0.03
+# Loose parts closer than this to each other hang together (the links of a chain, a stud and its ring).
+TOUCH = 0.001
+# Hangings that come no closer than this to the lobe, or to the line down from it, are worn elsewhere on the
+# ear (studs, cuffs, chains from a piercing higher up): their top piece is pinned to the head; what hangs from
+# the lobe passes within a couple of millimetres of it.
+PIN = 0.004
 # Bones placed at a Blender armature are only this long, as far apart as the closest joints.
 BONE_LENGTH = min(STEPS)
 # Loose parts whose heights overlap by more than this share of the shorter one's are one piece: a gem set in
@@ -178,16 +191,18 @@ class EarringRig:
 # Weights
 
 class Split:
-    """Earring weights of some vertices: ``names`` (`bone_names` of ``count``), ``weights`` (a row per vertex,
-    each adding up to 1), ``left`` (which vertices went to the left side), ``far`` (which lie farther than FAR
-    from both lobes, sideways), and per side (SIDES order) the earring's ``lengths`` below the lobe and the
-    ``joints`` its bones change at (0 for an earring split evenly)."""
+    """Earring weights of some vertices: ``names`` (`bone_names` of ``count``, then HEAD), ``weights`` (a row
+    per vertex, each adding up to 1), ``left`` (which vertices went to the left side), ``far`` (which lie
+    farther than FAR from both lobes, sideways), ``pinned`` (which don't hang from the lobe and follow HEAD
+    alone), and per side (SIDES order) the earring's ``lengths`` below the lobe and the ``joints`` its bones
+    change at (0 for an earring split evenly)."""
 
-    def __init__(self, names, weights, left, far, lengths, joints):
+    def __init__(self, names, weights, left, far, pinned, lengths, joints):
         self.names = names
         self.weights = weights
         self.left = left
         self.far = far
+        self.pinned = pinned
         self.lengths = lengths
         self.joints = joints
 
@@ -276,31 +291,93 @@ def _side_weights(heights, parts, count, use_joints):
     return upper, lower, t - upper, length, 0
 
 
+def touching(local, parts):
+    """Pairs ((m, 2)) of loose ``parts`` (one per vertex ``local``, numbered from 0) that come within TOUCH
+    of each other."""
+    first, second = smoothing.close_pairs(local, TOUCH)
+    across = parts[first] != parts[second]
+    pairs = np.sort(np.column_stack((parts[first][across], parts[second][across])), axis=1)
+    return np.unique(pairs, axis=0) if len(pairs) else pairs.reshape(0, 2)
+
+
+def contacts(heights, parts, pairs):
+    """Which loose ``parts`` (numbered from 0) are where things are on the ear: those no part touching them
+    (``pairs``) reaches above (the stud at the top, both ends of a chain hung between two piercings, not a
+    pendant), with the parts touching them that mostly share their height (a ring through the stud)."""
+    count = int(parts.max()) + 1
+    top = np.full(count, np.inf)
+    bottom = np.full(count, -np.inf)
+    np.minimum.at(top, parts, heights)
+    np.maximum.at(bottom, parts, heights)
+    first, second = pairs.T
+    peak = np.ones(count, dtype=bool)
+    peak[first[top[second] < top[first]]] = False
+    peak[second[top[first] < top[second]]] = False
+    overlap = np.minimum(bottom[first], bottom[second]) - np.maximum(top[first], top[second])
+    span = np.maximum(np.minimum(bottom[first] - top[first], bottom[second] - top[second]), MIN_LENGTH)
+    shared = overlap > PIECE_OVERLAP * span
+    found = peak.copy()
+    found[first[shared & peak[second]]] = True
+    found[second[shared & peak[first]]] = True
+    return found
+
+
 def earring_weights(local, lobes, count=MAX_BONES, parts=None, use_joints=True):
     """The `Split` of vertices ``local`` (the head bone's rest space) with the left and right ``lobes`` and
-    ``count`` (1 to MAX_BONES) bones per side; ``parts`` (loose part per vertex, see `loose_parts`) for
-    ``use_joints``."""
+    ``count`` (1 to MAX_BONES) bones per side; ``parts`` (loose part per vertex, see `loose_parts`; each
+    vertex its own when None) to find the hangings and, for ``use_joints``, the joints.
+
+    A hanging that reaches the lobe is the earring, its bones spread over its length below the lobe. One worn
+    elsewhere on the ear has its `contacts` pinned to the head, and what hangs below them swings, the bones
+    spread over its own length below the lowest."""
     count = int(min(max(count, 1), MAX_BONES))
     local = np.asarray(local, dtype=np.float64).reshape(-1, 3)
     lobes = np.asarray(lobes, dtype=np.float64)
-    names = bone_names(count)
+    names = bone_names(count) + [HEAD]
     weights = np.zeros((len(local), len(names)))
     # +Z is the character's left.
     left = local[:, 2] > 0.0
+    pinned = np.zeros(len(local), dtype=bool)
     lengths, joints = [0.0, 0.0], [0, 0]
+    if not len(local):
+        return Split(names, weights, left, pinned.copy(), pinned, lengths, joints)
+    given = parts is not None
+    parts = np.unique(np.asarray(parts), return_inverse=True)[1] if given else np.arange(len(local))
+    pairs = touching(local, parts) if given else np.zeros((0, 2), dtype=np.int64)
+    hanging = hairing.components(int(parts.max()) + 1, pairs)[parts]
+    offsets = local - np.where(left[:, None], lobes[0], lobes[1])
+    heights = offsets @ DOWN
+    on_ear = contacts(heights, parts, pairs)[parts]
+    # Above the lobe, how far from the lobe itself; below it, how far across from the line down.
+    reach = np.linalg.norm(offsets - np.outer(np.maximum(heights, 0.0), DOWN), axis=1)
+    closest = np.full(int(hanging.max()) + 1, np.inf)
+    np.minimum.at(closest, hanging, reach)
+    on_lobe = closest[hanging] <= PIN
     rows = np.arange(len(local))
+
     for side, mask in enumerate((left, ~left)):
-        if not mask.any():
-            continue
-        heights = (local[mask] - lobes[side]) @ DOWN
-        upper, lower, share, lengths[side], joints[side] = _side_weights(
-            heights, None if parts is None else np.asarray(parts)[mask], count, use_joints)
-        column = side * count
-        np.add.at(weights, (rows[mask], column + upper), 1.0 - share)
-        np.add.at(weights, (rows[mask], column + lower), share)
+        chosen = rows[mask & on_lobe]
+        if len(chosen):
+            upper, lower, share, lengths[side], joints[side] = _side_weights(
+                heights[chosen], parts[chosen] if given else None, count, use_joints)
+            np.add.at(weights, (chosen, side * count + upper), 1.0 - share)
+            np.add.at(weights, (chosen, side * count + lower), share)
+        for label in np.unique(hanging[mask & ~on_lobe]):
+            chosen = rows[mask & (hanging == label)]
+            contact = on_ear[chosen]
+            pinned[chosen[contact]] = True
+            # The bones turn about the lobe, not the contact: the head's share fades out down the hanging, and
+            # the weights go by height alone (no joints), so the links stay together where they touch.
+            below = np.maximum(heights[chosen] - heights[chosen[contact]].max(), 0.0)
+            length = float(below.max())
+            free = below / length if length > MIN_LENGTH else np.zeros(len(chosen))
+            upper, lower, share, _length, _used = _side_weights(below, None, count, False)
+            np.add.at(weights, (chosen, side * count + upper), free * (1.0 - share))
+            np.add.at(weights, (chosen, side * count + lower), free * share)
+            weights[chosen, -1] += 1.0 - free
     across = [np.linalg.norm((local - side) - np.outer((local - side) @ DOWN, DOWN), axis=1) for side in lobes]
-    far = np.minimum(*across) > FAR if len(local) else np.zeros(0, dtype=bool)
-    return Split(names, weights, left, far, lengths, joints)
+    far = np.minimum(*across) > FAR
+    return Split(names, weights, left, far, pinned, lengths, joints)
 
 
 def one_bone(local, letter):
@@ -362,8 +439,7 @@ def build_stroke(context, obj, settings):
     if letter != 'AUTO':
         weights = one_bone(local, letter.lower())
     else:
-        parts = object_parts([rest]) if settings.earring_use_joints else None
-        split = earring_weights(local, rig.lobes, count, parts, settings.earring_use_joints)
+        split = earring_weights(local, rig.lobes, count, object_parts([rest]), settings.earring_use_joints)
         weights = (split.names, split.weights)
     return hairing.HairStroke(obj, rest.co, rest.tris, rig, weights=weights, **stroke_params(settings))
 

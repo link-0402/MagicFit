@@ -130,10 +130,58 @@ def column(split, letter, side):
 
 
 def test_hook_at_a():
-    split = split_at([0.0, -0.002, -0.02, 0.004], length=0.04)
+    split = split_at([0.0, -0.002, -0.02, 0.004], length=0.04, parts=[0, 0, 0, 0])
     a = column(split, "a", "r")
     check(np.allclose(split.weights[:, a], 1.0) and np.allclose(split.weights.sum(1), 1.0),
           "split: the hook at and above the lobe, and the top of a's share, are all a")
+
+
+def test_pinned_to_head():
+    # A drop from the lobe (part 0), a lone stud 1.5 cm up the ear (1), and 1 cm behind the lobe a stud (2)
+    # with a link (3) and a pendant (4) hanging from it, each touching the next.
+    lobe = LOBES[1]
+    drop = [lobe + (0.0, h, 0.0) for h in (-0.003, 0.01, 0.03)]
+    stud = [lobe + (0.0, -0.015, 0.0), lobe + (0.002, -0.017, 0.0)]
+    chain = [lobe + (0.01, h, 0.0) for h in np.arange(-0.006, 0.0301, 0.0005)]
+    heights = np.array([point[1] - lobe[1] for point in chain])
+    points = np.array(drop + stud + chain)
+    parts = [0] * 3 + [1] * 2 + [2 if h < -0.0039 else 3 if h < 0.01 else 4 for h in heights]
+    split = earring.earring_weights(points, LOBES, 4, parts)
+    head = split.names.index(earring.HEAD)
+    chain_rows = np.arange(5, len(points))
+    stud_rows = chain_rows[heights < -0.0039]
+    check(split.pinned.tolist() == [False] * 3 + [True] * 2 + (heights < -0.0039).tolist(),
+          "pin: the lone stud and the chain's stud are pinned, nothing else")
+    check(np.allclose(split.weights[split.pinned, head], 1.0) and np.allclose(split.weights[:3, head], 0.0),
+          "pin: what's pinned is all {:s}, the drop has none".format(earring.HEAD))
+    fade = split.weights[chain_rows, head]
+    check(len(stud_rows) and (np.diff(fade) <= 1e-9).all() and 0.0 < fade[len(stud_rows) + 5] < 1.0,
+          "pin: below its stud the chain fades out of {:s}, steadily down it".format(earring.HEAD))
+    check(np.max(np.abs(np.diff(split.weights[chain_rows], axis=0))) < 0.1,
+          "pin: no hard step from link to link, joints or not (they'd come apart)")
+    check(np.allclose(split.weights[chain_rows[-1], column(split, "d", "r")], 1.0),
+          "pin: the chain's end is all on the last bone")
+    check(np.isclose(split.lengths[1], 0.03), "pin: the length is the drop's alone")
+    ring = earring.earring_weights(points, LOBES, 4, [0] * len(points))
+    check(not ring.pinned.any(), "pin: a part reaching the lobe swings whole")
+
+
+def test_pinned_both_ends():
+    # A chain hung between two piercings 1.5 cm behind the lobe, the back one higher: down 2 cm from the
+    # front ball, 3 mm across the bottom, and up 1.5 cm to the back ball; a link every 3 mm.
+    lobe = LOBES[1]
+    down = [(0.015, h) for h in np.arange(-0.02, 0.0, 0.0005)]
+    across = [(0.015 + x, 0.0) for x in np.arange(0.0, 0.003, 0.0005)]
+    up = [(0.018, h) for h in np.arange(0.0, -0.0151, -0.0005)]
+    path = down + across + up
+    points = np.array([lobe + (x, h, 0.0) for x, h in path])
+    parts = np.arange(len(points)) // 6
+    split = earring.earring_weights(points, LOBES, 4, parts)
+    pinned = sorted(set(parts[split.pinned].tolist()))
+    check(pinned == [0, int(parts[-1])], "pin: both ends of a chain between two piercings are pinned ({!r})".format(
+        pinned))
+    bottom = int(np.argmax(points[:, 1]))
+    check(split.weights[bottom, column(split, "a", "r")] < 0.5, "pin: the chain's bottom still swings")
 
 
 def test_even_spacing():
@@ -161,8 +209,8 @@ def test_last_bone_holds_the_tail():
 
 
 def test_one_bone():
-    split = split_at([-0.01, 0.0, 0.005, 0.03, 0.2], count=1)
-    check(split.names == [earring.bone_name("a", "l"), earring.bone_name("a", "r")],
+    split = split_at([-0.01, 0.0, 0.005, 0.03, 0.2], count=1, parts=[0] * 5)
+    check(split.names == [earring.bone_name("a", "l"), earring.bone_name("a", "r"), earring.HEAD],
           "split: one bone per side uses a only")
     check(np.allclose(split.weights[:, 1], 1.0), "split: with one bone, everything is all a")
 

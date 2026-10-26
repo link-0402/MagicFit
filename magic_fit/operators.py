@@ -2765,14 +2765,12 @@ class MAGIC_FIT_OT_earring_weights(bpy.types.Operator):
         params = earring.stroke_params(settings)
         # The meshes are one pair of earrings: their length, and the joints between their pieces, are found
         # across all of them.
-        use_joints = settings.earring_use_joints
-        parts = earring.object_parts(rests) if use_joints else None
         split = earring.earring_weights(np.concatenate([rig.local(rest.co) for rest in rests]), rig.lobes, count,
-                                        parts, use_joints)
+                                        earring.object_parts(rests), settings.earring_use_joints)
         starts = np.cumsum([0] + [len(rest.co) for rest in rests]).tolist()
         changed = 0
         removed = []
-        left = right = far = 0
+        left = right = far = pinned = 0
         for obj, rest, start in zip(targets, rests, starts):
             rows = slice(start, start + len(rest.co))
             # The earring weights replace the old ones; locked groups keep theirs, and the groups left empty
@@ -2791,6 +2789,7 @@ class MAGIC_FIT_OT_earring_weights(bpy.types.Operator):
             left += int(side.sum())
             right += int((~side).sum())
             far += int(split.far[rows][verts].sum())
+            pinned += int(split.pinned[rows][verts].sum())
         if new:
             self.report({'INFO'}, "Made armature '{:s}' with the head and earring bones".format(armature.name))
         elif added:
@@ -2806,6 +2805,9 @@ class MAGIC_FIT_OT_earring_weights(bpy.types.Operator):
                     self.report({'INFO'}, "{:s} earring: {:.1f} cm long, {:s}".format(
                         name, length * 100.0, "bends at {:d} joint(s) between its pieces".format(joints) if joints
                         else "its bones share the length evenly"))
+        if pinned:
+            self.report({'INFO'}, "{:d} vertices at the top of things worn higher up the ear (studs, where chains "
+                                  "hang from) follow {:s}".format(pinned, earring.HEAD))
         self.report({'INFO'}, "Gave {:d} mesh(es) earring weights for {:s}".format(changed, what) if changed else
                     "Nothing changed: the earrings have these weights already ({:s})".format(what))
         if far:
