@@ -709,6 +709,43 @@ def test_blink_peak():
                                         "({:.2f} mm)".format(side, gap * 1000.0))
 
 
+def test_turned_eyes():
+    """The game turns the eyeballs about their eye bones as they look aside. The game's own, centred on them, stay
+    behind the lids; a smaller eyeball moved forward to fill the socket (as many custom faces have) swings out of it
+    and comes through the skin, which is reported, with how far back it has to go to stay covered: far enough."""
+    face.clear_scene()
+    settings = use_settings()
+    objects = face.build()
+    data = face.reference()
+
+    def turns():
+        job = facing.setup(list(objects.values()), settings)
+        return facing.plan_face(job.meshes, job.skin, job.face, targets=job.parts).report
+
+    report = turns()
+    check(report["turns"] == {}, "turned eyes: the game's eyeballs stay behind the lids as they look aside")
+    eyes = data.eyes()
+    for side, eye in eyes.items():
+        # A sphere 0.75 of the game's, its front where the game's is (the tests' eyeballs are 0.97 of it).
+        face.reshape(objects["eye_" + side], lambda p, eye=eye: eye.center + 0.75 / 0.97 * (p - eye.center) +
+                     np.array((0.0, -0.25 * eye.radius, 0.0)))
+    report = turns()
+    for side, eye in sorted(eyes.items()):
+        turn = report["turns"].get(side)
+        check(turn is not None and turn["shows"][0] > facing.TURN_SHOWS and turn["back"] is not None and
+              abs(turn["offset"][1] - 250.0 * eye.radius) < 0.2,
+              "turned eyes: the {:s} eyeball moved forward comes through the skin looking outward ({:s})".format(
+                  side, str(turn)))
+    check(sum("eyeball comes through the skin" in warning for warning in report["warnings"]) == len(eyes),
+          "turned eyes: ...and it's in the report's warnings")
+    for side, turn in report["turns"].items():
+        if turn["back"] is not None:
+            face.reshape(objects["eye_" + side], lambda p, back=turn["back"]: p + np.array((0.0, back / 1000.0, 0.0)))
+    report = turns()
+    check(report["turns"] == {}, "turned eyes: moved back as far as the report says, they stay covered ({:s})".format(
+        str(report["turns"])))
+
+
 def test_neck():
     face.clear_scene()
     use_settings()
@@ -1077,7 +1114,7 @@ def main():
     magic_fit.register()
     try:
         for test in (test_reference, test_game_data, test_saved_data_rules, test_textools, test_first_use, test_features, test_closure_box, test_face_weights, test_shut_eyes, test_small_eyes,
-                     test_blink_peak, test_neck, test_moved_face,
+                     test_blink_peak, test_turned_eyes, test_neck, test_moved_face,
                      test_repairs, test_repairs_need_features, test_body_selected, test_masks, test_snap_lashes,
                      test_detect, test_lashes_alone, test_left_out, test_brush, test_readiness, test_mouth,
                      test_fill_meshes, test_mesh_rules, test_mouth_cases):

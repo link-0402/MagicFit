@@ -389,6 +389,19 @@ RIM_SPAN = 0.2
 # lines around an eye are narrow bands).
 EYEBALL_RMS = 0.05
 EYEBALL_SPAN = 90.0
+# Eyeballs looking aside: the game turns them about their eye bones while the lids stay put, so an eyeball centred on
+# its eye bone (as every game face's is) spins in place, but one whose middle lies off the bone (often in front of it:
+# a smaller eyeball moved forward to fill the socket) swings out of the socket and comes through the skin around the
+# opening. Each eyeball is turned EYE_TURN (radians) aside both ways about the upright (how far the game turns them is
+# a guess, not read from its files); more than TURN_SHOWS (mm²) showing outside its opening at rest is reported, with
+# how far back the eyeball has to go to stay covered, no more than TURN_COVERED (one cell of the scans, which are
+# TURN_SCAN_STEP apart) showing, found to TURN_BACK_STEP, up to TURN_BACK_MAX.
+EYE_TURN = math.radians(30.0)
+TURN_SHOWS = 1.0
+TURN_COVERED = 0.25
+TURN_SCAN_STEP = 0.0005
+TURN_BACK_STEP = 0.00025
+TURN_BACK_MAX = 0.008
 # Parts where the game's face has one of its own (ears, horns, scales, beards, lashes; half of the part
 # within this of it, once warped) take its weights.
 EXTRA_DISTANCE = 0.003
@@ -1059,11 +1072,12 @@ def eyeball_front(eye, origin, direction):
     return None if disc <= 0.0 else -b - math.sqrt(disc)
 
 
-def eye_opening(skin_bvh, eye, step=SCAN_STEP, box=None):
+def eye_opening(skin_bvh, eye, step=SCAN_STEP, box=None, anywhere=False):
     """Where the eyeball shows through the skin, seen from the front: (xs, zs, hits (nz, nx, 3) on the skin or
-    nan, open mask), xs and zs across and up about the eye's center, the mask the connected region around it.
-    With ``box`` (x0, x1, z0, z1, as xs and zs), rays are cast only within it and the rest of the window counts as
-    covered (hits nan), unless the opening found reaches the box's edge: then the whole window is scanned."""
+    nan, open mask), xs and zs across and up about the eye's center, the mask the connected region around it (with
+    ``anywhere``, everywhere it shows). With ``box`` (x0, x1, z0, z1, as xs and zs), rays are cast only within it and
+    the rest of the window counts as covered (hits nan), unless the opening found reaches the box's edge: then the
+    whole window is scanned."""
     c = eye.center
     half_w = max(EYE_WINDOW[0], 1.3 * eye.radius)
     half_h = max(EYE_WINDOW[1], 1.0 * eye.radius)
@@ -1087,6 +1101,8 @@ def eye_opening(skin_bvh, eye, step=SCAN_STEP, box=None):
                 hits[i, j] = hit[0]
             if front is not None:
                 shows[i, j] = hit[0] is None or hit[3] > front + EYEBALL_TOLERANCE
+    if anywhere:
+        return xs, zs, hits, shows
     mask = np.zeros_like(shows)
     rows, cols = np.nonzero(shows)
     if len(rows):
@@ -1968,6 +1984,81 @@ def open_area(skin_bvh, eye):
     """How much of the eyeball shows through the skin seen from the front, in mm²."""
     xs, zs, _hits, mask = eye_opening(skin_bvh, eye)
     return float(mask.sum() * (xs[1] - xs[0]) * (zs[1] - zs[0]) * 1e6)
+
+
+def turned_shows(skin_bvh, eye, side, back=0.0):
+    """mm² of eyeball ``eye`` (of side ``side``; moved ``back`` metres back, its eye bone staying put) showing
+    through the skin outside its opening at rest when turned EYE_TURN aside: (looking outward, looking inward)."""
+    if back:
+        eye = Eye(eye.center, eye.radius, eye.points + np.array((0.0, back, 0.0)), eye.tris, eye.found)
+    xs, zs, hits, rest = eye_opening(skin_bvh, eye, TURN_SCAN_STEP, anywhere=True)
+    cell = (xs[1] - xs[0]) * (zs[1] - zs[0]) * 1e6
+    # Only where it comes in front of the skin: turning into a gap at the opening's corners, which neither the eyeball
+    # nor the skin covered, isn't coming through.
+    covered = ~rest & ~np.isnan(hits[:, :, 0])
+    shows = []
+    for outward in (True, False):
+        # Turning about +Z takes the front (-Y) toward +X: outward for the left eye.
+        angle = EYE_TURN if outward == (side == 'l') else -EYE_TURN
+        c, s = math.cos(angle), math.sin(angle)
+        turn = np.identity(4)
+        turn[:2, :2] = ((c, -s), (s, c))
+        turn[:3, 3] = eye.center - turn[:3, :3] @ eye.center
+        mask = eye_opening(skin_bvh, eye.moved(turn), TURN_SCAN_STEP, anywhere=True)[3]
+        shows.append(float((mask & covered).sum() * cell))
+    return tuple(shows)
+
+
+def eyeball_turns(skin_bvh, eyes):
+    """{side: report} for the face's own eyeballs among ``eyes`` that come through the skin (``skin_bvh``) as they
+    turn to look aside (see EYE_TURN): ``shows`` (`turned_shows`), ``offset`` (where the middle of the sphere closest
+    to the eyeball lies from its eye bone, (across, forward, up) in mm, across positive toward the nose; None when it
+    isn't shaped like a sphere) and ``back`` (how far back it has to go to stay covered, in mm; None if TURN_BACK_MAX
+    doesn't do)."""
+    report = {}
+    for side, eye in sorted(eyes.items()):
+        if not eye.found or eye.bvh is None:
+            continue
+        shows = turned_shows(skin_bvh, eye, side)
+        if max(shows) <= TURN_SHOWS:
+            continue
+        center, radius, rms = fit_sphere(eye.points)
+        offset = None
+        if rms <= EYEBALL_RMS * radius:
+            d = (center - eye.center) * 1000.0
+            offset = (float(-d[0] if side == 'l' else d[0]), float(-d[1]), float(d[2]))
+        # The least move back that keeps it covered, in steps twice TURN_BACK_STEP, then the one before tried too: moved
+        # too far back (behind its eye bone), it comes through on the other side, so no halving.
+        back = None
+        for k in range(2, int(round(TURN_BACK_MAX / TURN_BACK_STEP)) + 1, 2):
+            if max(turned_shows(skin_bvh, eye, side, k * TURN_BACK_STEP)) <= TURN_COVERED:
+                k -= max(turned_shows(skin_bvh, eye, side, (k - 1) * TURN_BACK_STEP)) <= TURN_COVERED
+                back = k * TURN_BACK_STEP * 1000.0
+                break
+        report[side] = {"shows": shows, "offset": offset, "back": back}
+    return report
+
+
+def turn_warning(side, turn):
+    """The report's warning about eyeball ``side`` coming through the skin as it turns (an `eyeball_turns` report)."""
+    name = "left" if side == 'l' else "right"
+    out, inward = turn["shows"]
+    looking = " and ".join("{:.1f} mm² looking {:s}".format(area, way)
+                           for area, way in ((out, "outward"), (inward, "inward")) if area > TURN_SHOWS)
+    text = "the {:s} eyeball comes through the skin around the eye when it looks aside ({:s}, turned {:.0f}°)".format(
+        name, looking, math.degrees(EYE_TURN))
+    offset = turn["offset"]
+    if offset is not None and math.hypot(*offset) >= 0.5:
+        parts = ["{:.1f} mm {:s}".format(abs(value), positive if value > 0 else negative)
+                 for value, positive, negative in zip(offset, ("toward the nose", "in front", "above"),
+                                                      ("away from the nose", "behind", "below"))
+                 if abs(value) >= 0.5]
+        text += ": the game turns it about its eye bone, and its middle is {:s} of that bone".format(", ".join(parts))
+    if turn["back"] is not None:
+        text += "; moving it {:.2f} mm back keeps it covered".format(turn["back"])
+    else:
+        text += "; moving it back by up to {:.0f} mm doesn't keep it covered".format(TURN_BACK_MAX * 1000.0)
+    return text
 
 
 def posed_opening(points, tris, names, weights, eye, side, skeleton, pose, share=1.0, step=SCAN_STEP, box=None):
@@ -4214,6 +4305,10 @@ def plan_face(meshes, skin_index, reference, *, skin='ALL', parts='ALL', targets
         plan.report["warnings"].append("no eyeballs were among the meshes, so the eyes were measured against spheres "
                                        "of the game's eyeballs: add them (under Meshes, or with no Face set there, to "
                                        "the selection) for a closer fit")
+    if skin in ('ALL', 'EYES'):
+        # No weights keep these behind the lids: the eyeballs' place does.
+        plan.report["turns"] = eyeball_turns(fit.features.bvh, eyes)
+        plan.report["warnings"] += [turn_warning(side, turn) for side, turn in plan.report["turns"].items()]
     # Every goal is over the game face's bones, the eyeballs' and the skin's own.
     names = list(reference.names)
     names += [bone for bone in dict.fromkeys(eyeball_bone(skeleton, side) for side in SIDES) if bone not in names]
