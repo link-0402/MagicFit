@@ -434,6 +434,47 @@ def test_even_joints():
               .format(name, [round(spread, 3) for spread in spreads], short))
 
 
+def wavy_strip(amplitude=0.03, wavelength=0.30, rows=60):
+    """A 3 cm strip hanging 40 cm down behind the head, waving ``amplitude`` (metres) from side to side once every
+    ``wavelength`` down it, like a wavy ribbon card: (points, triangles)."""
+    top, bottom = np.array((0.0, 0.08, 1.53)), np.array((0.0, 0.10, 1.13))
+    verts = []
+    for i in range(rows + 1):
+        centre = top + (bottom - top) * (i / rows)
+        centre[0] += amplitude * math.sin(2.0 * math.pi * float(np.linalg.norm(bottom - top)) * (i / rows) / wavelength)
+        verts += [centre - (0.015, 0.0, 0.0), centre + (0.015, 0.0, 0.0)]
+    co, tris, _ranges = join([(np.array(verts), [(2 * i, 2 * i + 1, 2 * i + 3, 2 * i + 2) for i in range(rows)])])
+    return co, tris
+
+
+def test_wavy_lock_straight():
+    # A wavy card swings 3 cm from side to side as it hangs; its chain runs down the card's general line in one
+    # arc, as the game's chains do (none bends over 23 degrees between bones, none crosses the line from its root
+    # to its tip), not from crest to crest.
+    model_rig = rig()
+    co, tris = wavy_strip()
+    chains = hairrig.plan_rig(co, tris, model_rig)
+    describe_chains(chains, co, [])
+    check(len(chains) == 1, "wavy lock: one chain ({:d})".format(len(chains)))
+    if len(chains) != 1:
+        return
+    chain = chains[0]
+    line = np.vstack((chain.joints, chain.tip))
+    chord = (line[-1] - line[0]) / np.linalg.norm(line[-1] - line[0])
+    offsets = line[1:-1] - line[0]
+    offsets -= np.outer(offsets @ chord, chord)
+    widest = offsets[int(np.argmax(np.linalg.norm(offsets, axis=1)))]
+    across = offsets @ (widest / max(float(np.linalg.norm(widest)), 1e-12))
+    bones = np.diff(line, axis=0)
+    bones /= np.linalg.norm(bones, axis=1)[:, None]
+    bends = [math.degrees(math.acos(float(np.clip(a @ b, -1.0, 1.0)))) for a, b in zip(bones[:-1], bones[1:])]
+    check(float(across.min()) >= -0.005 and max(bends) <= 25.0,
+          "wavy lock: the joints stay on one side of the line from root to tip, bends up to 25 degrees "
+          "(offsets {} m, bends {})".format(np.round(across, 3).tolist(), [round(bend, 1) for bend in bends]))
+    check(off_hair(chain, co) <= hairrig.SPINE_REACH,
+          "wavy lock: the chain stays on its hair ({:.4f} m)".format(off_hair(chain, co)))
+
+
 def test_kinds():
     for angle, length, whole, kind in ((10, 0.1, False, "bangs"), (10, 0.3, False, "side"), (80, 0.5, False, "side"),
                                        (150, 0.4, True, "ponytail"), (150, 0.4, False, "back"),
@@ -1556,7 +1597,8 @@ def main():
     try:
         for test in (test_long_hair_locks, test_one_piece_long_hair, test_separate_strands, test_crumbs,
                      test_parted_locks, test_long_hair_chains, test_bangs_chain, test_pivot_at_root, test_even_joints,
-                     test_kinds, test_budget, test_card_hair_kinds, test_card_hair_time, test_moved_hair,
+                     test_wavy_lock_straight, test_kinds, test_budget, test_card_hair_kinds, test_card_hair_time,
+                     test_moved_hair,
                      test_flat_fringe, test_neck_layer, test_neck_only_layer, test_cap_rim, test_bun,
                      test_roots_near_scalp, test_twins_merge, test_merge_stays_on_hair, test_lone_kind_survives,
                      test_maeve_chains,
