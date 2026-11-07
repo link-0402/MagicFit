@@ -1827,7 +1827,7 @@ class BlenderTests(TransferScene, unittest.TestCase):
         points, _triangles, _ = util.get_obj_arrs_world(strap)
         outside = np.maximum(np.abs(points[:, :2] - [0.395, 0.1]) - [0.01, 0.03], 0.0)
         gap = np.hypot(np.linalg.norm(outside, axis=1), 0.0005)
-        reach = transfer.HOLD_DISTANCE + transfer.HOLD_BLEND * np.hypot(0.02, 0.06)
+        reach = transfer.HOLD_DISTANCE + transfer.HOLD_BLEND * min(np.hypot(0.02, 0.06), transfer.HOLD_SIZE_CAP)
         touching, far = gap <= transfer.HOLD_DISTANCE, gap > reach + 1e-3
         self.assertTrue(touching.any() and far.any())
         np.testing.assert_allclose(held[touching], np.tile(rigid[0], (touching.sum(), 1)), atol=1e-5)
@@ -1835,6 +1835,35 @@ class BlenderTests(TransferScene, unittest.TestCase):
         between = ~touching & ~far
         self.assertGreater(np.abs(held[between] - loose[between]).max(), 0.05)
         np.testing.assert_allclose(held.sum(axis=1), 1.0, atol=1e-5)
+
+    def test_a_large_rigid_piece_is_held_only_where_it_touches(self):
+        # A 20 cm rigid band floating 5 mm over a strap, dipping onto it only at its far end: the strap holds it
+        # there and nowhere else, like a dress touching an underbust band at its sides. The hold scales with the
+        # piece only up to HOLD_SIZE_CAP, so neither its weights nor the strap's come from the whole strap.
+        strap = self.rigid_scene('Strap')
+        self.settings.apply_to_selected = True
+        self.select(strap)
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        loose = self.read(strap, self.RIGID_BONES)
+        for group in list(strap.vertex_groups):
+            strap.vertex_groups.remove(group)
+        v, f = flat_grid(np.linspace(0.25, 0.45, 11), np.linspace(0.07, 0.13, 4), 0.006)
+        v[v[:, 0] > 0.425, 2] = 0.0015
+        band = self.mesh('Band', v, f)
+        band.magic_fit_transfer.rigid = True
+        self.select(band, strap)
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        held, rigid = self.read(strap, self.RIGID_BONES), self.read(band, self.RIGID_BONES)
+        self.assertGreater(np.hypot(0.2, 0.06), 2.0 * transfer.HOLD_SIZE_CAP)  # the cap is what limits it here
+        points = util.get_obj_arrs_world(strap)[0]
+        far = points[:, 0] < 0.29  # 16 cm and more from where the band touches
+        self.assertTrue(far.any())
+        np.testing.assert_allclose(held[far], loose[far], atol=1e-6)
+        near = points[:, 0] > 0.43
+        self.assertGreater(np.abs(held[near] - loose[near]).max(), 0.05)  # it still holds on there
+        # The band moves as the strap around it, not the strap's far end (bone A, x < 0.1, 15 cm from the band).
+        self.assertGreater(loose[points[:, 0] < 0.1, 0].max(), 0.4)
+        self.assertEqual(float(rigid[0][0]), 0.0)
 
     def test_layers_on_a_held_mesh_stay_together(self):
         # A trim lying 1 mm over a strap, in the same mesh, near the ring the strap holds: it blends with the

@@ -33,6 +33,9 @@ HOLD_BLEND = 3.0
 # A piece they hold moves as they do around it: the average of their weights within HOLD_AVERAGE times its size,
 # fading out with distance (and fully where they touch it), so a ring follows the bra it's on.
 HOLD_AVERAGE = 2.0
+# Both reach with the piece's size only up to this. A 22 cm underbust band touching a dress at its sides alone
+# reached 66 cm without it: it rewrote 99 % of the dress (up to 58 mm off posed) and moved as its average.
+HOLD_SIZE_CAP = 0.05
 # Layers lying on each other (a trim on its panel) are linked this many times as strongly as a typical edge
 # along the mesh in that blend, so they get the same weights and stay together.
 HOLD_LAYER_LINK = 100.0
@@ -886,14 +889,14 @@ def _holding_weights(vertices, triangles, pieces, others, names, sizes):
     """What holds each piece of a rigid mesh (``vertices``, ``triangles``, a piece per vertex, ``sizes`` per
     piece): {piece: (staged weights of the ``others``' vertices around it, in columns ``names``; their areas
     times how much they count)}, for the pieces they touch (within HOLD_DISTANCE). Vertices count fully within
-    HOLD_DISTANCE and fade out (smoothstep) by HOLD_AVERAGE times the piece's size, on the loose parts touching
+    HOLD_DISTANCE and fade out (smoothstep) by HOLD_AVERAGE times the piece's size (up to HOLD_SIZE_CAP), on the loose parts touching
     it."""
     if not others or not len(triangles):
         return {}
     vertices = np.asarray(vertices, dtype=np.float64)
     triangles = np.asarray(triangles)
     tree = BVHTree.FromPolygons(vertices.tolist(), triangles.tolist(), all_triangles=True)
-    reaches = HOLD_DISTANCE + HOLD_AVERAGE * sizes
+    reaches = HOLD_DISTANCE + HOLD_AVERAGE * np.minimum(sizes, HOLD_SIZE_CAP)
     reach = float(reaches.max())
     low, high = vertices.min(axis=0) - reach, vertices.max(axis=0) + reach
     found = {}
@@ -943,7 +946,7 @@ def _holding_weights(vertices, triangles, pieces, others, names, sizes):
 def hold_rigid_pieces(targets, made_rigid, settings, transferred_deform_names):
     """Make the other meshes of the transfer hold onto the Rigid ones (``made_rigid`` per target: True for those
     made rigid, None for those that aren't Rigid): their vertices within HOLD_DISTANCE of a rigid piece take its
-    weights at their closest point there, and the change fades out harmonically along the mesh over HOLD_BLEND times the piece's size, so a strap stays
+    weights at their closest point there, and the change fades out harmonically along the mesh over HOLD_BLEND times the piece's size (up to HOLD_SIZE_CAP), so a strap stays
     wrapped around its ring and what doesn't touch the piece keeps its weights. Locked groups keep their
     weights, the group limit holds, and only vertices the transfer writes change. Returns the names of the
     meshes that changed."""
@@ -958,7 +961,7 @@ def hold_rigid_pieces(targets, made_rigid, settings, transferred_deform_names):
         pieces = target.get('rigid_pieces')
         if pieces is None:
             pieces = rigid_pieces(vertices, triangles)
-        size = piece_sizes(vertices, pieces)
+        size = np.minimum(piece_sizes(vertices, pieces), HOLD_SIZE_CAP)
         reaches.append(HOLD_DISTANCE + HOLD_BLEND * size[pieces[triangles[:, 0]]])
     offsets = np.cumsum([0] + [len(vertices) for vertices, _triangles in surfaces])
     points = np.concatenate([vertices for vertices, _triangles in surfaces]).astype(np.float64)
