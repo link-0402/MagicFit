@@ -132,6 +132,18 @@ TWIN_REACH = 0.005
 # Locks of one kind whose roots lie closer than this (metres) merge, budget or not: the chains follow the
 # hair's layout, not every card (plan_rig's ``spacing``, the Chain Spacing setting).
 CHAIN_SPACING = 0.10
+# A column of a sheet with less hair than this (m²) joins its nearer neighbor (`_columns`); a sheet's only column
+# stays. Measured: such columns hold 0.0010-0.0025 m², the smallest one with real hair 0.0129 m².
+MIN_COLUMN_AREA = 0.005
+# The most columns of back hair: the middle one centered straight behind and one to either side, whatever the
+# hair's width. Wider columns instead jump from 3 back chains to 1 on symmetric hair.
+BACK_COLUMNS = 3
+# The most columns on each side: the frontmost with hair and one for everything behind it.
+SIDE_COLUMNS = 2
+# A rig over its budget (MAX_HAIR_BONES) keeps its chains and lengthens their bones: BONE_SPACING grows by this
+# and every chain is planned again, until the rig fits or every chain has CHAIN_BONES[0] bones (user ruling: scale
+# the bones up rather than drop back chains).
+BONE_GROWTH = 1.25
 # A merge is refused when the merged lock's chain has a joint or its tip farther than this (metres) from the
 # lock's own hair: its spine would run through the space between the two locks...
 SPINE_REACH = 0.03
@@ -635,6 +647,48 @@ def _root_arcs(rig, at, weights):
     mean = math.atan2(float((weights * np.sin(theta)).sum()), float((weights * np.cos(theta)).sum()))
     radius = np.hypot(model[:, 0], model[:, 1] - axis_y)
     return (theta - mean + math.pi) % (2.0 * math.pi) - math.pi, float(np.average(radius, weights=weights))
+
+
+def _polar(rig, at):
+    """The angles (radians) of world points ``at`` around the head's vertical axis in ``rig``'s model space, 0
+    straight in front (-Y), positive toward +X, +-pi behind, and their distances from that axis (metres)."""
+    model = rig.model(at)
+    axis_y = rig.by_name[HEAD].head[1]
+    return np.arctan2(model[:, 0], -(model[:, 1] - axis_y)), np.hypot(model[:, 0], model[:, 1] - axis_y)
+
+
+def _columns(kind, theta, areas, radius, width):
+    """The locks of a sheet of ``kind`` cut into columns ``width`` wide (metres) by their roots' angles ``theta``
+    (`_polar`) times the sheet's ``radius``: lists of indices into ``theta`` and ``areas`` (m²), one per column by
+    column number. Back columns are centered straight behind, at most BACK_COLUMNS; bangs columns straight in
+    front; side columns start at the front, at most SIDE_COLUMNS, the last taking everything behind it. A column
+    under MIN_COLUMN_AREA joins the nearest other (by number; a tie goes to the larger, then the lower)."""
+    theta = np.asarray(theta, dtype=np.float64)
+    areas = np.asarray(areas, dtype=np.float64)
+    if kind == "back":
+        # theta - pi, wrapped to [-pi, pi).
+        half = BACK_COLUMNS // 2
+        column = np.clip(np.rint((theta % (2.0 * math.pi) - math.pi) * radius / width), -half, half)
+    elif kind == "side":
+        column = np.floor(np.abs(theta) * radius / width)
+    else:
+        column = np.rint(theta * radius / width)
+    column = column.astype(np.int64)
+    while True:
+        numbers, at = np.unique(column, return_inverse=True)
+        area = np.bincount(at, areas, minlength=len(numbers))
+        small = np.flatnonzero(area < MIN_COLUMN_AREA)
+        if len(numbers) < 2 or not len(small):
+            break
+        joins = small[int(np.argmin(area[small]))]
+        into = min((k for k in range(len(numbers)) if k != joins),
+                   key=lambda k: (abs(int(numbers[k] - numbers[joins])), -area[k], numbers[k]))
+        column[at == joins] = numbers[into]
+    numbers = np.unique(column)
+    if kind == "side" and len(numbers) > SIDE_COLUMNS:
+        column[column > numbers[SIDE_COLUMNS - 1]] = numbers[SIDE_COLUMNS - 1]
+        numbers = numbers[:SIDE_COLUMNS]
+    return [np.flatnonzero(column == number).tolist() for number in numbers]
 
 
 def _merge(target, small, mesh, points, rig, graph=None):

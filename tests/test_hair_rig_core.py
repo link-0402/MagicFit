@@ -484,6 +484,31 @@ def test_kinds():
     check(set(hairrig.KINDS) == {"bangs", "side", "back", "ponytail"}, "kinds: the four kinds")
 
 
+def test_columns():
+    r, w = 0.1, 0.08
+    side_areas = (0.002, 0.02, 0.02, 0.02)
+    for case, kind, arcs, areas, expected in (
+            ("wide back", "back", (-0.12, -0.05, 0.0, 0.03, 0.06, 0.20), None, [[0, 1], [2, 3], [4, 5]]),
+            ("narrow back", "back", (-0.02, 0.0, 0.03), None, [[0, 1, 2]]),
+            ("bangs, no limit", "bangs", (-0.17, -0.08, 0.0, 0.09, 0.16), None, [[0], [1], [2], [3], [4]]),
+            ("small edge column", "back", (-0.08, 0.0, 0.08), (0.002, 0.02, 0.02), [[0, 1], [2]]),
+            ("tie goes to the larger", "back", (-0.08, 0.0, 0.08), (0.02, 0.002, 0.03), [[0], [1, 2]]),
+            ("a sheet's only column", "back", (0.0,), (0.001,), [[0]]),
+            ("stray before 3 side columns", "side", (0.01, 0.09, 0.17, 0.25), side_areas, [[0, 1], [2, 3]]),
+            ("the other side", "side", (-0.01, -0.09, -0.17, -0.25), side_areas, [[0, 1], [2, 3]])):
+        theta = np.array(arcs) / r + (math.pi if kind == "back" else 0.0)
+        got = hairrig._columns(kind, theta, np.full(len(arcs), 0.01) if areas is None else np.array(areas), r, w)
+        check(got == expected, "columns: {:s} gives {} ({})".format(case, expected, got))
+    model_rig = rig()
+    head = np.asarray(model_rig.by_name[hairing.HEAD].head, dtype=np.float64) + model_rig.offset
+    theta, radius = hairrig._polar(model_rig, np.array((head + (0.0, 0.1, 0.0), head + (0.1, 0.0, 0.0))))
+    # The head bone is stored in single precision, its X a little off 0.
+    check(abs(abs(float(theta[0])) - math.pi) < 1e-5 and abs(float(radius[0]) - 0.1) < 1e-5
+          and abs(float(theta[1]) - 0.5 * math.pi) < 1e-5,
+          "columns: a point behind the head is at |theta| pi, radius 0.1, one to +X at pi/2 ({}, {})".format(
+              np.round(theta, 6).tolist(), np.round(radius, 6).tolist()))
+
+
 def test_budget():
     model_rig = rig()
     co, tris, _parts = one_piece_long_hair()
@@ -1630,7 +1655,7 @@ def main():
     try:
         for test in (test_long_hair_locks, test_one_piece_long_hair, test_separate_strands, test_crumbs,
                      test_parted_locks, test_long_hair_chains, test_bangs_chain, test_pivot_at_root, test_even_joints,
-                     test_wavy_lock_straight, test_kinds, test_budget, test_card_hair_kinds, test_card_hair_time,
+                     test_wavy_lock_straight, test_kinds, test_columns, test_budget, test_card_hair_kinds, test_card_hair_time,
                      test_moved_hair,
                      test_flat_fringe, test_neck_layer, test_neck_only_layer, test_cap_rim, test_bun,
                      test_roots_near_scalp, test_twins_merge, test_merge_stays_on_hair, test_hollow_ponytail,
