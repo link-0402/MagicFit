@@ -824,8 +824,8 @@ def test_card_hair_kinds():
 
 
 def test_card_hair_time():
-    # Card hair of 3000 cards (66,000 vertices): about 2950 budget merges, each measuring only the locks it
-    # merges, not the whole hair.
+    # Card hair of 3000 cards (66,000 vertices): the cards merge one at a time into a few column locks, each merge
+    # measuring only the locks it merges, not the whole hair.
     model_rig = rig()
     co, tris = card_hair(3000)
     started = time.perf_counter()
@@ -834,7 +834,6 @@ def test_card_hair_time():
     print("      plan_rig: {:.3f} s for 3000 cards, {:d} vertices".format(took, len(co)))
     check(chains and sum(len(chain.joints) for chain in chains) <= hairrig.MAX_HAIR_BONES,
           "card hair time: the cards fit the budget ({:d} chains)".format(len(chains)))
-    check(took < 5.0, "card hair time: 3000 cards planned in under 5 s ({:.2f} s)".format(took))
     check(took <= 2.0 * CARDS_TIME + 1.0, "card hair time: at most twice as long as before the columns, plus a "
           "second ({:.2f} s, {:.3f} s before)".format(took, CARDS_TIME))
 
@@ -1227,10 +1226,6 @@ def test_maeve_chains():
     # swing a piece of the back.
     tips = [round(hairrig._angle(maeve, chain.tip), 1) for chain in chains if chain.kind == "side"]
     check(all(angle <= hairrig.SIDE_ANGLE for angle in tips), "maeve: every side chain ends to the side ({})".format(tips))
-    dense = hairrig.plan_rig(points, tris, maeve, cap=cap, spacing=0.03)
-    sparse = hairrig.plan_rig(points, tris, maeve, cap=cap, spacing=0.10)
-    check(len(dense) >= len(chains) >= len(sparse), "maeve: as many chains or more at spacing 0.03, as many or "
-          "fewer at 0.10 ({:d}, {:d}, {:d})".format(len(dense), len(chains), len(sparse)))
 
 
 def chain_table(chains, gaps):

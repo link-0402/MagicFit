@@ -19,12 +19,15 @@ Per hair and width it measures chains and bones per kind; each chain's drift (th
 from its first joint), off hair (the farthest of its joints and tip from its own vertices), sharpest bend between two
 bones, and shoulder (on back and side chains that cross the shoulders' height, `j_sako_l/r`: the distance along the
 chain from there to the nearest joint); crossing neighbors (their arc order differs from their roots' at a height
-both lines cover, every 1 cm); converging neighbors (the tips' arc gap under half the roots'); symmetry, on hair that
+both lines cover, every 1 cm, so a pair already out of order at the top of the heights both cover counts too);
+converging neighbors (the tips' arc gap under half the roots'); symmetry, on hair that
 mirrors (MIRROR_P95): the farthest a chain's joints, mirrored, lie from the nearest chain's (by first joint), over the
 joints both have; far hair (the area of hanging vertices beyond FAR_HAIR of every chain's line); tall columns (chains
 whose locks' roots spread more than TALL_COLUMN in Z); light hair in columns (light locks' area in chains of a sheet);
 and the smallest column chain's lock area. A lock (`hairrig.find_locks`) belongs to the chain holding most of its
-vertices; areas come from `hairing.vertex_areas` (a lock's own `area`, on the welded mesh, for the locks).
+vertices. Far and hanging areas sum `hairing.vertex_areas` over the mesh as loaded (both sides of double-sided cards);
+lock areas (the column chains', tall columns', light hair in columns) are the locks' own `area`, on the welded mesh,
+as `_columns` compares them. The two don't compare with each other.
 
 ``--out`` gets {"checkout", "commit", "widths", "hairs": {label: {width: metrics}}, "skipped": {label: reason}}.
 """
