@@ -54,7 +54,8 @@ Then it plans a chain of bones down each lock:
   its chain; only when no two locks share a kind does the smallest merge into the nearest of any kind.
 - A merge (other than of twins) stays on the hair: it is refused when the merged lock's chain has a joint or
   its tip farther than SPINE_REACH from the lock's own hair (two locks far apart, its spine running through
-  the space between them), and the next nearest is tried. A lock with no partner that keeps it on the hair
+  the space between them) and not enclosed by it there (ENCLOSED_GAP: the middle of a hollow ponytail), and
+  the next nearest is tried. A lock with no partner that keeps it on the hair
   stays as it is; over the budget the next smallest lock merges instead, and only when no lock has a merge
   that stays on the hair does the smallest merge into the nearest after all.
 - The merged lock hangs from the roots of both (its root is their mean) and is planned again. It is kept
@@ -132,8 +133,13 @@ TWIN_REACH = 0.005
 # hair's layout, not every card (plan_rig's ``spacing``, the Chain Spacing setting).
 CHAIN_SPACING = 0.10
 # A merge is refused when the merged lock's chain has a joint or its tip farther than this (metres) from the
-# lock's own hair: its spine would run through the space between the two locks.
+# lock's own hair: its spine would run through the space between the two locks...
 SPINE_REACH = 0.03
+# ...unless the hair encloses it there: seen along the chain, the lock's own vertices within WHOLE_WIDTH of the
+# joint leave no gap around it wider than this (degrees). The middle of a hollow ponytail of strands, some rooted
+# at the crown and some at the tie, lies 3.2 cm from its nearest strand with gaps of at most 16 degrees; a spine
+# between a left and a right fringe has gaps of 149 degrees and more.
+ENCLOSED_GAP = 90.0
 # Two whole locks merged are still whole (WHOLE_WIDTH) only when one's roots lie within the other's around the
 # head, give or take this (radians): layers of one ponytail. Strands or cards side by side make back hair.
 WITHIN_SLACK = 1e-6
@@ -694,15 +700,36 @@ def _merge(target, small, mesh, points, rig, graph=None):
                 target.light and small.light)
 
 
+def _enclosed(own, point, direction):
+    """Whether hair ``own`` ((n, 3)) surrounds ``point`` seen along ``direction`` (unit): its vertices within
+    WHOLE_WIDTH of the point leave no gap around it wider than ENCLOSED_GAP."""
+    offset = own - point
+    offset = offset[np.einsum('ij,ij->i', offset, offset) <= WHOLE_WIDTH * WHOLE_WIDTH]
+    if len(offset) < 3:
+        return False
+    u = np.cross(direction, (1.0, 0.0, 0.0) if abs(direction[0]) < 0.9 else (0.0, 1.0, 0.0))
+    u /= np.linalg.norm(u)
+    v = np.cross(direction, u)
+    around = np.sort(np.arctan2(offset @ v, offset @ u))
+    gaps = np.diff(np.concatenate((around, [around[0] + 2.0 * math.pi])))
+    return bool(math.degrees(float(gaps.max())) <= ENCLOSED_GAP)
+
+
 def _on_hair(points, lock, chain):
-    """Whether ``chain`` (`ChainPlan`, or None) runs down ``lock``'s own hair: its joints on the spine
-    (``middle``) and its tip all within SPINE_REACH of the lock's own (not joined) vertices."""
+    """Whether ``chain`` (`ChainPlan`, or None) runs down ``lock``'s own hair: each of its joints on the spine
+    (``middle``) and its tip within SPINE_REACH of the lock's own (not joined) vertices, or enclosed by them
+    (`_enclosed`, seen along the chain there: a hollow ponytail's middle)."""
     own = points[lock.vertices[~lock.joined]]
     if chain is None or not len(own):
         return False
     line = np.vstack((chain.middle, chain.tip))
     gap = np.min(((own[None, :, :] - line[:, None, :]) ** 2).sum(axis=2), axis=1)
-    return bool(gap.max() <= SPINE_REACH * SPINE_REACH)
+    for k in np.flatnonzero(gap > SPINE_REACH * SPINE_REACH).tolist():
+        direction = line[min(k + 1, len(line) - 1)] - line[max(k - 1, 0)]
+        length = float(np.linalg.norm(direction))
+        if length <= 0.0 or not _enclosed(own, line[k], direction / length):
+            return False
+    return True
 
 
 def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES, spacing=CHAIN_SPACING):

@@ -869,6 +869,39 @@ def test_merge_stays_on_hair():
           "({:d} chains, {} m)".format(len(spaced), [round(f, 4) for f in far]))
 
 
+def hollow_tail(count=12):
+    """A hollow ponytail of ``count`` 1.2 cm strips, each its own loose part, in a cone behind the head: their
+    tops on a 1.2 cm ring, their bottoms 41 cm lower on a 5 cm ring. (points, triangles, each strip's indices)."""
+    strips = []
+    for k in range(count):
+        a = 2.0 * math.pi * k / count
+        ring = np.array((math.cos(a), math.sin(a), 0.0))
+        side = np.array((-math.sin(a), math.cos(a), 0.0))
+        strips.append(hair.strip(np.array((0.0, 0.10, 1.53)) + 0.012 * ring,
+                                 np.array((0.0, 0.17, 1.12)) + 0.05 * ring, 0.012, side, rows=20))
+    return join(strips)
+
+
+def test_hollow_ponytail():
+    # Merged from all its strips, the tail's chain runs down its hollow middle, up to 5 cm from the nearest
+    # strip: farther than SPINE_REACH, but the strips enclose it. One chain, at the default spacing too.
+    model_rig = rig()
+    co, tris, ranges = hollow_tail()
+    chains = hairrig.plan_rig(co, tris, model_rig)
+    describe_chains(chains, co, [])
+    check(len(chains) == 1 and all(np.isin(strip, chains[0].vertices).any() for strip in ranges)
+          and off_hair(chains[0], co) > hairrig.SPINE_REACH,
+          "hollow ponytail: one chain down the middle of all its strips ({:d} chains, {} m off the hair)".format(
+              len(chains), [round(off_hair(chain, co), 3) for chain in chains]))
+    old = hairrig.ENCLOSED_GAP
+    try:
+        hairrig.ENCLOSED_GAP = 0.0
+        apart = hairrig.plan_rig(co, tris, model_rig)
+    finally:
+        hairrig.ENCLOSED_GAP = old
+    check(len(apart) >= 2, "hollow ponytail: ...where only SPINE_REACH would keep it in {:d} chains".format(len(apart)))
+
+
 def test_lone_kind_survives():
     # One bangs lock (the flat fringe) and the neck sheet's back locks: over the budget, the back locks merge
     # with each other and the fringe keeps its bangs chain, though it is the smallest lock.
@@ -1600,7 +1633,8 @@ def main():
                      test_wavy_lock_straight, test_kinds, test_budget, test_card_hair_kinds, test_card_hair_time,
                      test_moved_hair,
                      test_flat_fringe, test_neck_layer, test_neck_only_layer, test_cap_rim, test_bun,
-                     test_roots_near_scalp, test_twins_merge, test_merge_stays_on_hair, test_lone_kind_survives,
+                     test_roots_near_scalp, test_twins_merge, test_merge_stays_on_hair, test_hollow_ponytail,
+                     test_lone_kind_survives,
                      test_maeve_chains,
                      test_maeve_weights, test_armature_rig, test_weights_follow_locks,
                      test_edited_rig_is_kept, test_branch_starts_chain, test_chain_collection, test_bones_hash,
