@@ -1365,10 +1365,15 @@ def state_chains(armature):
     return [(chain.kind, chain.bones.split(",")) for chain in armature.magic_fit_hair_rig.chains]
 
 
+def chain_json(kind, bones, sheet, order):
+    """A chain as the rig property lists it: its sheet and order only when it is a column's (sheet >= 0)."""
+    return dict({"kind": kind, "bones": bones}, **({"sheet": sheet, "order": order} if sheet >= 0 else {}))
+
+
 def json_matches_state(armature):
     state = armature.magic_fit_hair_rig
-    return rig_json(armature) == {"race": state.race, "chains": [{"kind": kind, "bones": bones}
-                                                                 for kind, bones in state_chains(armature)]}
+    return rig_json(armature) == {"race": state.race, "version": 2, "chains": [
+        chain_json(chain.kind, chain.bones.split(","), chain.sheet, chain.order) for chain in state.chains]}
 
 
 def test_armature_rig():
@@ -1405,9 +1410,9 @@ def test_armature_rig():
         away.append(float(np.dot(z[:2], out / max(np.linalg.norm(out), 1e-9))))
     check(min(away) > 0.0, "armature rig: every bone's Z axis points away from the head's axis ({:.3f})".format(
         min(away)))
-    check(rig_json(armature) == {"race": hair.RACE, "chains": [
-        {"kind": plan.kind, "bones": [hairrig.bone_name(c, b) for b in range(len(plan.joints))]}
-        for c, plan in enumerate(plans)]}, "armature rig: the rig property lists the race, kinds and bones")
+    check(rig_json(armature) == {"race": hair.RACE, "version": 2, "chains": [
+        chain_json(plan.kind, [hairrig.bone_name(c, b) for b in range(len(plan.joints))], plan.sheet, plan.order)
+        for c, plan in enumerate(plans)]}, "armature rig: the rig property lists the race, kinds, bones and columns")
     check(json_matches_state(armature) and armature.magic_fit_hair_rig.race == hair.RACE,
           "armature rig: the state holds the same")
     check(hairrig.has_rig(armature, hair.RACE) and not hairrig.has_rig(armature, "c0801")
@@ -1716,6 +1721,82 @@ def test_state_keeps_light():
     kept("after the rebuild")
 
 
+def state_columns(armature):
+    """{first bone's name: (sheet, order)} of each chain in the armature's rig state."""
+    return {chain.bones.split(",")[0]: (chain.sheet, chain.order) for chain in armature.magic_fit_hair_rig.chains}
+
+
+def json_columns(armature):
+    """{first bone's name: (sheet, order)} of the chains the rig property lists with a sheet."""
+    return {chain["bones"][0]: (chain["sheet"], chain["order"]) for chain in rig_json(armature)["chains"]
+            if "sheet" in chain or "order" in chain}
+
+
+def test_state_keeps_columns():
+    _obj, armature, plans, _bones, co, tris, _part, _names = rig_scene()
+    describe_columns(plans)
+    planned = {hairrig.bone_name(c, 0): (plan.sheet, plan.order) for c, plan in enumerate(plans)}
+    columns = {name: column for name, column in planned.items() if column[0] >= 0}
+    check(columns and any(plan.kind == "ponytail" and (plan.sheet, plan.order) == (-1, -1) for plan in plans),
+          "columns: the long hair has column chains and a ponytail without a sheet ({})".format(planned))
+    check(state_columns(armature) == planned, "columns: each chain keeps its plan's sheet and order ({})".format(
+        state_columns(armature)))
+    check(json_columns(armature) == columns and json_matches_state(armature),
+          "columns: the rig property lists sheet and order for exactly the column chains ({})".format(
+              json_columns(armature)))
+    hairrig.sync_rig(bpy.context, armature, hair.RACE)
+    check(state_columns(armature) == planned and json_columns(armature) == columns and json_matches_state(armature),
+          "columns: sync_rig changes nothing ({})".format(state_columns(armature)))
+    # A column chain's kind set in the list: the rig property is written again, its sheet and order still there.
+    state = armature.magic_fit_hair_rig
+    index = next(i for i, chain in enumerate(state.chains) if chain.sheet >= 0)
+    state.chains[index].kind = "side" if state.chains[index].kind != "side" else "back"
+    check(rig_json(armature)["chains"][index]["kind"] == state.chains[index].kind
+          and json_columns(armature) == columns and json_matches_state(armature),
+          "columns: a kind changed in the list keeps the sheets and orders in the rig property")
+    # A chain the user adds in Edit Mode: no sheet; the others keep theirs.
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='EDIT')
+    edit_bones = armature.data.edit_bones
+    added = edit_bones.new("j_ex_hair_new")
+    added.head, added.tail = (0.0, 0.10, 1.55), (0.0, 0.12, 1.42)
+    added.parent = edit_bones[hairing.HEAD]
+    hairrig.sync_rig(bpy.context, armature, hair.RACE)
+    new_name = hairrig.bone_name(len(plans), 0)
+    check(state_columns(armature) == dict(planned, **{new_name: (-1, -1)}) and json_columns(armature) == columns
+          and json_matches_state(armature),
+          "columns: a chain the user adds has no sheet, the others keep theirs ({})".format(state_columns(armature)))
+    # One column chain's bones deleted: the others keep their sheets and orders, a gap in the orders included.
+    # The long hair's side locks are a sheet each: put them in one sheet, orders 0 and 1, and delete order 0.
+    state = armature.magic_fit_hair_rig
+    for order, name in enumerate(sorted(columns)):
+        chain = next(chain for chain in state.chains if chain.bones.split(",")[0] == name)
+        chain.sheet, chain.order = 0, order
+    hairrig.write_rig_property(armature)
+    gone = sorted(columns)[0]
+    before = state_columns(armature)
+    check(len(columns) >= 2 and json_matches_state(armature), "columns: {:d} column chains in one sheet ({})".format(
+        len(columns), before))
+    gone_bones = next(chain.bones.split(",") for chain in armature.magic_fit_hair_rig.chains
+                      if chain.bones.split(",")[0] == gone)
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='EDIT')
+    edit_bones = armature.data.edit_bones
+    for name in gone_bones:
+        edit_bones.remove(edit_bones[name])
+    hairrig.sync_rig(bpy.context, armature, hair.RACE)
+    left = {name: column for name, column in before.items() if name != gone}
+    check(state_columns(armature) == left and json_columns(armature) == {
+        name: column for name, column in left.items() if column[0] >= 0} and json_matches_state(armature),
+        "columns: with chain {:s} deleted the others keep their sheets and orders ({})".format(
+            gone, state_columns(armature)))
+    # Built again over the hair: the new plans' sheets and orders.
+    again = hairrig.keep_kinds(armature, hairrig.plan_rig(co, tris, rig(), cap=hairing.cap_depth(co, tris, rig())))
+    hairrig.build_armature_rig(bpy.context, armature, again, hair.RACE)
+    check(state_columns(armature) == {hairrig.bone_name(c, 0): (plan.sheet, plan.order) for c, plan in enumerate(again)}
+          and json_matches_state(armature), "columns: built again, the chains take the new plans' sheets and orders")
+
+
 def test_old_rig_state():
     _obj, armature, plans, _bones, _co, _tris, _part, _names = rig_scene()
     # Built without a cap depth (as before it was kept).
@@ -1732,6 +1813,19 @@ def test_old_rig_state():
     hairrig.sync_rig(bpy.context, armature, hair.RACE)
     check(state.cap_depth == -1.0 and not any(chain.light for chain in state.chains),
           "old rig: ...also after sync_rig")
+    # A rig state from a file made before the columns: version 2, no chain lists a sheet or order.
+    for chain in state.chains:
+        chain.sheet = chain.order = -1
+    hairrig.write_rig_property(armature)
+
+    def no_columns(when):
+        data = rig_json(armature)
+        check(data["version"] == 2 and not any("sheet" in chain or "order" in chain for chain in data["chains"])
+              and json_matches_state(armature), "old rig: no sheets or orders in the rig property, {:s}".format(when))
+
+    no_columns("written")
+    hairrig.sync_rig(bpy.context, armature, hair.RACE)
+    no_columns("after sync_rig")
     # A rig from another tool (no state, only the property): nothing is light.
     state.chains.clear()
     hairrig.sync_rig(bpy.context, armature, hair.RACE)
@@ -1930,7 +2024,8 @@ def main():
                      test_maeve_weights, test_armature_rig, test_weights_follow_locks,
                      test_edited_rig_is_kept, test_branch_starts_chain, test_chain_collection, test_bones_hash,
                      test_kind_change_writes_json,
-                     test_state_keeps_light, test_old_rig_state, test_chain_along, test_ramp_from_first_joint,
+                     test_state_keeps_light, test_state_keeps_columns, test_old_rig_state, test_chain_along,
+                     test_ramp_from_first_joint,
                      test_cap_stays, test_bun_light, test_own_neck_weight, test_ramp_follows_edited_bone):
             print("==", test.__name__)
             try:

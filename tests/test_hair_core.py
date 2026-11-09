@@ -1015,7 +1015,8 @@ def test_nothing_hangs():
     if armature is None:
         return
     data = json.loads(armature.get(hairrig.RIG_PROPERTY, "{}"))
-    check(data == {"race": 'c0201', "chains": []}, "nothing hangs: the rig property lists no chains ({})".format(data))
+    check(data == {"race": 'c0201', "version": 2, "chains": []},
+          "nothing hangs: the rig property lists no chains ({})".format(data))
     check("No hair hangs from the head: no chains built" in reports,
           "nothing hangs: says so")
     custom = hair.by_name(obj)

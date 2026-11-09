@@ -900,8 +900,10 @@ def _hair_rig_active_changed(_self, _context):
 
 
 class HairRigChain(bpy.types.PropertyGroup):
-    """A chain of the hair's own skeleton (Object.magic_fit_hair_rig): its kind and bones, root to tip, and
-    whether it is light (`hairrig.Lock`; not shown and not in xiv_hair_rig, it only changes the weights)."""
+    """A chain of the hair's own skeleton (Object.magic_fit_hair_rig): its kind and bones, root to tip,
+    whether it is light (`hairrig.Lock`; not shown and not in xiv_hair_rig, it only changes the weights), and a
+    column chain's sheet and order (`hairrig.ChainPlan`; not shown, written to xiv_hair_rig so the exporter can
+    tie neighboring columns)."""
     kind: EnumProperty(
         name="Kind",
         description="How the game swings this chain",
@@ -918,6 +920,22 @@ class HairRigChain(bpy.types.PropertyGroup):
         name="Light",
         description="The chain's lock stands off the cap rather than leaving the scalp at the hairline",
         default=False,
+    )
+    sheet: IntProperty(
+        name="Sheet",
+        description=(
+            "The sheet of hair whose column the chain follows (from 0; -1: a separate piece). Not shown; written "
+            "to xiv_hair_rig so the exporter can tie neighboring columns"
+        ),
+        default=-1,
+    )
+    order: IntProperty(
+        name="Order",
+        description=(
+            "The chain's place among its sheet's columns (from 0; -1: a separate piece). Not shown; written to "
+            "xiv_hair_rig so the exporter can tie neighboring columns"
+        ),
+        default=-1,
     )
 
 

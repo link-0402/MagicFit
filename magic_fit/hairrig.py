@@ -77,11 +77,13 @@ The chains become bones on the hair's armature (`build_armature_rig`), j_ex_hair
 j_kao. They are ordinary Blender bones, head on a joint and tail on the next, so they draw along the hair
 and the user can move, delete or add some in Edit Mode; `sync_rig` reads them back as they are and names
 new ones; the rig state keeps a hash of the bones (`bones_hash`) to tell whether the user edited them since,
-and for the weights the hair's cap depth and which chains are light (kept by chain number, like the kinds).
+for the weights the hair's cap depth and which chains are light, and for the exporter each column chain's sheet
+and order (kept by chain number, like the kinds).
 Each bone's Z axis points away from the head's axis, and its bone colour is its chain's kind's
 (`hairview.color_bones`). Every hair bone, the user's new ones too, is in the armature's CHAIN_COLLECTION bone
 collection, and only they are (`collect_hair_bones`); Show Chains solos it. The armature carries the rig as RIG_PROPERTY, written from
-`Object.magic_fit_hair_rig` after every change, for exporters (Instant Edit) to make the hair skeleton. A
+`Object.magic_fit_hair_rig` after every change, for exporters (Instant Edit) to make the hair skeleton; its
+version 2 lists each column chain's sheet and order, so the exporter can tie neighboring columns. A
 hair bone points along its X axis in the game and along its Y axis in Blender: ALONG_X turns one into the
 other, here (`custom_rig`) and in the exporter.
 
@@ -183,8 +185,12 @@ PONYTAIL_LENGTH = 0.30
 # centre cards spread at most 0.0074, a tube ponytail 0.017.
 PONYTAIL_ROUND = 0.01
 # The custom property on the armature object that holds the rig for exporters, as JSON: {"race": "c0801",
-# "chains": [{"kind": "back", "bones": ["j_ex_hair_01_a", ...]}]}, each chain's bones root to tip.
+# "version": 2, "chains": [{"kind": "back", "bones": ["j_ex_hair_01_a", ...], "sheet": 0, "order": 1}]}, each
+# chain's bones root to tip. Only a column chain has "sheet" (from 0, shared by one sheet of hair's columns) and
+# "order" (its place among that sheet's chains, from 0, by column around the head; a chain the user deleted leaves
+# a gap); a separate piece has neither. Version 1 had no "version" and no columns.
 RIG_PROPERTY = "xiv_hair_rig"
+RIG_VERSION = 2
 # The hair's own bones are named BONE_PREFIX, the chain's number (01 on) and the bone's letter (a from the
 # root): j_ex_hair_01_a. Exporters accept no other names (BONE_PATTERN).
 BONE_PREFIX = "j_ex_hair_"
@@ -1104,9 +1110,13 @@ def has_rig(armature_object, race):
 def write_rig_property(armature_object):
     """Write RIG_PROPERTY on ``armature_object`` from its rig state (`Object.magic_fit_hair_rig`)."""
     state = armature_object.magic_fit_hair_rig
-    armature_object[RIG_PROPERTY] = json.dumps({"race": state.race, "chains": [
-        {"kind": chain.kind, "bones": [name for name in chain.bones.split(",") if name]}
-        for chain in state.chains]})
+    chains = []
+    for chain in state.chains:
+        listed = {"kind": chain.kind, "bones": [name for name in chain.bones.split(",") if name]}
+        if chain.sheet >= 0:
+            listed.update(sheet=chain.sheet, order=chain.order)
+        chains.append(listed)
+    armature_object[RIG_PROPERTY] = json.dumps({"race": state.race, "version": RIG_VERSION, "chains": chains})
     armature_object.id_properties_ui(RIG_PROPERTY).update(
         description="The hair's own skeleton: its race and chains. Set by Magic Fit's Hair Weights")
 
@@ -1165,9 +1175,9 @@ def counted(count, word):
 
 
 def _fill_state(armature_object, race, chains, cap_depth=None):
-    """Fill the rig state of ``armature_object`` with ``race``, ``chains`` ((kind, bone names, light) each),
-    the hair's ``cap_depth`` (None keeps the one stored) and the hash of its bones (`bones_hash`), write
-    RIG_PROPERTY and colour the chains' bones by kind (`hairview.color_bones`)."""
+    """Fill the rig state of ``armature_object`` with ``race``, ``chains`` ((kind, bone names, light, sheet,
+    order) each), the hair's ``cap_depth`` (None keeps the one stored) and the hash of its bones (`bones_hash`),
+    write RIG_PROPERTY and colour the chains' bones by kind (`hairview.color_bones`)."""
     # hairview imports this module.
     from . import hairview
     state = armature_object.magic_fit_hair_rig
@@ -1176,12 +1186,14 @@ def _fill_state(armature_object, race, chains, cap_depth=None):
     if cap_depth is not None:
         state.cap_depth = cap_depth
     state.chains.clear()
-    for kind, names, light in chains:
+    for kind, names, light, sheet, order in chains:
         chain = state.chains.add()
         # The kind before the bones: its update callback skips a chain without bones.
         chain.kind = kind
         chain.bones = ",".join(names)
         chain.light = light
+        chain.sheet = sheet
+        chain.order = order
     state.active = min(max(state.active, 0), max(len(state.chains) - 1, 0))
     write_rig_property(armature_object)
     hairview.color_bones(armature_object)
@@ -1211,7 +1223,8 @@ def build_armature_rig(context, armature_object, plans, race, cap_depth=-1.0):
     (`ChainPlan`s, world space): head on its joint, tail on the next joint (the last one's on the plan's
     tip), its Z axis away from the head's vertical axis, the first hanging from j_kao and each next one from
     the one before. The armature must have j_kao (`hairing.ensure_bones`). Fills the rig state for ``race``,
-    with the plans' kinds and light flags and the hair's ``cap_depth`` (`hairing.cap_depth`; -1: unknown),
+    with the plans' kinds, light flags, sheets and orders and the hair's ``cap_depth`` (`hairing.cap_depth`;
+    -1: unknown),
     and writes RIG_PROPERTY. Returns the new bone names."""
     from mathutils import Vector
     world = np.array(armature_object.matrix_world, dtype=np.float64)
@@ -1239,7 +1252,7 @@ def build_armature_rig(context, armature_object, plans, race, cap_depth=-1.0):
                 parent = edit
                 chain.append(edit.name)
             names += chain
-            chains.append((plan.kind, chain, plan.light))
+            chains.append((plan.kind, chain, plan.light, int(plan.sheet), int(plan.order)))
     _fill_state(armature_object, race, chains, cap_depth)
     return names
 
@@ -1328,6 +1341,17 @@ def _known_light(armature_object):
     return light
 
 
+def _known_columns(armature_object):
+    """{chain number: (sheet, order)} of the column chains (sheet 0 and on) in the rig state (numbered like
+    `_known_kinds`)."""
+    columns = {}
+    for index, chain in enumerate(armature_object.magic_fit_hair_rig.chains):
+        if chain.sheet >= 0:
+            first = _parse(chain.bones.split(",")[0])
+            columns[first[0] if first is not None else index + 1] = (chain.sheet, chain.order)
+    return columns
+
+
 def _free_name(used, number):
     """The next free bone name in chain ``number`` (from 1): the letter after its last one taken in
     ``used`` (names), else the first one free."""
@@ -1348,11 +1372,12 @@ def sync_rig(context, armature_object, race):
     free name in its chain (Blender renames the vertex groups of the meshes the armature deforms with it); a
     chain whose first bone has no such name gets the next free number. A new branch (a bone's second child
     on) starts a chain of its own: the next free number, its bones named a, b, ... down it; a branch made
-    before keeps its chain. Chains keep their kinds and light flags by number (`_known_kinds`,
-    `_known_light`); new ones get `chain_kind` and aren't light. The hair's cap depth stays as stored. Returns
-    the renamed bones as "old → new"."""
+    before keeps its chain. Chains keep their kinds, light flags, sheets and orders by number (`_known_kinds`,
+    `_known_light`, `_known_columns`); new ones get `chain_kind`, aren't light and are in no sheet. The hair's
+    cap depth stays as stored. Returns the renamed bones as "old → new"."""
     kinds = _known_kinds(armature_object)
     light = _known_light(armature_object)
+    columns = _known_columns(armature_object)
     base = hairing.Reference.get().rig(race, 0)
     renamed = []
     with hairing.editing_bones(context, armature_object) as edit_bones:
@@ -1391,12 +1416,14 @@ def sync_rig(context, armature_object, race):
     for old in chains:
         names = [rename.get(name, name) for name in old]
         number = _parse(names[0])[0]
-        # A new chain may take the number of one the user deleted: it doesn't take that one's kind or light.
+        # A new chain may take the number of one the user deleted: it doesn't take that one's kind, light or
+        # column.
         kind = kinds.get(number) if number not in fresh else None
         if kind is None:
             length = sum(float(np.linalg.norm(ends[name][1] - ends[name][0])) for name in old)
             kind = chain_kind(_angle(rig, ends[old[0]][0]), length, False)
-        result.append((kind, names, number in light and number not in fresh))
+        sheet, order = columns.get(number, (-1, -1)) if number not in fresh else (-1, -1)
+        result.append((kind, names, number in light and number not in fresh, sheet, order))
     result.sort(key=lambda chain: chain[1][0])
     _fill_state(armature_object, race, result)
     return renamed
