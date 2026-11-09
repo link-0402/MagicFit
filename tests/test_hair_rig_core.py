@@ -704,6 +704,46 @@ def test_side_columns():
               [(np.round(a, 3).tolist(), np.round(b, 3).tolist()) for a, b in pairs]))
 
 
+def test_forward_strand():
+    # Back hair, a side strip in front of the ear and a strand rooted behind the ear that falls forward over the
+    # shoulder onto the chest (40 degrees from the front): the strand is side hair, the side sheet's rear column, and
+    # the back's 3 columns keep to the back hair. As back hair it would join the outer back column and pull that
+    # column's chain off the back.
+    model_rig = rig()
+    co, tris, _parts = back_sheet()
+    a, p = math.radians(45.0), math.radians(95.0)
+    top = hair._onto_head(np.array(((math.sin(p) * math.sin(a), math.sin(p) * math.cos(a), math.cos(p)),)), 0.01)[0][0]
+    head = np.asarray(model_rig.by_name[hairing.HEAD].head, dtype=np.float64) + model_rig.offset
+    ahead = math.radians(40.0)
+    bottom = np.array((head[0] + 0.14 * math.sin(ahead), head[1] - 0.14 * math.cos(ahead), top[2] - 0.38))
+    strand = hair.strip(top, bottom, 0.03, np.array((math.cos(a), -math.sin(a), 0.0)))
+    extra_co, extra_tris, (front_ids, strand_ids) = join([side_strip(118.0, 0.30, 0.04), strand])
+    front_ids, strand_ids = front_ids + len(co), strand_ids + len(co)
+    co, tris = np.vstack((co, extra_co)), np.vstack((tris, extra_tris + len(co)))
+    locks = hairrig.find_locks(co, tris, model_rig)
+    mine = [lock for lock in locks if np.isin(lock.vertices, strand_ids).any()]
+    ends = [(round(hairrig._angle(model_rig, lock.root), 1), round(hairrig._angle(model_rig, hairrig.spine(co, lock)[-1]),
+                                                                    1)) for lock in mine]
+    check(len(mine) == 1 and np.isin(mine[0].vertices, strand_ids).all() and ends[0][0] > hairrig.SIDE_ANGLE
+          and ends[0][1] <= hairrig.SIDE_ANGLE,
+          "forward strand: the strand is one lock, rooted behind SIDE_ANGLE and ending in front of it (root and tip "
+          "angles {})".format(ends))
+    chains = hairrig.plan_rig(co, tris, model_rig)
+    describe_columns(chains)
+    held = [chain for chain in chains if np.isin(chain.vertices, strand_ids).any()]
+    side = columns_by_sheet(chains).get(held[0].sheet, []) if len(held) == 1 and held[0].sheet >= 0 else []
+    check(len(held) == 1 and held[0].kind == "side" and np.isin(held[0].vertices, strand_ids).all()
+          and len(side) == 2 and side[1] is held[0] and np.isin(side[0].vertices, front_ids).all(),
+          "forward strand: the strand is side hair, its side sheet's rear column behind the front strip ({})".format(
+              [(chain.kind, chain.sheet, chain.order, int(np.isin(chain.vertices, strand_ids).sum())) for chain in chains]))
+    back = back_columns("forward strand", chains)
+    far = [round(off_hair(chain, co), 3) for chain in back] if back is not None else None
+    check(back is not None and not any(np.isin(chain.vertices, strand_ids).any() for chain in back)
+          and max(far) <= hairrig.SPINE_REACH,
+          "forward strand: the back columns hold none of the strand and keep to their hair ({} m off)".format(far))
+    check(len(chains) == 5, "forward strand: 5 chains, 3 back and 2 side ({:d})".format(len(chains)))
+
+
 def test_light_column():
     # Two flat strips standing up from the crown: two light locks, one column, and a column's chain isn't light.
     model_rig = rig(MIQOTE)
@@ -1011,6 +1051,19 @@ def test_bun():
     check(len(chains) == 1 and chains[0].light and np.isin(chains[0].vertices, parts["bun"]).all(),
           "bun: the bun gets one light chain ({}, {} m from the scalp)".format(
               [(chain.kind, chain.light) for chain in chains], [round(gap, 4) for gap in gaps]))
+    # Rooted just behind the head's axis and leaning forward over it, the bun's tip lies in front of SIDE_ANGLE: it
+    # stands up, so it stays back hair.
+    head = np.asarray(model_rig.by_name[hairing.HEAD].head, dtype=np.float64) + model_rig.offset
+    crown = hair.top(MIQOTE, 0.0, head[1] + 0.035)
+    co, tris, _ranges = join([hair.cap(race=MIQOTE), hair.tube((0.0, head[1] + 0.035, crown + 0.01),
+                                                               (0.0, head[1] - 0.03, crown + 0.11), 0.02,
+                                                               bend=(0.0, 0.0, 0.0))])
+    chains = hairrig.plan_rig(co, tris, model_rig)
+    ends = [(round(chain.angle, 1), round(hairrig._angle(model_rig, chain.tip), 1)) for chain in chains]
+    check(chains and all(chain.kind == "back" for chain in chains)
+          and any(root > hairrig.SIDE_ANGLE and tip <= hairrig.SIDE_ANGLE for root, tip in ends),
+          "bun: leaning forward over the head's axis, rooted behind SIDE_ANGLE and its tip in front, it stays back "
+          "hair ({}; root and tip angles {})".format([chain.kind for chain in chains], ends))
 
 
 def test_roots_near_scalp():
@@ -2010,7 +2063,8 @@ def main():
         for test in (test_long_hair_locks, test_one_piece_long_hair, test_separate_strands, test_crumbs,
                      test_parted_locks, test_long_hair_chains, test_bangs_chain, test_pivot_at_root, test_even_joints,
                      test_wavy_lock_straight, test_kinds, test_columns, test_u_bottom, test_mirrored_sheet,
-                     test_back_width, test_swept_sheet, test_ponytail_on_sheet, test_side_columns, test_light_column,
+                     test_back_width, test_swept_sheet, test_ponytail_on_sheet, test_side_columns, test_forward_strand,
+                     test_light_column,
                      test_budget, test_lone_kind_survives, test_card_hair_kinds, test_card_hair_time,
                      test_moved_hair,
                      test_flat_fringe, test_neck_layer, test_neck_only_layer, test_cap_rim, test_bun,

@@ -44,7 +44,9 @@ Then it plans a chain of bones down each lock:
   and joints on the spine itself zig-zag from crest to crest; the game's own chains bend 23 degrees at most
   between bones and never cross the line from their root to their tip.
 - Its kind (bangs, side, back or ponytail) comes from where the lock leaves the head and how long it is; only
-  a round lock (PONYTAIL_ROUND) is a ponytail, a flat card lying on back hair is back hair.
+  a round lock (PONYTAIL_ROUND) is a ponytail, a flat card lying on back hair is back hair. Where the hair ends
+  moves it between side and back: side hair falling back over the shoulder (its tip behind SIDE_ANGLE) is back
+  hair, and back hair hanging forward over the shoulder (its tip in front of SIDE_ANGLE) is side hair.
 - Then the locks split in two. A lock kept whole and round (PONYTAIL_ROUND: a ponytail, a braid, a tube) is a
   separate piece; every other lock is part of a sheet of hair. Twin layers always merge, in both: of two
   locks whose roots lie within TWIN_REACH of each other (a mesh doubled for its back faces), the smaller
@@ -176,7 +178,9 @@ KINDS = ("bangs", "side", "back", "ponytail")
 BANGS_ANGLE = 45.0
 # ...and a spine no longer than this (metres).
 BANGS_LENGTH = 0.20
-# Side: a root this close to the front (degrees); farther round it is back hair.
+# Side: a root this close to the front (degrees); farther round it is back hair. A tip on the other side of it moves
+# hanging hair across (plan_chain): side hair falling back over the shoulder is back hair, and back hair falling
+# forward is side hair.
 SIDE_ANGLE = 110.0
 # Ponytail: a lock kept whole (WHOLE_WIDTH) with a spine at least this long (metres)...
 PONYTAIL_LENGTH = 0.30
@@ -615,7 +619,10 @@ def plan_chain(points, lock, rig=None, bone_length=BONE_SPACING):
     spread evenly by length along the spine's arc
     (`_arc`): the first on the root, the next ones one bone length further each, the last one bone length short
     of the lock's end (the tip). With ``rig`` (`hairing.HairRig`), side hair whose tip lies behind SIDE_ANGLE is back
-    hair: it falls back over the shoulder, and as side hair it would keep a chain of its own there."""
+    hair: it falls back over the shoulder, and as side hair it would keep a chain of its own there. Back hair hanging
+    down to a tip in front of SIDE_ANGLE is side hair: it falls forward over the shoulder, and in a back column it
+    would pull that column's chain off the back. Back hair standing up (its tip above its root: a bun on the crown,
+    near the head's axis, where a 1 cm lean turns the angle round) stays back hair."""
     line = spine(points, lock)
     seg = np.linalg.norm(np.diff(line, axis=0), axis=1)
     length = float(seg.sum())
@@ -628,6 +635,8 @@ def plan_chain(points, lock, rig=None, bone_length=BONE_SPACING):
                       and _round(points, lock))
     if kind == "side" and rig is not None and _angle(rig, line[-1]) > SIDE_ANGLE:
         kind = "back"
+    elif kind == "back" and rig is not None and line[-1][2] < line[0][2] and _angle(rig, line[-1]) <= SIDE_ANGLE:
+        kind = "side"
     return ChainPlan(kind, _spread(_arc(line, seg), count), line[-1].copy(), lock.area, lock.whole,
                      lock.angle, lock.vertices, lock.light, _spread(line, count))
 
