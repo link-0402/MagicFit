@@ -142,7 +142,8 @@ TWIN_REACH = 0.005
 # (plan_rig's ``spacing``, the Chain Spacing setting).
 CHAIN_SPACING = 0.08
 # A column of a sheet with less hair than this (m²) joins its nearer neighbor (`_columns`); a sheet's only column
-# stays. Measured: such columns hold 0.0010-0.0025 m², the smallest one with real hair 0.0129 m².
+# stays. Measured at CHAIN_SPACING: only Briar's front right side column (0.0025 m²) falls under it; Maeve's front
+# bangs column (0.0056 m²) keeps its chain, and every other column holds 0.0129 m² or more.
 MIN_COLUMN_AREA = 0.005
 # The most columns of back hair: the middle one centered straight behind and one to either side, whatever the
 # hair's width. Wider columns instead jump from 3 back chains to 1 on symmetric hair.
