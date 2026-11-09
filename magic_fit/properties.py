@@ -555,7 +555,8 @@ class MagicFitSettings(bpy.types.PropertyGroup):
         name="Chain Spacing",
         description=(
             "The width of the columns the hair is cut into around the head, one chain each (at most 3 behind "
-            "and 2 per side). Higher: fewer, wider columns. Used when the chains are built"
+            "and 2 per side). Higher: wider columns, fewer chains on bangs and narrow hair. Used when the chains "
+            "are built"
         ),
         subtype='DISTANCE',
         default=hairrig.CHAIN_SPACING,
