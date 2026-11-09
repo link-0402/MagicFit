@@ -573,9 +573,10 @@ def _spread(line, count):
     return np.column_stack([np.interp(marks, at, line[:, k]) for k in range(3)])
 
 
-def plan_chain(points, lock, rig=None):
-    """The chain for ``lock`` (`ChainPlan`), or None when its spine is shorter than MIN_CHAIN_LENGTH. Its
-    clamp(ceil(length / BONE_SPACING), CHAIN_BONES) joints are spread evenly by length along the spine's arc
+def plan_chain(points, lock, rig=None, bone_length=BONE_SPACING):
+    """The chain for ``lock`` (`ChainPlan`), or None when its spine is shorter than MIN_CHAIN_LENGTH. It has a
+    bone per ``bone_length`` (metres) of spine: its clamp(ceil(length / bone_length), CHAIN_BONES) joints are
+    spread evenly by length along the spine's arc
     (`_arc`): the first on the root, the next ones one bone length further each, the last one bone length short
     of the lock's end (the tip). With ``rig`` (`hairing.HairRig`), side hair whose tip lies behind SIDE_ANGLE is back
     hair: it falls back over the shoulder, and as side hair it would keep a chain of its own there."""
@@ -584,7 +585,7 @@ def plan_chain(points, lock, rig=None):
     length = float(seg.sum())
     if length < MIN_CHAIN_LENGTH:
         return None
-    count = int(np.clip(math.ceil(length / BONE_SPACING), *CHAIN_BONES))
+    count = int(np.clip(math.ceil(length / bone_length), *CHAIN_BONES))
     # Only a round lock can be a ponytail (PONYTAIL_ROUND); a flat card stays whole for merging all the same.
     # Roundness is measured only where it decides (chain_kind's last test): plan_rig plans every merge tried.
     kind = chain_kind(lock.angle, length, lock.whole and lock.angle > SIDE_ANGLE and length >= PONYTAIL_LENGTH
@@ -732,26 +733,20 @@ def _on_hair(points, lock, chain):
     return True
 
 
-def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES, spacing=CHAIN_SPACING):
-    """The chains of a hair skeleton for hair ``points`` (world space, rest pose) with triangles ``tris``
-    hanging from ``rig`` (`hairing.HairRig`), its cap ``cap`` off the head (see `find_locks`): one
-    `ChainPlan` per lock (`find_locks`) whose spine is long enough, in name order (by angle, then by the
-    root's X). Locks merge (both hang from both roots, see `_merge`) and the merged lock is planned again:
-    twin layers (roots within TWIN_REACH) always, the smaller into the larger; then, while any two of one
-    kind have roots closer than ``spacing`` (metres), the smallest of them into the nearest (by root) of its
-    kind. While the chains then take more than ``max_bones`` bones, the smallest lock that shares its kind
-    with another merges into the nearest (by root) of that kind; when no two share a kind, the smallest into
-    the nearest of any kind. A merge other than of twins whose chain leaves the hair (`_on_hair`) is refused
-    and the next nearest tried; when none is left, the lock stays as it is. Over the budget the next smallest
-    lock is tried then, and only when no lock has a merge that stays on the hair does the smallest merge into
-    its nearest after all."""
-    points = np.asarray(points, dtype=np.float64)
-    mesh = _welded(points, tris, weld)
-    if mesh is None:
-        return []
-    locks = find_locks(points, tris, rig, cap=cap, weld=mesh[0])
-    planned = [(lock, plan_chain(points, lock, rig)) for lock in locks]
-    planned = [(lock, chain) for lock, chain in planned if chain is not None]
+def _merge_pieces(points, mesh, graph, rig, planned, spacing, max_bones, bone_length=BONE_SPACING):
+    """The (`Lock`, `ChainPlan`) pairs ``planned`` (on ``mesh``, `_welded`, with its `_graph` ``graph``, which
+    may be None for fewer than two pairs) after merging, the ones left in their order in ``planned``. Locks
+    merge (both hang from both roots, see `_merge`) and the merged lock is planned again (`plan_chain`, a bone
+    per ``bone_length``): twin layers (roots within TWIN_REACH) always, the smaller into the larger; then,
+    while any two of one kind have roots closer than ``spacing`` (metres), the smallest of them into the
+    nearest (by root) of its kind. While the chains then take more than ``max_bones`` bones, the smallest lock
+    that shares its kind with another merges into the nearest (by root) of that kind; when no two share a
+    kind, the smallest into the nearest of any kind. A merge other than of twins whose chain leaves the hair
+    (`_on_hair`) is refused and the next nearest tried; when none is left, the lock stays as it is. Over the
+    budget the next smallest lock is tried then, and only when no lock has a merge that stays on the hair does
+    the smallest merge into its nearest after all. With ``spacing`` 0 and ``max_bones`` infinite only twins
+    merge."""
+    planned = list(planned)
     # The locks stay in their places in ``planned``, the merged ones marked gone (not ``alive``), so the
     # smallest and the nearest are the first ones in the same order as among the locks left.
     alive = np.ones(len(planned), dtype=bool)
@@ -760,7 +755,6 @@ def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES
     kinds = np.array([KINDS.index(chain.kind) for _lock, chain in planned], dtype=np.int64)
     left = len(planned)
     bones = sum(len(chain.joints) for _lock, chain in planned)
-    graph = _graph(mesh) if left > 1 else None
     # Each lock's nearest other lock (by root), to find twins, and its nearest of its own kind, for the
     # spacing, kept up to date as locks merge.
     near = np.full(len(planned), math.inf)
@@ -800,7 +794,7 @@ def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES
 
     def try_merge(small, into):
         merged = _merge(planned[into][0], planned[small][0], mesh, points, rig, graph)
-        return merged, plan_chain(points, merged, rig)
+        return merged, plan_chain(points, merged, rig, bone_length)
 
     def join(small, into, merged, chain):
         """Lock ``small`` merged into ``into`` as ``merged``, planned as ``chain``."""
@@ -897,7 +891,24 @@ def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES
                 gap[kinds != kinds[small]] = math.inf
             into = int(np.argmin(gap))
             join(small, into, *try_merge(small, into))
-    planned = [pair for pair, keep in zip(planned, alive) if keep]
+    return [pair for pair, keep in zip(planned, alive) if keep]
+
+
+def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES, spacing=CHAIN_SPACING):
+    """The chains of a hair skeleton for hair ``points`` (world space, rest pose) with triangles ``tris``
+    hanging from ``rig`` (`hairing.HairRig`), its cap ``cap`` off the head (see `find_locks`): one
+    `ChainPlan` per lock (`find_locks`) whose spine is long enough, in name order (by angle, then by the
+    root's X), after the locks merge (`_merge_pieces`: twins, then within ``spacing`` metres, then down to
+    ``max_bones`` bones)."""
+    points = np.asarray(points, dtype=np.float64)
+    mesh = _welded(points, tris, weld)
+    if mesh is None:
+        return []
+    locks = find_locks(points, tris, rig, cap=cap, weld=mesh[0])
+    planned = [(lock, plan_chain(points, lock, rig)) for lock in locks]
+    planned = [(lock, chain) for lock, chain in planned if chain is not None]
+    graph = _graph(mesh) if len(planned) > 1 else None
+    planned = _merge_pieces(points, mesh, graph, rig, planned, spacing, max_bones)
     # A merged lock's root moved: back in name order, as find_locks sorts.
     planned.sort(key=lambda pair: (round(pair[0].angle, 6), pair[0].root[0]))
     return [chain for _lock, chain in planned]
