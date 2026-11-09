@@ -719,6 +719,61 @@ def test_light_column():
         [(chain.kind, chain.light) for chain in chains]))
 
 
+def test_budget():
+    # The sheet's 3 column chains take 14 bones. With room for 10, the bones get longer: still 3 chains, each
+    # with the same hair as unbudgeted.
+    model_rig = rig()
+    co, tris, _parts = one_piece_long_hair()
+    budget = 10
+    free = hairrig.plan_rig(co, tris, model_rig)
+    chains = hairrig.plan_rig(co, tris, model_rig, max_bones=budget)
+    describe_columns(chains)
+    check(len(free) == 3 and sum(len(chain.joints) for chain in free) == 14,
+          "budget: unbudgeted, 3 chains of 14 bones ({})".format([len(chain.joints) for chain in free]))
+    back = back_columns("budget", chains)
+    check(back is not None and len(chains) == 3, "budget: ...and no other chain ({:d})".format(len(chains)))
+    check(chains and sum(len(chain.joints) for chain in chains) <= budget
+          and all(len(chain.joints) >= 2 for chain in chains),
+          "budget: at most {:d} bones, at least 2 per chain ({})".format(budget, [len(chain.joints) for chain in chains]))
+    check(len(chains) == len(free) and all(np.array_equal(np.sort(a.vertices), np.sort(b.vertices))
+                                           for a, b in zip(chains, free)),
+          "budget: each chain keeps its unbudgeted twin's vertices")
+    check(abs(sum(chain.area for chain in chains) - sum(chain.area for chain in free)) <= 1e-9,
+          "budget: the chains keep the hair's area")
+    keys = [(round(chain.angle, 6), chain.joints[0][0]) for chain in chains]
+    check(keys == sorted(keys), "budget: the chains stay in name order")
+    sideways = [max(abs(float(chain.joints[0][0] - end[0])) for end in (chain.joints[-1], chain.tip))
+                for chain in chains]
+    check(chains and all(side <= 2.0 * hairrig.LOCK_WIDTH for side in sideways),
+          "budget: no chain runs across the sheet (first joint to last joint and tip {} m sideways)".format(
+              [round(side, 3) for side in sideways]))
+
+
+def test_lone_kind_survives():
+    # A bun on the crown (a light back chain, the only one of its kind) and two ponytails: over the budget the
+    # bones get longer until every chain has 2 (6 bones), then one ponytail merges into the other, and the bun
+    # keeps its chain.
+    model_rig = rig(MIQOTE)
+    crown = hair.top(MIQOTE)
+    co, tris, (_cap, bun_ids, _left, _right) = join(
+        [hair.cap(race=MIQOTE), hair.tube((0.0, 0.0, crown + 0.01), (0.0, 0.0, crown + 0.11), 0.03)]
+        + [hair.tube((sign * 0.08, 0.09, 1.50), (sign * 0.10, 0.14, 1.10), 0.035) for sign in (-1.0, 1.0)])
+    free = hairrig.plan_rig(co, tris, model_rig)
+    describe_chains(free, co, [])
+    shape = sorted((chain.kind, len(chain.joints)) for chain in free)
+    check(shape == [("back", 2), ("ponytail", 5), ("ponytail", 5)]
+          and all(chain.light for chain in free if chain.kind == "back"),
+          "lone kind: unbudgeted, two ponytails of 5 bones and the bun's light back chain of 2 ({})".format(
+              [(chain.kind, len(chain.joints), chain.light) for chain in free]))
+    chains = hairrig.plan_rig(co, tris, model_rig, max_bones=5)
+    describe_chains(chains, co, [])
+    bun = [chain for chain in chains if np.isin(chain.vertices, bun_ids).any()]
+    check(len(chains) == 2 and sum(len(chain.joints) for chain in chains) <= 5 and len(bun) == 1
+          and np.isin(bun[0].vertices, bun_ids).all() and bun[0].light,
+          "lone kind: with room for 5 bones, 2 chains, the bun's light and only the bun ({})".format(
+              [(chain.kind, len(chain.joints), chain.light) for chain in chains]))
+
+
 def card_hair(count, seed=0):
     """`hair.cards` as one mesh: (points, triangles)."""
     co, tris, _ranges = join(hair.cards(count, seed=seed))
@@ -1045,6 +1100,18 @@ def test_merge_stays_on_hair():
           "on the hair: at spacing 0.01 three back pieces, the narrow the smallest, 3, 2 and 2 bones ({}, {}, "
           "{} m by root)".format([chain.kind for chain in free], [len(chain.joints) for chain in free],
                                  {name: round(gap, 4) for name, gap in gaps.items()}))
+    # With room for 5 bones the bones get longer until every chain has 2 (6 bones), then the narrow tube, the
+    # smallest, merges with its nearest by root, the one alongside.
+    chains = hairrig.plan_rig(co, tris, model_rig, spacing=0.01, max_bones=5)
+    describe_chains(chains, co, locks)
+    merged = [chain for chain in chains if np.isin(chain.vertices, narrow).any()]
+    far = [off_hair(chain, co) for chain in chains]
+    check(len(chains) == 2 and sum(len(chain.joints) for chain in chains) <= 5 and len(merged) == 1
+          and np.isin(merged[0].vertices, beside).any() and not np.isin(merged[0].vertices, swing).any()
+          and max(far) <= hairrig.SPINE_REACH,
+          "on the hair: with room for 5 bones the narrow tube merges with the one alongside, the swinging one stays "
+          "apart, every chain on the hair ({}, {} m)".format([len(chain.joints) for chain in chains],
+                                                             [round(f, 4) for f in far]))
     spaced = hairrig.plan_rig(co, tris, model_rig)
     describe_chains(spaced, co, locks)
     merged = [chain for chain in spaced if np.isin(chain.vertices, narrow).any()]
@@ -1855,7 +1922,7 @@ def main():
                      test_parted_locks, test_long_hair_chains, test_bangs_chain, test_pivot_at_root, test_even_joints,
                      test_wavy_lock_straight, test_kinds, test_columns, test_u_bottom, test_mirrored_sheet,
                      test_back_width, test_swept_sheet, test_ponytail_on_sheet, test_side_columns, test_light_column,
-                     test_card_hair_kinds, test_card_hair_time,
+                     test_budget, test_lone_kind_survives, test_card_hair_kinds, test_card_hair_time,
                      test_moved_hair,
                      test_flat_fringe, test_neck_layer, test_neck_only_layer, test_cap_rim, test_bun,
                      test_roots_near_scalp, test_twins_merge, test_merge_stays_on_hair, test_hollow_ponytail,

@@ -38,11 +38,11 @@ Then it plans a chain of bones down each lock:
 - The lock's spine is its middle line down the hair: its root, then the centroid of its vertices in each
   SPINE_STEP band of distance from the root, smoothed over SPINE_SMOOTHING samples (on a coarse mesh a band
   mixes neighbouring rows, and the centroids zig-zag). A spine shorter than MIN_CHAIN_LENGTH gets no chain.
-- The chain has a bone per BONE_SPACING of spine (2 to 5), its joints spread evenly from the root along the
-  spine's arc (`_arc`): from the spine's start to its end, bending one way only, fitted to the spine. The last
-  bone ends at the spine's end. Wavy hair swings its spine from side to side, and joints on the spine itself
-  zig-zag from crest to crest; the game's own chains bend 23 degrees at most between bones and never cross
-  the line from their root to their tip.
+- The chain has a bone per BONE_SPACING of spine (2 to 5; longer over the budget), its joints spread evenly
+  from the root along the spine's arc (`_arc`): from the spine's start to its end, bending one way only,
+  fitted to the spine. The last bone ends at the spine's end. Wavy hair swings its spine from side to side,
+  and joints on the spine itself zig-zag from crest to crest; the game's own chains bend 23 degrees at most
+  between bones and never cross the line from their root to their tip.
 - Its kind (bangs, side, back or ponytail) comes from where the lock leaves the head and how long it is; only
   a round lock (PONYTAIL_ROUND) is a ponytail, a flat card lying on back hair is back hair.
 - Then the locks split in two. A lock kept whole and round (PONYTAIL_ROUND: a ponytail, a braid, a tube) is a
@@ -50,10 +50,7 @@ Then it plans a chain of bones down each lock:
   locks whose roots lie within TWIN_REACH of each other (a mesh doubled for its back faces), the smaller
   into the larger.
 - Separate pieces of one kind whose roots lie closer than the chain spacing (CHAIN_SPACING, the Chain
-  Spacing setting) merge: the smallest such piece into the nearest of its kind (by root). While the rig
-  still takes more than MAX_HAIR_BONES bones, the smallest piece that shares its kind with another merges
-  into the nearest of that kind; only when no two share a kind does the smallest merge into the nearest of
-  any kind.
+  Spacing setting) merge: the smallest such piece into the nearest of its kind (by root).
 - A piece's merge (other than of twins) stays on the hair: it is refused when the merged lock's chain has a
   joint or its tip farther than SPINE_REACH from the lock's own hair (two pieces far apart, its spine running
   through the space between them) and not enclosed by it there (ENCLOSED_GAP: the middle of a hollow
@@ -66,6 +63,12 @@ Then it plans a chain of bones down each lock:
   front, bangs from straight in front. A column with less hair than MIN_COLUMN_AREA joins its neighbor. A
   column's locks merge into one, its largest first, and the column gets one chain of the sheet's kind,
   never light: the chains follow the columns down the hair, whatever the cards in them.
+- The budget: while the rig takes more than MAX_HAIR_BONES bones and some chain has more than CHAIN_BONES[0],
+  the bones get longer (BONE_SPACING grows by BONE_GROWTH) and every chain is planned again: the columns keep
+  their chains. Only a rig still over then merges its pieces, until it fits or one is left: the smallest piece
+  that shares its kind with another into the nearest of that kind; only when no two share a kind does the
+  smallest merge into the nearest of any kind. Columns never merge: a rig whose columns alone take more than
+  MAX_HAIR_BONES bones at CHAIN_BONES[0] each stays over.
 - A merged lock hangs from the roots of both (its root is their mean) and is planned again. It is kept
   whole only when both locks were and one's roots lie within the other's, no wider than WHOLE_WIDTH: layers
   of one ponytail. Strands or cards merged side by side make back hair.
@@ -131,8 +134,8 @@ ARC_SAMPLES = 65
 BONE_SPACING = 0.10
 # The fewest and most bones in a chain.
 CHAIN_BONES = (2, 5)
-# The budget of the whole rig: locks merge until the chains fit (the smallest into the nearest of its kind,
-# see plan_rig).
+# The budget of the whole rig: over it the bones get longer (BONE_GROWTH), then separate pieces merge (see
+# plan_rig).
 MAX_HAIR_BONES = 48
 # Two locks whose roots lie within this (metres) of each other are twin layers (a mesh doubled for its back
 # faces): they always merge, the smaller into the larger.
@@ -972,7 +975,10 @@ def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES
     kind, side hair one per side of the head; each sheet is cut into columns ``spacing`` metres wide around
     the head (`_columns`, at the sheet's area-weighted mean root radius, the two sides' shared), and each
     column's locks merge into one (the largest first) with one chain of the sheet's kind, not light. Over
-    ``max_bones`` bones, the pieces merge (`_merge_pieces`) until the rig fits."""
+    ``max_bones`` bones, the bones get longer: BONE_SPACING grows by BONE_GROWTH and every chain is planned
+    again, until the rig fits or every chain has CHAIN_BONES[0] bones. Only a rig still over then merges its
+    pieces (`_merge_pieces`), until it fits or one piece is left: the columns never merge, so a rig whose
+    columns alone take more than ``max_bones`` bones at CHAIN_BONES[0] each stays over."""
     if spacing <= 0.0:
         raise ValueError("The chain spacing must be above 0")
     points = np.asarray(points, dtype=np.float64)
@@ -988,6 +994,14 @@ def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES
     sheet_locks = _merge_pieces(points, mesh, graph, rig, [pair for pair, piece in zip(planned, separate)
                                                            if not piece], 0.0, math.inf)
     pieces = _merge_pieces(points, mesh, graph, rig, pieces, spacing, math.inf)
+
+    def column_chain(lock, kind, bone_length):
+        """A column's chain: of the sheet's ``kind``, never light."""
+        chain = plan_chain(points, lock, rig, bone_length)
+        if chain is not None:
+            chain.kind = kind
+            chain.light = False
+        return chain
 
     # The sheets, by kind and, for side hair, by side: (kind, on the -X side) -> indices into sheet_locks.
     columns = []   # (lock, chain, sheet, column number)
@@ -1010,16 +1024,23 @@ def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES
                 lock = sheet_locks[into[0]][0]
                 for k in into[1:]:
                     lock = _merge(lock, sheet_locks[k][0], mesh, points, rig, graph)
-                chain = plan_chain(points, lock, rig)
-                if chain is None:
-                    continue
-                chain.kind = kind
-                chain.light = False
-                columns.append((lock, chain, sheet, c))
+                chain = column_chain(lock, kind, BONE_SPACING)
+                if chain is not None:
+                    columns.append((lock, chain, sheet, c))
 
-    # Over the budget, only the pieces merge.
+    # Over the budget, the bones get longer and every chain is planned again; only a rig still over then merges
+    # its pieces. The spine doesn't depend on the bone length: no chain planned again becomes None.
+    bone_length = BONE_SPACING
+    chains = [chain for _lock, chain in pieces] + [chain for _lock, chain, _sheet, _c in columns]
+    while sum(len(chain.joints) for chain in chains) > max_bones \
+            and any(len(chain.joints) > CHAIN_BONES[0] for chain in chains):
+        bone_length *= BONE_GROWTH
+        pieces = [(lock, plan_chain(points, lock, rig, bone_length)) for lock, _chain in pieces]
+        columns = [(lock, column_chain(lock, sheet[0], bone_length), sheet, c) for lock, _chain, sheet, c in columns]
+        chains = [chain for _lock, chain in pieces] + [chain for _lock, chain, _sheet, _c in columns]
     column_bones = sum(len(chain.joints) for _lock, chain, _sheet, _c in columns)
-    pieces = _merge_pieces(points, mesh, graph, rig, pieces, 0.0, max_bones - column_bones)
+    if sum(len(chain.joints) for chain in chains) > max_bones:
+        pieces = _merge_pieces(points, mesh, graph, rig, pieces, 0.0, max_bones - column_bones, bone_length)
     every = [(lock, chain, None, -1) for lock, chain in pieces] + columns
     # A merged lock's root moved: back in name order, as find_locks sorts.
     every.sort(key=lambda item: (round(item[0].angle, 6), item[0].root[0]))
