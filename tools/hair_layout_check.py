@@ -26,7 +26,7 @@ joints both have; far hair (the area of hanging vertices beyond FAR_HAIR of ever
 whose locks' roots spread more than TALL_COLUMN in Z); light hair in columns (light locks' area in chains of a sheet);
 and the smallest column chain's lock area. A lock (`hairrig.find_locks`) belongs to the chain holding most of its
 vertices. Far and hanging areas sum `hairing.vertex_areas` over the mesh as loaded (both sides of double-sided cards);
-lock areas (the column chains', tall columns', light hair in columns) are the locks' own `area`, on the welded mesh,
+lock areas (the column chains', light hair in columns) are the locks' own `area`, on the welded mesh,
 as `_columns` compares them. The two don't compare with each other.
 
 ``--out`` gets {"checkout", "commit", "widths", "hairs": {label: {width: metrics}}, "skipped": {label: reason}}.
