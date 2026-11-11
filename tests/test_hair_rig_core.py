@@ -671,6 +671,47 @@ def test_ponytail_on_sheet():
         len(chains)))
 
 
+def test_ponytail_hair_type():
+    # Hair Type Ponytail: the back sheet and the tube over it, all the hair behind the head, make one ponytail
+    # chain, a separate piece; the side strips keep their chains. Loose (the default) is as before.
+    model_rig = rig()
+    co, tris, _parts = back_sheet()
+    sides = [side_strip(azimuth, 0.25, 0.03) for azimuth in (130.0, -130.0)]
+    extra_co, extra_tris, (tube_ids, *side_ids) = join(
+        [hair.tube((0.0, 0.12, 1.50), (0.0, 0.22, 1.10), 0.035)] + sides)
+    tube_ids, side_ids = tube_ids + len(co), [ids + len(co) for ids in side_ids]
+    co, tris = np.vstack((co, extra_co)), np.vstack((tris, extra_tris + len(co)))
+    loose = hairrig.plan_rig(co, tris, model_rig)
+    describe_columns(loose)
+    tied = hairrig.plan_rig(co, tris, model_rig, ponytail=True)
+    describe_chains(tied, co, [])
+    tails = [chain for chain in tied if chain.kind == "ponytail"]
+    kept = [chain for chain in tied if chain.kind == "side"]
+    check(len([chain for chain in loose if chain.kind == "back"]) == 3
+          and len([chain for chain in loose if chain.kind == "ponytail"]) == 1,
+          "hair type: Loose keeps the 3 back columns and the tube's own chain ({})".format(
+              [chain.kind for chain in loose]))
+    check(len(tails) == 1 and not [chain for chain in tied if chain.kind == "back"] and tails[0].sheet == -1
+          and np.isin(tube_ids, tails[0].vertices).any() and np.isin(_parts["sheet"], tails[0].vertices).any(),
+          "hair type: Ponytail ties the sheet and the tube into one ponytail chain, a separate piece ({})".format(
+              [(chain.kind, chain.sheet) for chain in tied]))
+    check(len(kept) == 2 and all(any(np.isin(ids, chain.vertices).any() for chain in kept) for ids in side_ids),
+          "hair type: ...and each side strip keeps a side chain ({})".format([chain.kind for chain in tied]))
+    # The sheet is 30 cm wide at the bottom and curves round the back, so the middle of its rows lies inside the
+    # curve, as in test_hollow_ponytail: 4.5 cm from the hair (measured 2026-11-11; a real tail, c0801 h0055,
+    # 1.4 cm).
+    far = off_hair(tails[0], co) if tails else math.nan
+    middle = max(abs(float(point[0])) for point in np.vstack((tails[0].joints, tails[0].tip))) if tails else math.nan
+    check(far <= 0.05 and middle <= 0.02,
+          "hair type: the tail's chain runs down the middle, within 5 cm of the hair ({:.4f} m off, X within {:.4f} "
+          "m)".format(far, middle))
+    # Over the bone budget the tail stays a ponytail as its bones get longer.
+    small = hairrig.plan_rig(co, tris, model_rig, ponytail=True, max_bones=6)
+    check([chain.kind for chain in small].count("ponytail") == 1 and sum(len(chain.joints) for chain in small) <= 6,
+          "hair type: with room for 6 bones the tail is still one ponytail chain ({})".format(
+              [(chain.kind, len(chain.joints)) for chain in small]))
+
+
 def test_side_columns():
     # On each side three strips and a narrow stray in front of them, mirrored: at the slider's minimum spacing,
     # each side is cut into two columns, the frontmost with the stray and the first strip.
@@ -2063,7 +2104,7 @@ def main():
         for test in (test_long_hair_locks, test_one_piece_long_hair, test_separate_strands, test_crumbs,
                      test_parted_locks, test_long_hair_chains, test_bangs_chain, test_pivot_at_root, test_even_joints,
                      test_wavy_lock_straight, test_kinds, test_columns, test_u_bottom, test_mirrored_sheet,
-                     test_back_width, test_swept_sheet, test_ponytail_on_sheet, test_side_columns, test_forward_strand,
+                     test_back_width, test_swept_sheet, test_ponytail_on_sheet, test_ponytail_hair_type, test_side_columns, test_forward_strand,
                      test_light_column,
                      test_budget, test_lone_kind_survives, test_card_hair_kinds, test_card_hair_time,
                      test_moved_hair,

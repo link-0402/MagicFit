@@ -272,13 +272,14 @@ def _draw_smooth_main(layout, settings):
 def _draw_hair_main(layout, settings, hang=True, spacing=False):
     """The Hair settings that decide how much hangs from the hair bones. Hang Start and Hang Length only
     when ``hang``: the hair's own skeleton works out where hair hangs from the hair's shape. Chain Spacing
-    only when ``spacing``: for the button that builds the hair's own skeleton."""
+    and Hair Type only when ``spacing``: for the button that builds the hair's own skeleton."""
     if hang:
         col = layout.column(align=True)
         col.prop(settings, "hair_hang_start")
         col.prop(settings, "hair_hang_length")
     layout.prop(settings, "hair_neck_weight", slider=True)
     if spacing:
+        layout.prop(settings, "hair_type")
         layout.prop(settings, "hair_chain_spacing")
 
 

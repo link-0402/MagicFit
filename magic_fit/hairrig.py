@@ -981,10 +981,14 @@ def _merge_pieces(points, mesh, graph, rig, planned, spacing, max_bones, bone_le
     return [pair for pair, keep in zip(planned, alive) if keep]
 
 
-def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES, spacing=CHAIN_SPACING):
+def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES, spacing=CHAIN_SPACING,
+             ponytail=False):
     """The chains of a hair skeleton for hair ``points`` (world space, rest pose) with triangles ``tris``
     hanging from ``rig`` (`hairing.HairRig`), its cap ``cap`` off the head (see `find_locks`), in name order
-    (by angle, then by the root's X). The locks (`find_locks`) whose spine is long enough split into separate
+    (by angle, then by the root's X). With ``ponytail`` (Hair Type Ponytail), every lock whose chain is back hair
+    or a ponytail first merges into one (the largest first) with one chain of kind ponytail, a separate piece
+    that keeps its kind over the budget; the game then swings the whole tail as one and doesn't hold it to the
+    back. The rest go on as follows. The locks (`find_locks`) whose spine is long enough split into separate
     pieces (kept whole and round, `_round`) and sheet locks. The pieces merge (`_merge_pieces`: twins, then
     within ``spacing`` metres) and get a chain each. The sheet locks merge their twins and make a sheet per
     kind, side hair one per side of the head; each sheet is cut into columns ``spacing`` metres wide around
@@ -1004,6 +1008,26 @@ def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES
     planned = [(lock, plan_chain(points, lock, rig)) for lock in locks]
     planned = [(lock, chain) for lock, chain in planned if chain is not None]
     graph = _graph(mesh) if len(planned) > 1 else None
+
+    def tail_chain(lock, bone_length):
+        """The tied tail's chain: a ponytail."""
+        chain = plan_chain(points, lock, rig, bone_length)
+        if chain is not None:
+            chain.kind = "ponytail"
+        return chain
+
+    tails = []   # Hair Type Ponytail: (lock, chain) of the one tail tied from all the hair behind the head
+    if ponytail:
+        behind = sorted((pair for pair in planned if pair[1].kind in ("back", "ponytail")),
+                        key=lambda pair: -pair[0].area)
+        if behind:
+            lock = behind[0][0]
+            for other, _chain in behind[1:]:
+                lock = _merge(lock, other, mesh, points, rig, graph)
+            chain = tail_chain(lock, BONE_SPACING)
+            if chain is not None:
+                tails = [(lock, chain)]
+                planned = [pair for pair in planned if pair[1].kind not in ("back", "ponytail")]
     separate = [lock.whole and _round(points, lock) for lock, _chain in planned]
     pieces = [pair for pair, piece in zip(planned, separate) if piece]
     sheet_locks = _merge_pieces(points, mesh, graph, rig, [pair for pair, piece in zip(planned, separate)
@@ -1046,17 +1070,20 @@ def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES
     # Over the budget, the bones get longer and every chain is planned again; only a rig still over then merges
     # its pieces. The spine doesn't depend on the bone length: no chain planned again becomes None.
     bone_length = BONE_SPACING
-    chains = [chain for _lock, chain in pieces] + [chain for _lock, chain, _sheet, _c in columns]
+    chains = [chain for _lock, chain in pieces + tails] + [chain for _lock, chain, _sheet, _c in columns]
     while sum(len(chain.joints) for chain in chains) > max_bones \
             and any(len(chain.joints) > CHAIN_BONES[0] for chain in chains):
         bone_length *= BONE_GROWTH
         pieces = [(lock, plan_chain(points, lock, rig, bone_length)) for lock, _chain in pieces]
+        tails = [(lock, tail_chain(lock, bone_length)) for lock, _chain in tails]
         columns = [(lock, column_chain(lock, sheet[0], bone_length), sheet, c) for lock, _chain, sheet, c in columns]
-        chains = [chain for _lock, chain in pieces] + [chain for _lock, chain, _sheet, _c in columns]
-    column_bones = sum(len(chain.joints) for _lock, chain, _sheet, _c in columns)
+        chains = [chain for _lock, chain in pieces + tails] + [chain for _lock, chain, _sheet, _c in columns]
+    # The columns and the tied tail never merge.
+    kept_bones = sum(len(chain.joints) for _lock, chain, _sheet, _c in columns) \
+        + sum(len(chain.joints) for _lock, chain in tails)
     if sum(len(chain.joints) for chain in chains) > max_bones:
-        pieces = _merge_pieces(points, mesh, graph, rig, pieces, 0.0, max_bones - column_bones, bone_length)
-    every = [(lock, chain, None, -1) for lock, chain in pieces] + columns
+        pieces = _merge_pieces(points, mesh, graph, rig, pieces, 0.0, max_bones - kept_bones, bone_length)
+    every = [(lock, chain, None, -1) for lock, chain in pieces + tails] + columns
     # A merged lock's root moved: back in name order, as find_locks sorts.
     every.sort(key=lambda item: (round(item[0].angle, 6), item[0].root[0]))
     numbers = {}

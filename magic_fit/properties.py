@@ -551,6 +551,17 @@ class MagicFitSettings(bpy.types.PropertyGroup):
         min=0.0,
         max=1.0,
     )
+    hair_type: EnumProperty(
+        name="Hair Type",
+        description="How the hair behind the head is built into chains. Used when the chains are built",
+        items=(
+            ('LOOSE', "Loose", "Hair down the back gets up to 3 chains side by side"),
+            ('PONYTAIL', "Ponytail",
+             "All hair behind the head is tied into one tail with one Ponytail chain, which the game swings as one "
+             "and doesn't hold to the back. Side hair and bangs as with Loose"),
+        ),
+        default='LOOSE',
+    )
     hair_chain_spacing: FloatProperty(
         name="Chain Spacing",
         description=(

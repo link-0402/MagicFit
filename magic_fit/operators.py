@@ -2504,7 +2504,8 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
                                        for rest, start in zip(whole, starts)])
                 # How far the hair's cap lies off the head, measured over the whole hair; the rig state keeps it.
                 cap = hairing.cap_depth(points, tris, rig)
-                plans = hairrig.plan_rig(points, tris, rig, cap=cap, spacing=settings.hair_chain_spacing)
+                plans = hairrig.plan_rig(points, tris, rig, cap=cap, spacing=settings.hair_chain_spacing,
+                                         ponytail=settings.hair_type == 'PONYTAIL')
                 if again and not self.rebuild:
                     # Built again only because a part joined: the chains the user picked kinds for keep them.
                     plans = hairrig.keep_kinds(armature, plans)
