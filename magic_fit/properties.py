@@ -555,19 +555,63 @@ class MagicFitSettings(bpy.types.PropertyGroup):
         name="Hair Type",
         description="How the hair behind the head is built into chains. Used when the chains are built",
         items=(
-            ('LOOSE', "Loose", "Hair down the back gets up to 3 chains side by side"),
+            ('LOOSE', "Loose", "Hair down the back gets Back Chains chains side by side"),
             ('PONYTAIL', "Ponytail",
-             "All hair behind the head is tied into one tail with one Ponytail chain, which the game swings as one "
-             "and doesn't hold to the back. Side hair and bangs as with Loose"),
+             "All hair behind the head is tied into one tail with Ponytail Chains chains side by side, which the "
+             "game swings as one and doesn't hold to the back. Side hair and bangs as with Loose"),
         ),
         default='LOOSE',
+    )
+    hair_back_chains: IntProperty(
+        name="Back Chains",
+        description="How many chains the hair down the back gets, side by side across it. Used when the chains are built",
+        default=2,
+        min=hairrig.COUNT_RANGES["back"][0],
+        max=hairrig.COUNT_RANGES["back"][1],
+    )
+    hair_ponytail_chains: IntProperty(
+        name="Ponytail Chains",
+        description="How many chains the tied tail gets, side by side across it. Used when the chains are built",
+        default=2,
+        min=hairrig.COUNT_RANGES["ponytail"][0],
+        max=hairrig.COUNT_RANGES["ponytail"][1],
+    )
+    hair_side_chains_left: IntProperty(
+        name="Left Side Chains",
+        description=(
+            "How many chains the side hair on the character's left gets, from the front back. Used when the chains "
+            "are built"
+        ),
+        default=2,
+        min=hairrig.COUNT_RANGES["left"][0],
+        max=hairrig.COUNT_RANGES["left"][1],
+    )
+    hair_side_chains_right: IntProperty(
+        name="Right Side Chains",
+        description=(
+            "How many chains the side hair on the character's right gets, from the front back. Used when the chains "
+            "are built"
+        ),
+        default=2,
+        min=hairrig.COUNT_RANGES["right"][0],
+        max=hairrig.COUNT_RANGES["right"][1],
+    )
+    hair_bang_chains: IntProperty(
+        name="Bang Chains",
+        description=(
+            "How many chains the bangs get, side by side across the front. On short hair (nothing longer than "
+            "20 cm), the chains all around the head. Used when the chains are built"
+        ),
+        default=2,
+        min=hairrig.COUNT_RANGES["bangs"][0],
+        max=hairrig.COUNT_RANGES["bangs"][1],
     )
     hair_chain_spacing: FloatProperty(
         name="Chain Spacing",
         description=(
-            "The width of the columns the hair is cut into around the head, one chain each (at most 3 behind "
-            "and 2 per side). Higher: wider columns, fewer chains on bangs and narrow hair. Used when the chains "
-            "are built"
+            "How wide Detect cuts the hair into columns around the head, one chain each (at most 3 behind and 2 "
+            "per side), and how close separate pieces of hair (a ponytail or braid of its own) merge into one chain "
+            "when the chains are built"
         ),
         subtype='DISTANCE',
         default=hairrig.CHAIN_SPACING,

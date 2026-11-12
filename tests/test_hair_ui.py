@@ -95,11 +95,14 @@ def drawn_texts(settings, rig_state):
     return drawn
 
 
-HAIR_MAIN = {"hair_hang_start", "hair_hang_length", "hair_neck_weight", "hair_type", "hair_chain_spacing"}
+HAIR_MAIN = {"hair_hang_start", "hair_hang_length", "hair_neck_weight", "hair_type", "hair_back_chains",
+             "hair_ponytail_chains", "hair_side_chains_left", "hair_side_chains_right", "hair_bang_chains",
+             "hair_chain_spacing"}
 
 
 def hair_panel_props(context, settings):
-    """Which of Hang Start, Hang Length, Neck Weight, Hair Type and Chain Spacing are drawn below the brush's mode
+    """Which of Hang Start, Hang Length, Neck Weight, Hair Type, the chain counts and Chain Spacing (under Options)
+    are drawn below the brush's mode
     (Properties > Tool), in the tool header's Options Hair section and in the Hair Weights panel."""
     def props(draw):
         drawn = []
@@ -352,10 +355,12 @@ def steps():
     env.screenshot("hair_custom_chains.png", whole_window=True)
 
     # --- The panels: the hair's own skeleton works out where hair hangs, so only Neck Weight stays. The button
-    # building it also shows Hair Type and Chain Spacing; the brush builds no chains.
+    # building it also shows Hair Type, the chain counts (Back Chains with Hair Type Loose) and, under Options,
+    # Chain Spacing; the brush builds no chains.
     hang = ["hair_hang_start", "hair_hang_length", "hair_neck_weight"]
     neck = ["hair_neck_weight"]
-    spaced = ["hair_type", "hair_chain_spacing"]
+    spaced = ["hair_type", "hair_back_chains", "hair_side_chains_left", "hair_side_chains_right", "hair_bang_chains",
+              "hair_chain_spacing"]
 
     def plain_mesh(name):
         mesh = bpy.data.objects.new(name, bpy.data.meshes.new(name))

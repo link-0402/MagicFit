@@ -786,6 +786,170 @@ def test_side_columns():
               [(np.round(a, 3).tolist(), np.round(b, 3).tolist()) for a, b in pairs]))
 
 
+def counts(back=2, ponytail=2, left=2, right=2, bangs=2):
+    """The chain counts (`hairrig.ChainCounts`), the settings' defaults but those given."""
+    return hairrig.ChainCounts(back, ponytail, left, right, bangs)
+
+
+def kinds_of(chains):
+    return [(chain.kind, chain.sheet, chain.order) for chain in chains]
+
+
+def test_back_counts():
+    # Back Chains: exactly that many back columns, one sheet side by side; 2 split straight behind, the +X one
+    # first, 3 have the middle one there.
+    model_rig = rig()
+    co, tris, _parts = one_piece_long_hair()
+    for n in range(1, 5):
+        chains = hairrig.plan_rig(co, tris, model_rig, counts=counts(back=n))
+        back = [chain for chain in chains if chain.kind == "back"]
+        sheets = {chain.sheet for chain in back}
+        check(len(back) == n == len(chains) and len(sheets) == 1 and min(sheets) >= 0,
+              "back counts: {:d} asked, {:d} back chains in one sheet ({})".format(n, len(back), kinds_of(chains)))
+        if len(sheets) != 1:
+            continue
+        ordered = columns_by_sheet(back)[min(sheets)]
+        check(not any_crossed(ordered), "back counts: {:d}: none crossed".format(n))
+        if n == 2 and len(ordered) == 2:
+            a, b = ordered
+            check(a.joints[0][0] > 0.0 > b.joints[0][0] and abs(float(a.joints[0][0] + b.joints[0][0])) <= 0.01
+                  and abs(float(a.tip[0] + b.tip[0])) <= 0.02,
+                  "back counts: 2 mirror each other across straight behind, +X first (roots X {:.3f}, {:.3f}; tips X "
+                  "{:.3f}, {:.3f})".format(float(a.joints[0][0]), float(b.joints[0][0]), float(a.tip[0]),
+                                           float(b.tip[0])))
+        if n == 3 and len(ordered) == 3:
+            check(abs(float(ordered[1].joints[0][0])) <= 0.005,
+                  "back counts: 3 have the middle one straight behind ({:.3f})".format(float(ordered[1].joints[0][0])))
+
+
+def test_side_counts():
+    # Left and Right Side Chains: the character's left (+X) and right side each get their own count, the front
+    # chain first.
+    model_rig = rig()
+    plus = [side_strip(142.0, 0.22, 0.01)] + [side_strip(azimuth, 0.30, 0.04) for azimuth in (128.0, 113.0, 99.0)]
+    minus = [(verts * np.array((-1.0, 1.0, 1.0)), [tuple(reversed(quad)) for quad in quads]) for verts, quads in plus]
+    co, tris, _ranges = join(plus + minus)
+    chains, made, _short = hairrig.plan_layout(co, tris, model_rig, counts=counts(left=1, right=2))
+    sides = {}
+    for chain in chains:
+        if chain.kind == "side":
+            sides.setdefault(float(np.sign(chain.joints[0][0])), []).append(chain)
+    check(len(sides.get(1.0, [])) == 1 and len(sides.get(-1.0, [])) == 2 and len(chains) == 3
+          and made["left"] == 1 and made["right"] == 2,
+          "side counts: Left 1 gives +X one chain, Right 2 gives -X two ({}, {})".format(kinds_of(chains), made))
+    right = sorted(sides.get(-1.0, []), key=lambda chain: chain.order)
+    if len(right) == 2:
+        front, behind = (hairrig._angle(model_rig, chain.joints[0]) for chain in right)
+        check(front < behind, "side counts: the first of the right side's chains in front ({:.1f} and {:.1f} "
+              "degrees)".format(front, behind))
+
+
+def bangs_strip(x=0.0, width=0.04):
+    """`bangs_hair`'s strip, moved ``x`` along X and ``width`` wide: (vertices, quads)."""
+    return hair.strip((x, -0.10, 1.625), (x, -0.19, 1.54), width, (1.0, 0.0, 0.0))
+
+
+def test_bang_counts():
+    # Bang Chains: that many bangs chains side by side across the front, made of the bangs, -X first. The sheet
+    # down the back keeps the hair from being short.
+    model_rig = rig()
+    co, tris, _parts = back_sheet()
+    bangs_co, bangs_tris, _ids = join([bangs_strip(x, 0.03) for x in (-0.035, 0.0, 0.035)])
+    bangs_ids = np.arange(len(co), len(co) + len(bangs_co))
+    co, tris = np.vstack((co, bangs_co)), np.vstack((tris, bangs_tris + len(co)))
+    for n in (1, 3):
+        chains = hairrig.plan_rig(co, tris, model_rig, counts=counts(bangs=n))
+        bangs = sorted((chain for chain in chains if chain.kind == "bangs"), key=lambda chain: chain.order)
+        check(len(bangs) == n and len({chain.sheet for chain in bangs}) == 1
+              and all(np.isin(chain.vertices, bangs_ids).all() for chain in bangs),
+              "bang counts: {:d} asked, {:d} bangs chains of the bangs ({})".format(n, len(bangs), kinds_of(chains)))
+        check(all(a.joints[0][0] < b.joints[0][0] for a, b in zip(bangs, bangs[1:])),
+              "bang counts: {:d}: side by side, -X first ({})".format(
+                  n, [round(float(chain.joints[0][0]), 3) for chain in bangs]))
+
+
+def short_hair():
+    """Short hair: the scalp cap, `bangs_hair`'s strip and five strips 12 cm long around the sides and the back:
+    (points, triangles)."""
+    parts = [hair.cap(), bangs_strip()]
+    parts += [side_strip(azimuth, 0.12, 0.04) for azimuth in (130.0, -130.0, 60.0, -60.0, 0.0)]
+    co, tris, _ranges = join(parts)
+    return co, tris
+
+
+def test_short_hair_ring():
+    # Short hair (no lock longer than BANGS_LENGTH): with counts one bangs sheet around the whole head, Bang Chains
+    # sectors, the first in front; not tied into a ponytail. Without counts it keeps its kinds, and Detect counts
+    # all of its column chains as bangs.
+    model_rig = rig()
+    co, tris = short_hair()
+    chains, made, short = hairrig.plan_layout(co, tris, model_rig, counts=counts(bangs=4))
+    check(short and len(chains) == 4 and all(chain.kind == "bangs" for chain in chains)
+          and len({chain.sheet for chain in chains}) == 1 and made["bangs"] == 4,
+          "short hair: 4 bangs chains in one sheet around the head ({}, {})".format(kinds_of(chains), made))
+    if chains:
+        first = min(chains, key=lambda chain: chain.order)
+        angle = hairrig._angle(model_rig, first.joints[0])
+        check(angle <= 45.0, "short hair: the first chain in front ({:.1f} degrees)".format(angle))
+        angles = sorted(hairrig._angle(model_rig, chain.joints[0]) for chain in chains)
+        check(angles[-1] >= 135.0, "short hair: one behind ({})".format([round(a, 1) for a in angles]))
+        # A sector holding strips far apart has its chain between them, off the hair: measured, not checked.
+        print("      off the hair: {} m".format([round(off_hair(chain, co), 3) for chain in chains]))
+    tied = hairrig.plan_rig(co, tris, model_rig, ponytail=True, counts=counts(bangs=4))
+    check(len(tied) == 4 and all(chain.kind == "bangs" for chain in tied),
+          "short hair: Hair Type Ponytail ties nothing ({})".format(kinds_of(tied)))
+    auto, _made, auto_short = hairrig.plan_layout(co, tris, model_rig)
+    check(auto_short and any(chain.kind != "bangs" for chain in auto),
+          "short hair: without counts it keeps its kinds ({})".format(kinds_of(auto)))
+    found, found_short = hairrig.detect_counts(co, tris, model_rig)
+    total = len([chain for chain in auto if chain.sheet >= 0])
+    check(found_short and found == {"bangs": min(total, 6)},
+          "short hair: Detect counts its {:d} column chains as bangs ({})".format(total, found))
+
+
+def test_ponytail_counts():
+    # Hair Type Ponytail with Ponytail Chains: 1 is the one tail as before; 2 and 3 cut the tail side by side, one
+    # sheet of ponytail chains, 2 mirrored across straight behind.
+    model_rig = rig()
+    co, tris, _parts = back_sheet()
+    tube_co, tube_tris, _ids = join([hair.tube((0.0, 0.12, 1.50), (0.0, 0.22, 1.10), 0.035)])
+    co, tris = np.vstack((co, tube_co)), np.vstack((tris, tube_tris + len(co)))
+    for n in (1, 2, 3):
+        chains, made, _short = hairrig.plan_layout(co, tris, model_rig, ponytail=True, counts=counts(ponytail=n))
+        tails = sorted((chain for chain in chains if chain.kind == "ponytail"), key=lambda chain: chain.order)
+        sheets = {chain.sheet for chain in tails}
+        check(len(tails) == n == len(chains) and made["ponytail"] == n
+              and (sheets == {-1} if n == 1 else len(sheets) == 1 and min(sheets) >= 0),
+              "ponytail counts: {:d} asked, {:d} ponytail chains ({}, {})".format(n, len(tails), kinds_of(chains), made))
+        check(not any_crossed(tails), "ponytail counts: {:d}: none crossed".format(n))
+        if n == 2 and len(tails) == 2:
+            a, b = tails
+            check(a.joints[0][0] > 0.0 > b.joints[0][0] and abs(float(a.joints[0][0] + b.joints[0][0])) <= 0.02,
+                  "ponytail counts: 2 either side of straight behind ({:.3f}, {:.3f})".format(
+                      float(a.joints[0][0]), float(b.joints[0][0])))
+
+
+def test_detect_counts():
+    # Detect: the counts the hair gets without any (here 3 back, 1 per side, 1 bangs); built with them, each area
+    # has as many chains as without. With Hair Type Ponytail, one ponytail chain.
+    model_rig = rig()
+    co, tris, _parts = back_sheet()
+    extra = [side_strip(azimuth, 0.25, 0.03) for azimuth in (130.0, -130.0)]
+    extra.append(bangs_strip())
+    extra_co, extra_tris, _ids = join(extra)
+    co, tris = np.vstack((co, extra_co)), np.vstack((tris, extra_tris + len(co)))
+    auto, made, short = hairrig.plan_layout(co, tris, model_rig)
+    found, found_short = hairrig.detect_counts(co, tris, model_rig)
+    check(not short and not found_short and found == {"back": 3, "left": 1, "right": 1, "bangs": 1},
+          "detect: 3 back, 1 per side, 1 bangs ({}; {})".format(found, kinds_of(auto)))
+    _chains, again, _short = hairrig.plan_layout(co, tris, model_rig, counts=counts(**found))
+    check(again == made, "detect: built with them, as many chains per area as without ({} against {})".format(
+        again, made))
+    tied, _tied_short = hairrig.detect_counts(co, tris, model_rig, ponytail=True)
+    check(tied.get("ponytail") == 1 and "back" not in tied, "detect: Hair Type Ponytail finds 1 ponytail ({})".format(
+        tied))
+
+
 def test_forward_strand():
     # Back hair, a side strip in front of the ear and a strand rooted behind the ear that falls forward over the
     # shoulder onto the chest (40 degrees from the front): the strand is side hair, the side sheet's rear column, and
@@ -2148,7 +2312,9 @@ def main():
         for test in (test_long_hair_locks, test_one_piece_long_hair, test_separate_strands, test_crumbs,
                      test_parted_locks, test_long_hair_chains, test_bangs_chain, test_pivot_at_root, test_even_joints,
                      test_wavy_lock_straight, test_kinds, test_columns, test_u_bottom, test_mirrored_sheet,
-                     test_lopsided_locks, test_back_width, test_swept_sheet, test_ponytail_on_sheet, test_ponytail_hair_type, test_side_columns, test_forward_strand,
+                     test_lopsided_locks, test_back_width, test_swept_sheet, test_ponytail_on_sheet, test_ponytail_hair_type, test_side_columns, test_back_counts,
+                     test_side_counts, test_bang_counts, test_short_hair_ring, test_ponytail_counts, test_detect_counts,
+                     test_forward_strand,
                      test_light_column,
                      test_budget, test_lone_kind_survives, test_card_hair_kinds, test_card_hair_time,
                      test_moved_hair,

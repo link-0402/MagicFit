@@ -23,6 +23,7 @@ from .operators import (
     MAGIC_FIT_OT_close_rips,
     MAGIC_FIT_OT_find_rips,
     MAGIC_FIT_OT_fit_move,
+    MAGIC_FIT_OT_detect_hair_chains,
     MAGIC_FIT_OT_hair_weights,
     MAGIC_FIT_OT_heel_weights,
     MAGIC_FIT_OT_line_up,
@@ -271,8 +272,8 @@ def _draw_smooth_main(layout, settings):
 
 def _draw_hair_main(layout, settings, hang=True, spacing=False):
     """The Hair settings that decide how much hangs from the hair bones. Hang Start and Hang Length only
-    when ``hang``: the hair's own skeleton works out where hair hangs from the hair's shape. Chain Spacing
-    and Hair Type only when ``spacing``: for the button that builds the hair's own skeleton."""
+    when ``hang``: the hair's own skeleton works out where hair hangs from the hair's shape. Hair Type, the
+    chain counts and Detect only when ``spacing``: for the button that builds the hair's own skeleton."""
     if hang:
         col = layout.column(align=True)
         col.prop(settings, "hair_hang_start")
@@ -280,7 +281,12 @@ def _draw_hair_main(layout, settings, hang=True, spacing=False):
     layout.prop(settings, "hair_neck_weight", slider=True)
     if spacing:
         layout.prop(settings, "hair_type")
-        layout.prop(settings, "hair_chain_spacing")
+        col = layout.column(align=True)
+        col.prop(settings, "hair_ponytail_chains" if settings.hair_type == 'PONYTAIL' else "hair_back_chains")
+        col.prop(settings, "hair_side_chains_left")
+        col.prop(settings, "hair_side_chains_right")
+        col.prop(settings, "hair_bang_chains")
+        layout.operator(MAGIC_FIT_OT_detect_hair_chains.bl_idname, icon='VIEWZOOM')
 
 
 def _brush_hangs(context, settings):
@@ -298,8 +304,11 @@ def _button_hangs(context, settings):
     return settings.hair_skeleton_mode != 'CUSTOM' or _brush_hangs(context, settings)
 
 
-def _draw_hair_more(layout, settings):
-    """The other Hair settings: how chains share long hair, how layers hold together, the group limit."""
+def _draw_hair_more(layout, settings, spacing=False):
+    """The other Hair settings: Chain Spacing (only when ``spacing``, for the button that builds the hair's own
+    skeleton), how chains share long hair, how layers hold together, the group limit."""
+    if spacing:
+        layout.prop(settings, "hair_chain_spacing")
     layout.prop(settings, "hair_chain_stretch", slider=True)
     layout.prop(settings, "hair_joint_blend")
     layout.prop(settings, "hair_layer_range")
@@ -1062,7 +1071,8 @@ class VIEW3D_PT_hair_weights_sidebar(tabs.TabPanel, bpy.types.Panel):
         if settings.group_mode == 'ACTIVE':
             # Hair Weights needs All Groups, and no other panel on this tab has the choice.
             _draw_choice(col, settings, "group_mode")
-        _draw_options(layout, "magic_fit_hair_options", lambda body: _draw_hair_more(body, settings))
+        _draw_options(layout, "magic_fit_hair_options", lambda body: _draw_hair_more(
+            body, settings, spacing=settings.hair_skeleton_mode == 'CUSTOM'))
         col = layout.column()
         problem = check_hair_weights_ready(context)
         if problem is not None:

@@ -2363,6 +2363,47 @@ def hair_skeleton_text(reference, race, number):
 
 
 REBUILD_DESCRIPTION = "Build the hair's bone chains again from its shape. Your bone edits are lost"
+# The chain count settings' names in reports, by area (`hairrig.AREAS`).
+AREA_LABELS = {"back": "Back", "ponytail": "Ponytail", "left": "Left Side", "right": "Right Side", "bangs": "Bang"}
+# The chain count setting of each area.
+AREA_SETTINGS = {"back": "hair_back_chains", "ponytail": "hair_ponytail_chains", "left": "hair_side_chains_left",
+                 "right": "hair_side_chains_right", "bangs": "hair_bang_chains"}
+
+
+def hair_chain_counts(settings):
+    """The chain counts in the Hair settings (`hairrig.ChainCounts`)."""
+    return hairrig.ChainCounts(**{area: getattr(settings, name) for area, name in AREA_SETTINGS.items()})
+
+
+def hair_count_areas(settings, short):
+    """The areas whose chain counts the chains are built with: on short hair the bangs only; else the back or,
+    with Hair Type Ponytail, the tail, then the sides and the bangs."""
+    if short:
+        return ["bangs"]
+    return ["ponytail" if settings.hair_type == 'PONYTAIL' else "back", "left", "right", "bangs"]
+
+
+def chain_count_notes(settings, made, short):
+    """What the build reports of the chain counts: short hair's chains around the head, and each area with fewer
+    column chains than its count asks (``made``, `hairrig.plan_layout`) but some."""
+    notes = []
+    if short:
+        notes.append("Short hair: {:s} all around the head (Bang Chains)".format(hairrig.counted(made["bangs"], "chain")))
+    for area in hair_count_areas(settings, short):
+        asked = getattr(settings, AREA_SETTINGS[area])
+        if 0 < made[area] < asked:
+            notes.append("Built {:d} of {:d} {:s} chains: too little hair there for more".format(
+                made[area], asked, AREA_LABELS[area]))
+    return notes
+
+
+def joined_rests(rests):
+    """The rest geometries ``rests`` (`straighten.rest_geometry`) as one hair: (points, triangles)."""
+    points = np.concatenate([rest.co for rest in rests])
+    starts = np.cumsum([0] + [len(rest.co) for rest in rests[:-1]])
+    tris = np.concatenate([np.asarray(rest.tris, dtype=np.int64).reshape(-1, 3) + start
+                           for rest, start in zip(rests, starts)])
+    return points, tris
 
 
 class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
@@ -2498,14 +2539,12 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
                     rest.co, rig, cap=stored if stored >= 0.0 else hairing.cap_depth(rest.co, rest.tris, rig))]
             if custom and (self.rebuild or again or not have):
                 # Built over the whole hair, its other parts too, as the matching sees it.
-                points = np.concatenate([rest.co for rest in whole])
-                starts = np.cumsum([0] + [len(rest.co) for rest in whole[:-1]])
-                tris = np.concatenate([np.asarray(rest.tris, dtype=np.int64).reshape(-1, 3) + start
-                                       for rest, start in zip(whole, starts)])
+                points, tris = joined_rests(whole)
                 # How far the hair's cap lies off the head, measured over the whole hair; the rig state keeps it.
                 cap = hairing.cap_depth(points, tris, rig)
-                plans = hairrig.plan_rig(points, tris, rig, cap=cap, spacing=settings.hair_chain_spacing,
-                                         ponytail=settings.hair_type == 'PONYTAIL')
+                counts = hair_chain_counts(settings)
+                plans, made, short = hairrig.plan_layout(points, tris, rig, cap=cap, spacing=settings.hair_chain_spacing,
+                                                         ponytail=settings.hair_type == 'PONYTAIL', counts=counts)
                 if again and not self.rebuild:
                     # Built again only because a part joined: the chains the user picked kinds for keep them.
                     plans = hairrig.keep_kinds(armature, plans)
@@ -2584,6 +2623,8 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
             elif built is not None:
                 self.report({'INFO'}, "Built {:s} with {:s} for the hair".format(
                     hairrig.counted(len(chains), "chain"), hairrig.counted(bone_count, "bone")))
+                for text in chain_count_notes(settings, made, short):
+                    self.report({'INFO'}, text)
             else:
                 self.report({'INFO'}, "Used the hair's own skeleton on '{:s}': {:s}, {:s}".format(
                     armature.name, hairrig.counted(len(chains), "chain"), hairrig.counted(bone_count, "bone")))
@@ -2641,6 +2682,63 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
                                       "hair close to it (bangs) move too")
         if custom:
             settings.hair_skeleton_mode = 'CUSTOM'
+        return {'FINISHED'}
+
+
+class MAGIC_FIT_OT_detect_hair_chains(bpy.types.Operator):
+    """Set the chain counts to the ones Magic Fit finds on the hair (columns Chain Spacing wide around the head,
+    at most 3 behind and 2 per side). Areas without hair keep their counts"""
+    bl_idname = "magic_fit.detect_hair_chains"
+    bl_label = "Detect"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        if context.mode not in {'OBJECT', 'PAINT_WEIGHT'}:
+            cls.poll_message_set("Detect the chains in Object or Weight Paint mode")
+            return False
+        if not hair_targets(context, context.scene.magic_fit):
+            cls.poll_message_set("Select the hair meshes")
+            return False
+        if _hair_reference() is None:
+            cls.poll_message_set("The hair reference data (hair_reference.npz) is missing: reinstall the add-on")
+            return False
+        return True
+
+    def execute(self, context):
+        settings = context.scene.magic_fit
+        targets = hair_targets(context, settings)
+        reference = hairing.Reference.get()
+        race = settings.hair_race
+        # The hair as the chains are built over it: its other parts too, on the head where its armature has it.
+        armature = next((found for found in map(hairing.weighted_armature, targets) if found is not None), None)
+        parts = hairing.hair_parts(context, targets, armature, race)
+        if armature is None and parts:
+            armature = hairing.weighted_armature(parts[0])
+        rig = reference.rig(race, 0).moved(hairing.armature_offset(armature, reference.rig(race, 0)))
+        whole = straighten.rest_geometry(context, targets + parts, ('INDEXED',) * (len(targets) + len(parts)))
+        points, tris = joined_rests(whole)
+        try:
+            found, short = hairrig.detect_counts(points, tris, rig, cap=hairing.cap_depth(points, tris, rig),
+                                                 spacing=settings.hair_chain_spacing,
+                                                 ponytail=settings.hair_type == 'PONYTAIL')
+        except hairing.HairError as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
+        if not found:
+            self.report({'INFO'}, "No hair hangs from the head: the chain counts stay as they are")
+            return {'FINISHED'}
+        for area, count in found.items():
+            setattr(settings, AREA_SETTINGS[area], count)
+        if short:
+            self.report({'INFO'}, "Short hair: {:d} Bang Chains all around the head".format(found["bangs"]))
+            return {'FINISHED'}
+        areas = hair_count_areas(settings, False)
+        self.report({'INFO'}, "Detected " + ", ".join("{:d} {:s}".format(found[area], AREA_LABELS[area])
+                                                      for area in areas if area in found) + " chains")
+        missing = [AREA_LABELS[area] for area in areas if area not in found]
+        if missing:
+            self.report({'INFO'}, "No hair found for {:s} Chains: kept as they are".format(", ".join(missing)))
         return {'FINISHED'}
 
 
@@ -4359,6 +4457,7 @@ classes = (
     MAGIC_FIT_OT_heel_weights,
     MAGIC_FIT_OT_connect_parts,
     MAGIC_FIT_OT_hair_weights,
+    MAGIC_FIT_OT_detect_hair_chains,
     MAGIC_FIT_OT_pick_hair_skeleton,
     MAGIC_FIT_OT_earring_weights,
     MAGIC_FIT_OT_face_weights,

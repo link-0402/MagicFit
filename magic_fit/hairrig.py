@@ -70,6 +70,14 @@ Then it plans a chain of bones down each lock:
   a lock that went whole into the column of its root pulled that column's chain along: on symmetric hair the
   middle chain followed a lock rooted on a column's edge 2 cm to one side. A column's hair past a gap down
   it (COLUMN_GAP) goes back to its lock's column, so the chain doesn't cross the gap off the hair.
+- With chain counts set (`ChainCounts`, the Back, Ponytail, Side and Bang Chains settings), the user decides
+  instead of the chain spacing: each sheet's hair goes into its columns vertex by vertex (`_count_labels`), as
+  many as its count, equal arcs across the sheet's width around the head (between the COUNT_QUANTILES of its
+  area), with no MIN_COLUMN_AREA; a column only goes when it holds no chain. Side hair on the character's left
+  (+X) has the left count. With Hair Type Ponytail and more than one ponytail chain, the tied tail is cut into
+  columns side by side the same way. Short hair (`_short`: no lock longer than BANGS_LENGTH, separate pieces
+  too) is one bangs sheet around the whole head, cut into the bang count's equal sectors, the first centered
+  straight in front; its separate pieces (a bun) keep their chains. Without counts (`detect_counts`, Detect) the columns are the chain spacing wide.
 - The budget: while the rig takes more than MAX_HAIR_BONES bones and some chain has more than CHAIN_BONES[0],
   the bones get longer (BONE_SPACING grows by BONE_GROWTH) and every chain is planned again: the columns keep
   their chains. Only a rig still over then merges its pieces, until it fits or one is left: the smallest piece
@@ -102,6 +110,7 @@ import heapq
 import json
 import math
 import re
+from collections import namedtuple
 
 import numpy as np
 
@@ -166,6 +175,16 @@ BACK_COLUMNS = 3
 COLUMN_GAP = 0.05
 # The most columns on each side: the frontmost with hair and one for everything behind it.
 SIDE_COLUMNS = 2
+# The chains per area the user sets (the Back, Ponytail, Side and Bang Chains settings; plan_layout's ``counts``):
+# ``back`` columns of back hair, ``ponytail`` chains of the tail Hair Type Ponytail ties, ``left`` and ``right``
+# columns of side hair on the character's left (+X) and right, ``bangs`` columns of bangs (of the whole hair
+# around the head on short hair, `_short`).
+ChainCounts = namedtuple("ChainCounts", "back ponytail left right bangs")
+# The fewest and most chains of each area (`ChainCounts`'s fields).
+COUNT_RANGES = {"back": (1, 4), "ponytail": (1, 3), "left": (1, 2), "right": (1, 2), "bangs": (1, 6)}
+# With counts, a sheet's columns are equal arcs between these area-weighted quantiles of where its hair hangs
+# around the head (`_count_labels`): a stray strand doesn't widen them, and hair outside goes to the outer columns.
+COUNT_QUANTILES = (0.02, 0.98)
 # A rig over its budget (MAX_HAIR_BONES) keeps its chains and lengthens their bones: BONE_SPACING grows by this
 # and every chain is planned again, until the rig fits or every chain has CHAIN_BONES[0] bones (user ruling: scale
 # the bones up rather than drop back chains).
@@ -510,12 +529,14 @@ class ChainPlan:
     ``middle`` ((n, 3), the joints when None) is where they would lie on the spine itself, down the middle of
     the lock's hair: merges stay on the hair by it (`_on_hair`). A column's chain (see plan_rig) has the
     ``sheet`` it is in (from 0, the sheets numbered in the order of their first chain) and its ``order`` among
-    that sheet's chains (from 0, by column); a separate piece's has -1 for both."""
+    that sheet's chains (from 0, by column); a separate piece's has -1 for both. ``length`` is the spine's
+    (metres)."""
 
-    __slots__ = ("kind", "joints", "tip", "area", "whole", "angle", "vertices", "light", "middle", "sheet", "order")
+    __slots__ = ("kind", "joints", "tip", "area", "whole", "angle", "vertices", "light", "middle", "sheet", "order",
+                 "length")
 
     def __init__(self, kind, joints, tip, area, whole, angle, vertices, light=False, middle=None, sheet=-1,
-                 order=-1):
+                 order=-1, length=0.0):
         self.kind = kind
         self.joints = joints
         self.tip = tip
@@ -527,6 +548,7 @@ class ChainPlan:
         self.middle = joints if middle is None else middle
         self.sheet = sheet
         self.order = order
+        self.length = length
 
 
 def chain_kind(angle, length, whole):
@@ -647,7 +669,7 @@ def plan_chain(points, lock, rig=None, bone_length=BONE_SPACING):
     elif kind == "back" and rig is not None and line[-1][2] < line[0][2] and _angle(rig, line[-1]) <= SIDE_ANGLE:
         kind = "side"
     return ChainPlan(kind, _spread(_arc(line, seg), count), line[-1].copy(), lock.area, lock.whole,
-                     lock.angle, lock.vertices, lock.light, _spread(line, count))
+                     lock.angle, lock.vertices, lock.light, _spread(line, count), length=length)
 
 
 def _roots(lock):
@@ -740,8 +762,47 @@ def _back_numbers(theta, radius, width):
     return np.clip(np.rint((np.asarray(theta) % (2.0 * math.pi) - math.pi) * radius / width), -half, half)
 
 
-def _vertex_columns(points, rig, locks, radius, width):
-    """The back sheet's ``locks`` cut into columns ``width`` wide around the head by where its hair hangs: each
+def _behind(theta, far, radius):
+    """How far angles ``theta`` (`_polar`) lie from straight behind (radians, negative toward +X), each as an arc at
+    its own distance ``far`` from the head's axis (no less than ``radius``) over ``radius``: hair hanging farther
+    behind the head spans a smaller angle, and by the angle alone a middle column would widen down the back."""
+    return (np.asarray(theta) % (2.0 * math.pi) - math.pi) * np.maximum(far, radius) / radius
+
+
+def _quantiles(values, weights, shares):
+    """The ``weights``-weighted quantiles ``shares`` of ``values``, each value at the middle of its weight: mirrored
+    values with mirrored weights have mirrored quantiles."""
+    order = np.argsort(values, kind='stable')
+    values, weights = np.asarray(values, dtype=np.float64)[order], np.asarray(weights, dtype=np.float64)[order]
+    return np.interp(shares, (np.cumsum(weights) - 0.5 * weights) / weights.sum(), values)
+
+
+def _count_labels(cut, theta, far, radius, weights, count):
+    """The columns (0 to ``count`` - 1) of a sheet's vertices at angles ``theta`` and distances ``far`` from the
+    head's axis (`_polar`), of areas ``weights``, the sheet's roots ``radius`` from the axis, cut into ``count``
+    columns. ``cut`` "ring" (short hair, `_short`): equal sectors around the whole head, the first centered straight
+    in front, then on toward +X. Otherwise equal arcs between the sheet's COUNT_QUANTILES: "back" and "ponytail"
+    across the back (`_behind`), +X first; "side" from the front back; "bangs" across the front, -X first."""
+    if cut == "ring":
+        return np.rint(np.asarray(theta) / (2.0 * math.pi / count)).astype(np.int64) % count
+    if cut in ("back", "ponytail"):
+        value = _behind(theta, far, radius)
+    elif cut == "side":
+        value = np.abs(theta)
+    else:
+        value = np.asarray(theta, dtype=np.float64)
+    low, high = _quantiles(value, weights, COUNT_QUANTILES)
+    step = (high - low) / count
+    if step <= 0.0:
+        return np.zeros(len(value), dtype=np.int64)
+    return np.clip(np.floor((value - low) / step), 0, count - 1).astype(np.int64)
+
+
+def _vertex_columns(points, rig, locks, radius, width, cut="back", count=None):
+    """With ``count`` (a chain count, `ChainCounts`), the sheet's ``locks`` cut into ``count`` columns by where its
+    hair hangs, each own vertex by `_count_labels` (``cut``, the sheet's ``radius``), no column joining another; a
+    lock's crumbs go with it, into the column holding most of its own hair. Without, the back sheet's ``locks`` cut
+    into columns ``width`` wide around the head by where its hair hangs: each
     of their own (not joined) vertices, whatever lock or strand it is in, by its own angle around the head's
     vertical axis (`_polar`) times its distance from that axis (no less than ``radius``, the sheet's root radius),
     into the back columns of `_columns` (the middle one straight behind,
@@ -765,31 +826,38 @@ def _vertex_columns(points, rig, locks, radius, width):
         measured_all = np.concatenate([np.asarray(lock.measured, dtype=bool) for lock in locks])
     own = np.flatnonzero(~joined_all)
     theta, far = _polar(rig, points[every[own]])
-    # Each vertex's arc at its own distance from the axis (no less than ``radius``): hair hanging farther behind
-    # the head spans a smaller angle, and by the angle alone the middle column would widen down the back.
-    behind = (theta % (2.0 * math.pi) - math.pi) * np.maximum(far, radius) / radius
-    theta = math.pi + np.clip(behind, -math.pi + 1e-9, math.pi - 1e-9)
-    # Crumbs follow their lock, as find_locks joined them: into the column holding most of its own hair, where
-    # the small-column rule counts them, one item per lock in the middle of that column.
-    half = BACK_COLUMNS // 2
     owner = np.repeat(np.arange(len(locks)), [len(lock.vertices) for lock in locks])
-    held = np.zeros((len(locks), 2 * half + 1))
-    np.add.at(held, (owner[own], _back_numbers(theta, radius, width).astype(np.int64) + half), area_all[own])
     crumbs = np.flatnonzero(joined_all)
-    crumb_locks = np.unique(owner[crumbs])
-    crumb_theta = math.pi + (np.argmax(held[crumb_locks], axis=1) - half) * width / radius
-    crumb_area = np.bincount(owner[crumbs], area_all[crumbs], minlength=len(locks))[crumb_locks]
-    groups = _columns("back", np.concatenate((theta, crumb_theta)), np.concatenate((area_all[own], crumb_area)),
-                      radius, width)
     label = np.zeros(len(every), dtype=np.int64)
-    for c, group in enumerate(groups):
-        group = np.asarray(group, dtype=np.int64)
-        label[own[group[group < len(own)]]] = c
-        label[crumbs[np.isin(owner[crumbs], crumb_locks[group[group >= len(own)] - len(own)])]] = c
+    if count is not None:
+        columns = count
+        label[own] = _count_labels(cut, theta, far, radius, area_all[own], count)
+        # Crumbs follow their lock, as find_locks joined them: into the column holding most of its own hair.
+        held = np.zeros((len(locks), count))
+        np.add.at(held, (owner[own], label[own]), area_all[own])
+        label[crumbs] = np.argmax(held[owner[crumbs]], axis=1)
+    else:
+        # Each vertex's arc at its own distance from the axis (`_behind`).
+        theta = math.pi + np.clip(_behind(theta, far, radius), -math.pi + 1e-9, math.pi - 1e-9)
+        # Crumbs follow their lock, as find_locks joined them: into the column holding most of its own hair,
+        # where the small-column rule counts them, one item per lock in the middle of that column.
+        half = BACK_COLUMNS // 2
+        held = np.zeros((len(locks), 2 * half + 1))
+        np.add.at(held, (owner[own], _back_numbers(theta, radius, width).astype(np.int64) + half), area_all[own])
+        crumb_locks = np.unique(owner[crumbs])
+        crumb_theta = math.pi + (np.argmax(held[crumb_locks], axis=1) - half) * width / radius
+        crumb_area = np.bincount(owner[crumbs], area_all[crumbs], minlength=len(locks))[crumb_locks]
+        groups = _columns("back", np.concatenate((theta, crumb_theta)), np.concatenate((area_all[own], crumb_area)),
+                          radius, width)
+        columns = len(groups)
+        for c, group in enumerate(groups):
+            group = np.asarray(group, dtype=np.int64)
+            label[own[group[group < len(own)]]] = c
+            label[crumbs[np.isin(owner[crumbs], crumb_locks[group[group >= len(own)] - len(own)])]] = c
     # A column's own hair past a gap (COLUMN_GAP) goes back to the other column holding most of its lock.
-    held = np.zeros((len(locks), len(groups)))
+    held = np.zeros((len(locks), columns))
     np.add.at(held, (owner[own], label[own]), area_all[own])
-    for c in range(len(groups)):
+    for c in range(columns):
         mine = own[label[own] == c]
         if not len(mine):
             continue
@@ -803,7 +871,7 @@ def _vertex_columns(points, rig, locks, radius, width):
         elsewhere = others.max(axis=1) > 0.0
         label[beyond[elsewhere]] = np.argmax(others[elsewhere], axis=1)
     result = []
-    for c in range(len(groups)):
+    for c in range(columns):
         column = np.flatnonzero(label == c)
         column = column[np.argsort(every[column], kind='stable')]
         vertices, joined, distance, area = every[column], joined_all[column], distance_all[column], area_all[column]
@@ -1076,9 +1144,29 @@ def _merge_pieces(points, mesh, graph, rig, planned, spacing, max_bones, bone_le
     return [pair for pair, keep in zip(planned, alive) if keep]
 
 
-def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES, spacing=CHAIN_SPACING,
-             ponytail=False):
-    """The chains of a hair skeleton for hair ``points`` (world space, rest pose) with triangles ``tris``
+AREAS = ("back", "ponytail", "left", "right", "bangs")
+
+
+def _short(planned):
+    """Whether the hair of ``planned`` ((`Lock`, `ChainPlan`) pairs) is short: it has locks, none of them longer than
+    BANGS_LENGTH. A separate piece counts too: hair with a long ponytail isn't short, a bun on short hair is."""
+    return bool(planned) and max(chain.length for _lock, chain in planned) <= BANGS_LENGTH
+
+
+def plan_rig(points, tris, rig, **options):
+    """The chains of `plan_layout` (the same arguments)."""
+    return plan_layout(points, tris, rig, **options)[0]
+
+
+def plan_layout(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES, spacing=CHAIN_SPACING,
+                ponytail=False, counts=None):
+    """(chains, areas, short): the chains of a hair skeleton (below), how many column chains each area has
+    ({name in AREAS: count}; ``ponytail`` also counts the tied tail, separate pieces count nowhere) and whether
+    the hair is short (`_short`, measured with or without ``counts``).
+
+    With ``counts`` (`ChainCounts`) the user's counts cut the sheets and the tied tail into columns (see the module's
+    notes); short hair is then one bangs sheet around the head and isn't tied into a ponytail. Without, as follows.
+    The chains of a hair skeleton for hair ``points`` (world space, rest pose) with triangles ``tris``
     hanging from ``rig`` (`hairing.HairRig`), its cap ``cap`` off the head (see `find_locks`), in name order
     (by angle, then by the root's X). With ``ponytail`` (Hair Type Ponytail), every lock whose chain is back hair
     or a ponytail first merges into one (the largest first) with one chain of kind ponytail, a separate piece
@@ -1098,12 +1186,15 @@ def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES
         raise ValueError("The chain spacing must be above 0")
     points = np.asarray(points, dtype=np.float64)
     mesh = _welded(points, tris, weld)
+    made = dict.fromkeys(AREAS, 0)
     if mesh is None:
-        return []
+        return [], made, False
     locks = find_locks(points, tris, rig, cap=cap, weld=mesh[0])
     planned = [(lock, plan_chain(points, lock, rig)) for lock in locks]
     planned = [(lock, chain) for lock, chain in planned if chain is not None]
     graph = _graph(mesh) if len(planned) > 1 else None
+    short = _short(planned)
+    ring = counts is not None and short
 
     def tail_chain(lock, bone_length):
         """The tied tail's chain: a ponytail."""
@@ -1113,7 +1204,8 @@ def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES
         return chain
 
     tails = []   # Hair Type Ponytail: (lock, chain) of the one tail tied from all the hair behind the head
-    if ponytail:
+    tied = None   # ...or its lock, to cut into more than one ponytail chain (``counts``)
+    if ponytail and not ring:
         behind = sorted((pair for pair in planned if pair[1].kind in ("back", "ponytail")),
                         key=lambda pair: -pair[0].area)
         if behind:
@@ -1122,7 +1214,10 @@ def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES
                 lock = _merge(lock, other, mesh, points, rig, graph)
             chain = tail_chain(lock, BONE_SPACING)
             if chain is not None:
-                tails = [(lock, chain)]
+                if counts is not None and counts.ponytail > 1:
+                    tied = lock
+                else:
+                    tails = [(lock, chain)]
                 planned = [pair for pair in planned if pair[1].kind not in ("back", "ponytail")]
     separate = [lock.whole and _round(points, lock) for lock, _chain in planned]
     pieces = [pair for pair, piece in zip(planned, separate) if piece]
@@ -1140,10 +1235,19 @@ def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES
 
     # The sheets, by kind and, for side hair, by side: (kind, on the -X side) -> indices into sheet_locks.
     columns = []   # (lock, chain, sheet, column number)
+    if tied is not None:
+        # The tied tail cut into its ponytail chains side by side, as the back.
+        _theta, radius = _polar(rig, tied.root.reshape(1, 3))
+        for c, lock in enumerate(_vertex_columns(points, rig, [tied], float(radius[0]), spacing, "ponytail",
+                                                 counts.ponytail)):
+            chain = column_chain(lock, "ponytail", BONE_SPACING)
+            if chain is not None:
+                columns.append((lock, chain, ("ponytail", False), c))
     if sheet_locks:
         theta, radius = _polar(rig, np.array([lock.root for lock, _chain in sheet_locks]).reshape(-1, 3))
         areas = np.array([lock.area for lock, _chain in sheet_locks], dtype=np.float64)
-        kinds = [chain.kind for _lock, chain in sheet_locks]
+        # Short hair with counts: one bangs sheet around the whole head.
+        kinds = ["bangs" if ring else chain.kind for _lock, chain in sheet_locks]
         sheets = {}
         for k, kind in enumerate(kinds):
             sheets.setdefault((kind, kind == "side" and bool(theta[k] < 0.0)), []).append(k)
@@ -1153,6 +1257,16 @@ def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES
             same = [k for k, other in enumerate(kinds) if other == kind]
             scale = float(np.average(radius[same], weights=areas[same]))
             members = np.array(members)
+            if counts is not None:
+                # The user's count of chains, the sheet's hair into its columns vertex by vertex.
+                count = counts.bangs if kind == "bangs" else counts.back if kind == "back" else \
+                    counts.right if sheet[1] else counts.left
+                for c, lock in enumerate(_vertex_columns(points, rig, [sheet_locks[k][0] for k in members], scale,
+                                                         spacing, "ring" if ring else kind, count)):
+                    chain = column_chain(lock, kind, BONE_SPACING)
+                    if chain is not None:
+                        columns.append((lock, chain, sheet, c))
+                continue
             if kind == "back":
                 # The back's hair goes into its columns vertex by vertex, by where it hangs, not lock by lock.
                 for c, lock in enumerate(_vertex_columns(points, rig, [sheet_locks[k][0] for k in members], scale,
@@ -1198,7 +1312,21 @@ def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES
         mine = sorted((c, chain) for _lock, chain, other, c in every if other == sheet)
         for order, (_c, chain) in enumerate(mine):
             chain.order = order
-    return [chain for _lock, chain, _sheet, _c in every]
+    made["ponytail"] += len(tails)
+    for _lock, _chain, sheet, _c in columns:
+        made[("right" if sheet[1] else "left") if sheet[0] == "side" else sheet[0]] += 1
+    return [chain for _lock, chain, _sheet, _c in every], made, short
+
+
+def detect_counts(points, tris, rig, *, cap=None, weld=None, spacing=CHAIN_SPACING, ponytail=False):
+    """The chain counts the hair gets without any (`plan_layout`, columns ``spacing`` wide; ``ponytail``: Hair Type
+    Ponytail), for Detect: ({name in AREAS: count, clamped to COUNT_RANGES}, short). An area without column chains
+    is left out. Short hair (`_short`) has one count, its chains around the whole head: "bangs"."""
+    _chains, made, short = plan_layout(points, tris, rig, cap=cap, weld=weld, spacing=spacing, ponytail=ponytail)
+    if short:
+        made = {"bangs": sum(made.values())}
+    return {area: min(max(count, COUNT_RANGES[area][0]), COUNT_RANGES[area][1])
+            for area, count in made.items() if count}, short
 
 
 # -----------------------------------------------------------------------------

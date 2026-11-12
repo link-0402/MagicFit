@@ -39,6 +39,8 @@ def use_settings(**values):
     settings = bpy.context.scene.magic_fit
     defaults = dict(hair_race='c0201', hair_skeleton_mode='AUTO', hair_skeleton=0, hair_hang_start=0.025,
                     hair_hang_length=0.07, hair_neck_weight=0.3, hair_chain_spacing=hairrig.CHAIN_SPACING, hair_type='LOOSE',
+                    hair_back_chains=2, hair_ponytail_chains=2, hair_side_chains_left=2, hair_side_chains_right=2,
+                    hair_bang_chains=2,
                     hair_chain_stretch=0.5, hair_joint_blend=0.30, hair_layer_range=0.01, hair_ears=True, hair_max_groups=8, hair_apply_to_selected=False,
                     group_mode='ALL', mode='HAIR')
     defaults.update(values)
@@ -952,32 +954,60 @@ def test_custom_reuses_rig():
 
 
 def test_custom_chain_spacing():
-    # Chain Spacing and Hair Type reach the chains as they are built, and Rebuild Chains builds them with the new
-    # values.
-    obj, _parts, settings = own_skeleton_hair(hair_chain_spacing=0.04)
+    # Chain Spacing, Hair Type and the chain counts reach the chains as they are built, and Rebuild Chains builds
+    # them with the new values.
+    obj, _parts, settings = own_skeleton_hair(hair_chain_spacing=0.04, hair_side_chains_left=1)
     seen = []
-    plan_rig = hairrig.plan_rig
+    plan_layout = hairrig.plan_layout
 
     def recording(*args, **kwargs):
-        seen.append((kwargs.get("spacing"), kwargs.get("ponytail")))
-        return plan_rig(*args, **kwargs)
+        seen.append((kwargs.get("spacing"), kwargs.get("ponytail"), kwargs.get("counts")))
+        return plan_layout(*args, **kwargs)
 
-    hairrig.plan_rig = recording
+    hairrig.plan_layout = recording
     try:
         hair_weights_reports()
         settings.hair_chain_spacing = 0.09
         settings.hair_type = 'PONYTAIL'
+        settings.hair_ponytail_chains = 3
         result = bpy.ops.magic_fit.hair_weights(rebuild=True)
     finally:
-        hairrig.plan_rig = plan_rig
+        hairrig.plan_layout = plan_layout
     check(result == {'FINISHED'} and len(seen) == 2 and None not in (seen[0][0], seen[1][0])
           and abs(seen[0][0] - 0.04) < 1e-6 and abs(seen[1][0] - 0.09) < 1e-6
-          and seen[0][1] is False and seen[1][1] is True,
-          "chain spacing: the chains are built with Chain Spacing and Hair Type ({})".format(seen))
+          and seen[0][1] is False and seen[1][1] is True
+          and seen[0][2] == hairrig.ChainCounts(2, 2, 1, 2, 2) and seen[1][2] == hairrig.ChainCounts(2, 3, 1, 2, 2),
+          "chain spacing: the chains are built with Chain Spacing, Hair Type and the counts ({})".format(seen))
     armature = hair_armature(obj)
     kinds = [kind for kind, _bones in rig_chains(armature)] if armature is not None else []
-    check(kinds.count("ponytail") == 1 and "back" not in kinds,
-          "hair type: Ponytail builds one ponytail chain and no back chains ({})".format(kinds))
+    check(kinds.count("ponytail") == 3 and "back" not in kinds,
+          "hair type: Ponytail with 3 Ponytail Chains builds 3 ponytail chains and no back chains ({})".format(kinds))
+
+
+def test_detect_hair_chains():
+    # Detect sets the counts to the ones the hair gets without any: on the long hair one chain per side lock. It
+    # has no back sheet (its tube is a ponytail of its own) and its bangs hang too little for a chain, so Back and
+    # Bang Chains stay. Built with them, each side lock has one chain.
+    obj, _parts, settings = own_skeleton_hair(hair_back_chains=4, hair_bang_chains=5)
+    co, tris = mesh_arrays(obj)
+    base = hairing.Reference.get().rig('c0201', 0)
+    expected, _short = hairrig.detect_counts(co, tris, base)
+    run = _HairWeightsRun()
+    result = operators.MAGIC_FIT_OT_detect_hair_chains.execute(run, bpy.context)
+    print("      reports:", run.reports)
+    check(result == {'FINISHED'} and expected == {"left": 1, "right": 1}
+          and settings.hair_side_chains_left == 1 and settings.hair_side_chains_right == 1
+          and settings.hair_bang_chains == 5 and settings.hair_back_chains == 4,
+          "detect: 1 per side, Back and Bang Chains kept ({}; left {:d}, right {:d}, bangs {:d}, back {:d})".format(
+              expected, settings.hair_side_chains_left, settings.hair_side_chains_right, settings.hair_bang_chains,
+              settings.hair_back_chains))
+    check("Detected 1 Left Side, 1 Right Side chains" in run.reports
+          and "No hair found for Back, Bang Chains: kept as they are" in run.reports,
+          "detect: reports what it found and what it kept")
+    hair_weights_reports()
+    armature = hair_armature(obj)
+    kinds = [kind for kind, _bones in rig_chains(armature)] if armature is not None else []
+    check(kinds.count("side") == 2, "detect: built with the counts, one chain per side lock ({})".format(kinds))
 
 
 def test_race_change_rebuilds():
@@ -1001,7 +1031,8 @@ def test_race_change_rebuilds():
     after = [bone_head(armature, bones[0]) for _kind, bones in rig_chains(armature) if bones]
     co, tris = mesh_arrays(obj)
     base = hairing.Reference.get().rig('c0801', 0)
-    plans = hairrig.plan_rig(co, tris, base.moved(hairing.armature_offset(armature, base)))
+    plans = hairrig.plan_rig(co, tris, base.moved(hairing.armature_offset(armature, base)),
+                             counts=operators.hair_chain_counts(bpy.context.scene.magic_fit))
     gap = max((float(np.linalg.norm(head - plan.joints[0])) for head, plan in zip(after, plans)), default=math.inf)
     check(len(after) == len(plans) and gap < 1e-5, "race change: the chains are planned for c0801's head ({}, "
           "{:.2e} m off; {:d} of them where they were for c0201)".format(
@@ -1203,7 +1234,11 @@ def test_custom_parts_one_after_another():
     # joins the rig, and its chains are built again with it while the bones are as Hair Weights left them.
     for edited in (False, True):
         hair.clear_scene()
-        use_settings(hair_skeleton_mode='CUSTOM')
+        # The cap and locks alone are short hair, one ring of Bang Chains; with the ponytail they are side hair. 4
+        # sectors and 1 chain per side give each lock one chain from the same root either way, so the kind picked
+        # stays with its lock.
+        use_settings(hair_skeleton_mode='CUSTOM', hair_bang_chains=4, hair_side_chains_left=1,
+                     hair_side_chains_right=1)
         first = parts_object("Hair", ("cap", "lock_l", "lock_r"))
         hair_weights_reports()
         armature = hair_armature(first)
@@ -1315,7 +1350,8 @@ def main():
                      test_best_match_unchanged, test_chains, test_layers, test_ears, test_matching, test_button,
                      test_existing_armature, test_customize_plus, test_armature_out_of_view_layer, test_parts,
                      test_selected, test_replace, test_masks, test_pick, test_brush, test_readiness,
-                     test_custom_button, test_custom_reuses_rig, test_custom_chain_spacing, test_race_change_rebuilds,
+                     test_custom_button, test_custom_reuses_rig, test_custom_chain_spacing, test_detect_hair_chains,
+                     test_race_change_rebuilds,
                      test_nothing_hangs,
                      test_custom_brush, test_custom_view_layer, test_custom_parts, test_custom_parts_one_after_another,
                      test_custom_other_race_parts, test_custom_parts_thick_cap):
