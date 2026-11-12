@@ -64,7 +64,12 @@ Then it plans a chain of bones down each lock:
   into at most BACK_COLUMNS, the middle one straight behind, each side into at most SIDE_COLUMNS from the
   front, bangs from straight in front. A column with less hair than MIN_COLUMN_AREA joins its neighbor. A
   column's locks merge into one, its largest first, and the column gets one chain of the sheet's kind,
-  never light: the chains follow the columns down the hair, whatever the cards in them.
+  never light: the chains follow the columns down the hair, whatever the cards in them. The back's hair goes
+  into its columns vertex by vertex, each by where it hangs around the head (`_vertex_columns`), whatever lock
+  it is in: the shape of the hair decides, not how its strands run. Locks don't line up with the columns, and
+  a lock that went whole into the column of its root pulled that column's chain along: on symmetric hair the
+  middle chain followed a lock rooted on a column's edge 2 cm to one side. A column's hair past a gap down
+  it (COLUMN_GAP) goes back to its lock's column, so the chain doesn't cross the gap off the hair.
 - The budget: while the rig takes more than MAX_HAIR_BONES bones and some chain has more than CHAIN_BONES[0],
   the bones get longer (BONE_SPACING grows by BONE_GROWTH) and every chain is planned again: the columns keep
   their chains. Only a rig still over then merges its pieces, until it fits or one is left: the smallest piece
@@ -155,6 +160,10 @@ MIN_COLUMN_AREA = 0.005
 # The most columns of back hair: the middle one centered straight behind and one to either side, whatever the
 # hair's width. Wider columns instead jump from 3 back chains to 1 on symmetric hair.
 BACK_COLUMNS = 3
+# A back column's hair past a gap this long (metres of distance from the roots) with none of its hair in it goes
+# back to the column holding most of its lock (`_vertex_columns`): a long lock's edge dipping into the column
+# lower down would pull its chain across the gap, off the hair.
+COLUMN_GAP = 0.05
 # The most columns on each side: the frontmost with hair and one for everything behind it.
 SIDE_COLUMNS = 2
 # A rig over its budget (MAX_HAIR_BONES) keeps its chains and lengthens their bones: BONE_SPACING grows by this
@@ -691,7 +700,8 @@ def _polar(rig, at):
 
 
 def _columns(kind, theta, areas, radius, width):
-    """The locks of a sheet of ``kind`` cut into columns ``width`` wide (metres) by their roots' angles ``theta``
+    """The locks of a sheet of ``kind`` (the back sheet's vertices, `_vertex_columns`) cut into columns ``width``
+    wide (metres) by their roots' (the vertices' own) angles ``theta``
     (`_polar`) times the sheet's ``radius``: lists of indices into ``theta`` and ``areas`` (m²), one per column by
     column number. Back columns are centered straight behind, at most BACK_COLUMNS; bangs columns straight in
     front; side columns start at the front, at most SIDE_COLUMNS, the last taking everything behind it. A column
@@ -699,9 +709,7 @@ def _columns(kind, theta, areas, radius, width):
     theta = np.asarray(theta, dtype=np.float64)
     areas = np.asarray(areas, dtype=np.float64)
     if kind == "back":
-        # theta - pi, wrapped to [-pi, pi).
-        half = BACK_COLUMNS // 2
-        column = np.clip(np.rint((theta % (2.0 * math.pi) - math.pi) * radius / width), -half, half)
+        column = _back_numbers(theta, radius, width)
     elif kind == "side":
         column = np.floor(np.abs(theta) * radius / width)
     else:
@@ -722,6 +730,93 @@ def _columns(kind, theta, areas, radius, width):
         column[column > numbers[SIDE_COLUMNS - 1]] = numbers[SIDE_COLUMNS - 1]
         numbers = numbers[:SIDE_COLUMNS]
     return [np.flatnonzero(column == number).tolist() for number in numbers]
+
+
+def _back_numbers(theta, radius, width):
+    """The back column numbers of angles ``theta`` (`_columns`): 0 straight behind, at most BACK_COLUMNS // 2 to
+    either side, negative toward +X."""
+    # theta - pi, wrapped to [-pi, pi).
+    half = BACK_COLUMNS // 2
+    return np.clip(np.rint((np.asarray(theta) % (2.0 * math.pi) - math.pi) * radius / width), -half, half)
+
+
+def _vertex_columns(points, rig, locks, radius, width):
+    """The back sheet's ``locks`` cut into columns ``width`` wide around the head by where its hair hangs: each
+    of their own (not joined) vertices, whatever lock or strand it is in, by its own angle around the head's
+    vertical axis (`_polar`) times its distance from that axis (no less than ``radius``, the sheet's root radius),
+    into the back columns of `_columns` (the middle one straight behind,
+    the rest to either side, the small-column rule over the vertices' areas). A lock's crumbs (``joined``) go
+    with it, into the column holding most of its own hair, and count there. A column's own hair past a gap of
+    COLUMN_GAP in its distances from the roots goes to the other column holding most of its lock, when one holds
+    any. One `Lock` per column, the +X side (the character's left)
+    first, as `_columns` numbers them; columns without hair of their own are left out. A column's lock keeps each
+    vertex's distance from its own lock's roots, as `_merge` does for locks that don't touch; its root is the
+    area-weighted mean of the column's roots (vertices at distance 0), or of its own hair nearest its locks'
+    roots (within ROOT_BAND) when it holds none. Never whole, never light."""
+    if not locks:
+        return []
+    every = np.concatenate([lock.vertices for lock in locks])
+    joined_all = np.concatenate([np.asarray(lock.joined, dtype=bool) for lock in locks])
+    distance_all = np.concatenate([np.asarray(lock.distance, dtype=np.float64) for lock in locks])
+    area_all = np.concatenate([np.full(len(lock.vertices), lock.area / max(len(lock.vertices), 1))
+                               if lock.areas is None else np.asarray(lock.areas, dtype=np.float64) for lock in locks])
+    measured_all = None
+    if all(lock.measured is not None for lock in locks):
+        measured_all = np.concatenate([np.asarray(lock.measured, dtype=bool) for lock in locks])
+    own = np.flatnonzero(~joined_all)
+    theta, far = _polar(rig, points[every[own]])
+    # Each vertex's arc at its own distance from the axis (no less than ``radius``): hair hanging farther behind
+    # the head spans a smaller angle, and by the angle alone the middle column would widen down the back.
+    behind = (theta % (2.0 * math.pi) - math.pi) * np.maximum(far, radius) / radius
+    theta = math.pi + np.clip(behind, -math.pi + 1e-9, math.pi - 1e-9)
+    # Crumbs follow their lock, as find_locks joined them: into the column holding most of its own hair, where
+    # the small-column rule counts them, one item per lock in the middle of that column.
+    half = BACK_COLUMNS // 2
+    owner = np.repeat(np.arange(len(locks)), [len(lock.vertices) for lock in locks])
+    held = np.zeros((len(locks), 2 * half + 1))
+    np.add.at(held, (owner[own], _back_numbers(theta, radius, width).astype(np.int64) + half), area_all[own])
+    crumbs = np.flatnonzero(joined_all)
+    crumb_locks = np.unique(owner[crumbs])
+    crumb_theta = math.pi + (np.argmax(held[crumb_locks], axis=1) - half) * width / radius
+    crumb_area = np.bincount(owner[crumbs], area_all[crumbs], minlength=len(locks))[crumb_locks]
+    groups = _columns("back", np.concatenate((theta, crumb_theta)), np.concatenate((area_all[own], crumb_area)),
+                      radius, width)
+    label = np.zeros(len(every), dtype=np.int64)
+    for c, group in enumerate(groups):
+        group = np.asarray(group, dtype=np.int64)
+        label[own[group[group < len(own)]]] = c
+        label[crumbs[np.isin(owner[crumbs], crumb_locks[group[group >= len(own)] - len(own)])]] = c
+    # A column's own hair past a gap (COLUMN_GAP) goes back to the other column holding most of its lock.
+    held = np.zeros((len(locks), len(groups)))
+    np.add.at(held, (owner[own], label[own]), area_all[own])
+    for c in range(len(groups)):
+        mine = own[label[own] == c]
+        if not len(mine):
+            continue
+        reach = np.sort(distance_all[mine])
+        gaps = np.flatnonzero(np.diff(reach) > COLUMN_GAP)
+        if not len(gaps):
+            continue
+        beyond = mine[distance_all[mine] > reach[gaps[0]]]
+        others = held[owner[beyond]].copy()
+        others[:, c] = -1.0
+        elsewhere = others.max(axis=1) > 0.0
+        label[beyond[elsewhere]] = np.argmax(others[elsewhere], axis=1)
+    result = []
+    for c in range(len(groups)):
+        column = np.flatnonzero(label == c)
+        column = column[np.argsort(every[column], kind='stable')]
+        vertices, joined, distance, area = every[column], joined_all[column], distance_all[column], area_all[column]
+        if joined.all():
+            continue
+        measured = None if measured_all is None else measured_all[column]
+        roots = ~joined & (distance <= 0.0)
+        if not roots.any():
+            roots = ~joined & (distance <= float(distance[~joined].min()) + ROOT_BAND)
+        root = np.average(points[vertices[roots]], axis=0, weights=area[roots] + 1e-12)
+        result.append(Lock(vertices, distance, float(area.sum()), root, False, _angle(rig, root), joined,
+                           area if all(lock.areas is not None for lock in locks) else None, measured, False))
+    return result
 
 
 def _merge(target, small, mesh, points, rig, graph=None):
@@ -993,7 +1088,8 @@ def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES
     within ``spacing`` metres) and get a chain each. The sheet locks merge their twins and make a sheet per
     kind, side hair one per side of the head; each sheet is cut into columns ``spacing`` metres wide around
     the head (`_columns`, at the sheet's area-weighted mean root radius, the two sides' shared), and each
-    column's locks merge into one (the largest first) with one chain of the sheet's kind, not light. Over
+    column's locks merge into one (the largest first) with one chain of the sheet's kind, not light; the back
+    sheet's hair goes into its columns vertex by vertex instead, by where it hangs (`_vertex_columns`). Over
     ``max_bones`` bones, the bones get longer: BONE_SPACING grows by BONE_GROWTH and every chain is planned
     again, until the rig fits or every chain has CHAIN_BONES[0] bones. Only a rig still over then merges its
     pieces (`_merge_pieces`), until it fits or one piece is left: the columns never merge, so a rig whose
@@ -1057,6 +1153,14 @@ def plan_rig(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES
             same = [k for k, other in enumerate(kinds) if other == kind]
             scale = float(np.average(radius[same], weights=areas[same]))
             members = np.array(members)
+            if kind == "back":
+                # The back's hair goes into its columns vertex by vertex, by where it hangs, not lock by lock.
+                for c, lock in enumerate(_vertex_columns(points, rig, [sheet_locks[k][0] for k in members], scale,
+                                                         spacing)):
+                    chain = column_chain(lock, kind, BONE_SPACING)
+                    if chain is not None:
+                        columns.append((lock, chain, sheet, c))
+                continue
             for c, column in enumerate(_columns(kind, theta[members], areas[members], scale, spacing)):
                 # The largest lock first, the rest by decreasing area (stable: on a tie the earlier one).
                 into = sorted(members[column].tolist(), key=lambda k: -areas[k])

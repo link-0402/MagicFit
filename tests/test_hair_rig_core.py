@@ -112,6 +112,25 @@ def back_sheet(half_width=0.15, depth=0.40, shape=None, sweep=0.0):
     return co, tris, {"cap": cap_ids, "sheet": sheet_ids}
 
 
+def card_back(ranges, depth=0.40, lean=0.03):
+    """Back hair in flat cards: the scalp cap, and for each (low, high) of ``ranges`` (degrees around the skull's
+    middle, 0 straight behind, positive toward +X) a card hanging ``depth`` from the cap's lowest ring between
+    those azimuths, straight down and ``lean`` out from the head's axis. Each card is a lock of its own. Returns
+    (points, triangles)."""
+    cap, faces, ring, azimuth = back_ring(48)
+    axis = np.array((0.0, rig().by_name[hairing.HEAD].head[1]))
+    bottom = cap[ring, 2].mean() - depth
+    parts = [(cap, faces)]
+    for low, high in ranges:
+        tops = cap[ring[(azimuth[ring] >= low - 1e-6) & (azimuth[ring] <= high + 1e-6)]]
+        out = tops[:, :2] - axis
+        out /= np.linalg.norm(out, axis=1)[:, None]
+        bottoms = np.column_stack((tops[:, :2] + out * lean, np.full(len(tops), bottom)))
+        parts.append(sheet(tops, bottoms))
+    co, tris, _ranges = join(parts)
+    return co, tris
+
+
 def one_piece_long_hair():
     """`back_sheet` as it comes: 40 cm long, 30 cm wide at the bottom."""
     return back_sheet()
@@ -626,6 +645,28 @@ def test_mirrored_sheet():
               for a, b in pairs),
           "mirrored: the outer chains mirror each other within 2 cm (roots {}, {}; tips {}, {})".format(
               np.round(left.joints[0], 3), np.round(right.joints[0], 3), np.round(left.tip, 3), np.round(right.tip, 3)))
+
+
+def test_lopsided_locks():
+    # Back hair whose outline is symmetric but whose cards aren't cut at the columns: two cards on the right, one
+    # across the middle reaching well over to the left, one at the left edge. The back's hair goes into its
+    # columns by where it hangs, not card by card: the middle chain straight behind, the outer ones mirrored. Cut
+    # by the cards' roots, the middle chain followed its card 1.6 to 2.2 cm to the left (measured 2026-11-12).
+    model_rig = rig()
+    co, tris = card_back(((-75.0, -45.0), (-37.5, -22.5), (-15.0, 37.5), (45.0, 75.0)))
+    chains = hairrig.plan_rig(co, tris, model_rig)
+    describe_columns(chains)
+    back = back_columns("lopsided locks", chains)
+    if back is None:
+        return
+    left, middle, right = back
+    off = max(abs(float(point[0])) for point in np.vstack((middle.joints, middle.tip)))
+    check(off <= 0.01, "lopsided locks: the middle chain straight behind, X within 1 cm ({:.3f})".format(off))
+    # Only the roots: the cap's hanging edge differs by a root vertex between the outer cards, so the right one's
+    # spine runs 1.2 cm longer and ends on its outer edge (a spine follows whichever strands reach farthest).
+    gap = abs(float(left.joints[0][0] + right.joints[0][0]))
+    check(gap <= 0.01, "lopsided locks: the outer chains' roots mirror each other within 1 cm in X ({:.3f}; {:.3f} and "
+          "{:.3f})".format(gap, float(left.joints[0][0]), float(right.joints[0][0])))
 
 
 def test_back_width():
@@ -1145,8 +1186,9 @@ def off_hair(chain, co):
 
 def test_twins_merge():
     # The neck sheet (two back locks), a strip down the side doubled 0.3 mm apart (twin layers, each its own
-    # loose part) and a shorter strip on the other side: the twins merge, one chain holds both layers, and the
-    # short strip joins a column rather than keeping a chain of its own.
+    # loose part) and a shorter strip on the other side: the twins merge, one chain holds both layers (and no
+    # other chain either of them), and the short strip joins a column rather than keeping a chain of its own.
+    # (The sheet is 9 cm wide: cut by where its hair hangs, its edge and the short strip may make a column.)
     model_rig = rig(MIQOTE)
     parts = neck_parts() + [ring_strip((75.0, 90.0), 1.15), ring_strip((75.0, 90.0), 1.15, 0.0003),
                             ring_strip((-75.0, -90.0), 1.30)]
@@ -1155,8 +1197,10 @@ def test_twins_merge():
     describe_columns(chains)
     both = [chain for chain in chains if np.isin(chain.vertices, twin_ids).any()
             and np.isin(chain.vertices, other_ids).any()]
+    twins = [chain for chain in chains if np.isin(chain.vertices, twin_ids).any()
+             or np.isin(chain.vertices, other_ids).any()]
     alone = [chain for chain in chains if np.isin(chain.vertices, short_ids).all()]
-    check(len(chains) == 2 and len(both) == 1 and not alone,
+    check(len(both) == 1 and len(twins) == 1 and not alone,
           "twins: the twin layers in one chain, the short strip in no chain of its own ({:d} chains)".format(
               len(chains)))
     # A card doubled for its back faces, alone on the cap: one chain, not two.
@@ -2104,7 +2148,7 @@ def main():
         for test in (test_long_hair_locks, test_one_piece_long_hair, test_separate_strands, test_crumbs,
                      test_parted_locks, test_long_hair_chains, test_bangs_chain, test_pivot_at_root, test_even_joints,
                      test_wavy_lock_straight, test_kinds, test_columns, test_u_bottom, test_mirrored_sheet,
-                     test_back_width, test_swept_sheet, test_ponytail_on_sheet, test_ponytail_hair_type, test_side_columns, test_forward_strand,
+                     test_lopsided_locks, test_back_width, test_swept_sheet, test_ponytail_on_sheet, test_ponytail_hair_type, test_side_columns, test_forward_strand,
                      test_light_column,
                      test_budget, test_lone_kind_survives, test_card_hair_kinds, test_card_hair_time,
                      test_moved_hair,
