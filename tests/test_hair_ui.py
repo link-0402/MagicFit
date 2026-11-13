@@ -354,6 +354,110 @@ def steps():
           "own skeleton: Rebuild Chains says what it does")
     env.screenshot("hair_custom_chains.png", whole_window=True)
 
+    # --- Delete Chain: a − button beside the list, and the Delete key over the sidebar's Hair sub-tab only.
+    boxed = []
+    tool.VIEW3D_PT_hair_weights_sidebar.draw_chains(Recorder(boxed), obj)
+    check(any(call == 'operator' and args[:1] == ("magic_fit.delete_hair_chain",) and text == ""
+              for call, text, args, _item in boxed), "delete chain: a − button beside the list")
+    rig_state.active = 0
+    first = [name for name in rig_state.chains[0].bones.split(",") if name]
+    # Over the panels near the sidebar's top: with Region Overlap (the default), the empty sidebar below the
+    # panels is the viewport's. Nothing is selected, so a key passed on to the viewport would delete nothing.
+    for picked in bpy.context.selected_objects:
+        picked.select_set(False)
+    bpy.context.view_layer.objects.active = obj
+    over_sidebar = (sidebar.x + sidebar.width // 2, sidebar.y + sidebar.height - 150)
+    env.event('MOUSEMOVE', 'NOTHING', over_sidebar)
+    yield 0.1
+    env.event('DEL', 'PRESS', over_sidebar)
+    env.event('DEL', 'RELEASE', over_sidebar)
+    yield 0.5
+    armature = hairing.weighted_armature(bpy.data.objects["Hair"])
+    rig_state = armature.magic_fit_hair_rig
+    check(len(rig_state.chains) == count - 1 and first[0] not in armature.data.bones,
+          "delete chain: Delete over the sidebar deletes the picked chain ({:d} of {:d} left)".format(
+              len(rig_state.chains), count))
+    with env.override():
+        bpy.ops.ed.undo()
+    yield 0.4
+    obj = bpy.data.objects["Hair"]
+    armature = hairing.weighted_armature(obj)
+    rig_state = armature.magic_fit_hair_rig
+    check(len(rig_state.chains) == count and first[0] in armature.data.bones, "delete chain: one undo brings it back")
+    # Over the viewport the key is Blender's again: in Object Mode it deletes the selected objects, not a chain.
+    doomed = bpy.data.objects.new("Doomed", bpy.data.meshes.new("Doomed"))
+    bpy.context.scene.collection.objects.link(doomed)
+    for picked in bpy.context.selected_objects:
+        picked.select_set(False)
+    doomed.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    env.event('MOUSEMOVE', 'NOTHING', middle)
+    yield 0.1
+    env.event('DEL', 'PRESS', middle)
+    env.event('DEL', 'RELEASE', middle)
+    yield 0.5
+    obj = bpy.data.objects["Hair"]
+    rig_state = hairing.weighted_armature(obj).magic_fit_hair_rig
+    check("Doomed" not in bpy.data.objects and len(rig_state.chains) == count,
+          "delete chain: Delete over the viewport deletes the selected object, not a chain")
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+
+    # --- Add Chain: in Edit Mode the panel shows the chains and the Add Chain button, no problem box.
+    # The left lock selected (its edges and faces too, or Edit Mode brings back what was selected before).
+    lock = np.zeros(len(obj.data.vertices), dtype=bool)
+    lock[parts['lock_l']] = True
+    obj.data.vertices.foreach_set("select", lock)
+    for element in list(obj.data.edges) + list(obj.data.polygons):
+        element.select = bool(lock[list(element.vertices)].all())
+    # With an undo step, as Tab makes one: undoing Add Chain goes back to it.
+    with env.override():
+        bpy.ops.object.mode_set('EXEC_DEFAULT', True, mode='EDIT')
+    yield 0.3
+    panel = tool.VIEW3D_PT_hair_weights_sidebar
+    edited = []
+    with env.override(sidebar):
+        panel.draw(SimpleNamespace(layout=Recorder(edited), draw_pick_hint=panel.draw_pick_hint,
+                                   draw_result=panel.draw_result), bpy.context)
+        problem = operators.check_hair_weights_ready(bpy.context)
+    check(any(call == 'operator' and args[:1] == ("magic_fit.add_hair_chain",) for call, _text, args, _item in edited),
+          "add chain: the panel has Add Chain in Edit Mode")
+    check(any(call == 'template_list' for call, _text, _args, _item in edited), "add chain: ...under the chain list")
+    check(problem is not None and problem not in [text for _call, text, _args, _item in edited],
+          "add chain: no problem box in Edit Mode ({})".format(problem))
+    DRAW_ERRORS.clear()
+    for area in env.window.screen.areas:
+        area.tag_redraw()
+    yield 0.4
+    check(not DRAW_ERRORS, "add chain: the panel drew in Edit Mode without errors")
+    env.screenshot("hair_add_chain.png", whole_window=True)
+    # Added in Edit Mode, taken away by one undo (the redo panel's Bones undoes it the same way before adding again).
+    armature = hairing.weighted_armature(bpy.data.objects["Hair"])
+    had = len(armature.magic_fit_hair_rig.chains)
+    bones_before = sorted(bone.name for bone in armature.data.bones)
+    with env.override(sidebar):
+        result = bpy.ops.magic_fit.add_hair_chain('EXEC_DEFAULT', True)
+    yield 0.4
+    obj = bpy.data.objects["Hair"]
+    added = len(hairing.weighted_armature(obj).magic_fit_hair_rig.chains)
+    check(result == {'FINISHED'} and added == had + 1 and obj.mode == 'EDIT',
+          "add chain: one chain more, still in Edit Mode ({:d} -> {:d})".format(had, added))
+    with env.override():
+        bpy.ops.ed.undo()
+    yield 0.4
+    obj = bpy.data.objects["Hair"]
+    armature = hairing.weighted_armature(obj)
+    undone = len(armature.magic_fit_hair_rig.chains)
+    check(undone == had and sorted(bone.name for bone in armature.data.bones) == bones_before and obj.mode == 'EDIT',
+          "add chain: one undo takes it away ({:d} chains, {:s}, bones {} -> {})".format(
+              undone, obj.mode, len(bones_before), sorted(set(b.name for b in armature.data.bones) ^ set(bones_before))))
+    with env.override():
+        bpy.ops.object.mode_set(mode='OBJECT')
+    yield 0.2
+    # Looked up again: the undo above freed the references read before it.
+    obj = bpy.data.objects["Hair"]
+    settings = bpy.context.scene.magic_fit
+
     # --- The panels: the hair's own skeleton works out where hair hangs, so only Neck Weight stays. The button
     # building it also shows Hair Type, the chain counts (Back Chains with Hair Type Loose) and, under Options,
     # Chain Spacing; the brush builds no chains.

@@ -8,11 +8,13 @@ from bpy.props import StringProperty
 
 from . import facedata, facing, gamefiles
 
-# Keys in the 3D Viewport, in every mode: (operator, label, default key). Alt Shift C isn't used by
-# Blender's default keymap anywhere.
+# Keys in the 3D Viewport, in every mode: (operator, label, default key, optionally the operator properties the
+# key sets). Alt Shift C isn't used by Blender's default keymap anywhere. Delete Hair Chain passes the key on
+# unless the mouse is over the sidebar's Hair sub-tab, so Delete still deletes everywhere else.
 KEYMAP = "3D View Generic"
 HOTKEYS = (
     ("magic_fit.cplus_toggle", "Toggle Customize+", {"type": 'C', "value": 'PRESS', "alt": True, "shift": True}),
+    ("magic_fit.delete_hair_chain", "Delete Hair Chain", {"type": 'DEL', "value": 'PRESS'}, {"key": True}),
 )
 
 _registered = []  # (keymap, item) added to the add-on keyconfig
@@ -75,7 +77,7 @@ class MagicFitPreferences(bpy.types.AddonPreferences):
         col.label(text="Hotkeys (3D Viewport, in every mode):")
         keyconfig = context.window_manager.keyconfigs.user
         keymap = keyconfig.keymaps.get(KEYMAP) if keyconfig is not None else None
-        for idname, label, _key in HOTKEYS:
+        for idname, label, *_key in HOTKEYS:
             item = None
             if keymap is not None:
                 item = next((item for item in keymap.keymap_items if item.idname == idname), None)
@@ -91,8 +93,11 @@ def register():
     if keyconfig is None:  # background mode
         return
     keymap = keyconfig.keymaps.new(name=KEYMAP, space_type='VIEW_3D')
-    for idname, _label, key in HOTKEYS:
-        _registered.append((keymap, keymap.keymap_items.new(idname, **key)))
+    for idname, _label, key, *properties in HOTKEYS:
+        item = keymap.keymap_items.new(idname, **key)
+        for name, value in (properties[0] if properties else {}).items():
+            setattr(item.properties, name, value)
+        _registered.append((keymap, item))
 
 
 def unregister():

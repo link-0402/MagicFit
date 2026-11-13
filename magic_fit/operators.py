@@ -455,6 +455,42 @@ def check_hair_weights_ready(context):
     return None
 
 
+def _own_skeleton_armature_problem(context, armatures):
+    """Why the hair's own skeleton on ``armatures`` (those deforming the hair) can't be edited, or None."""
+    if len(armatures) > 1:
+        return "The hair meshes are deformed by different armatures"
+    for armature in armatures:
+        if armature.library is not None or armature.data.library is not None:
+            return "Armature '{:s}' is linked from another file".format(armature.name)
+        if context.view_layer.objects.get(armature.name) is None:
+            return "Armature '{:s}' is not in the view layer: Own Skeleton edits its bones".format(armature.name)
+    return None
+
+
+def check_add_chain_ready(context):
+    """Why the Add Chain button can't be used right now, or None when it can."""
+    if context.mode != 'EDIT_MESH':
+        return "Select the hair's vertices in Edit Mode"
+    if context.scene.magic_fit.hair_skeleton_mode != 'CUSTOM':
+        return "Add Chain is for Own Skeleton: set Skeleton to Own Skeleton"
+    if _hair_reference() is None:
+        return "The hair reference data (hair_reference.npz) is missing: reinstall the add-on"
+    meshes = [obj for obj in context.objects_in_mode if obj.type == 'MESH']
+    return _own_skeleton_armature_problem(
+        context, {armature for armature in map(hairing.weighted_armature, meshes) if armature is not None})
+
+
+def check_delete_chain_ready(context):
+    """Why the Delete Chain button can't be used right now, or None when it can."""
+    obj = context.object
+    if obj is None or obj.type != 'MESH':
+        return "Make the hair mesh active"
+    armature = hairing.weighted_armature(obj)
+    if armature is None or not len(armature.magic_fit_hair_rig.chains):
+        return "The hair has no chains"
+    return _own_skeleton_armature_problem(context, {armature})
+
+
 # Per whole-mesh button: (its Apply to All Selected setting, readiness check, what it gives, the engine
 # module and its error, whether the body is left out).
 WHOLE_MESH = {
@@ -2551,7 +2587,11 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
                 built = hairrig.build_armature_rig(context, armature, plans, race, cap_depth=cap)
             elif custom:
                 # The chains as the user left them: moved, deleted or added bones; new ones get names.
+                edited = hairrig.rig_edited(armature)
                 renamed = hairrig.sync_rig(context, armature, race)
+                if edited:
+                    # They stay the user's edits: a part joining later keeps them, not only until this run.
+                    armature.magic_fit_hair_rig.bones_hash = before
         except (RuntimeError, hairing.HairError) as error:
             if isinstance(error, hairing.HairError):
                 self.report({'ERROR'}, str(error))
@@ -2739,6 +2779,143 @@ class MAGIC_FIT_OT_detect_hair_chains(bpy.types.Operator):
         missing = [AREA_LABELS[area] for area in areas if area not in found]
         if missing:
             self.report({'INFO'}, "No hair found for {:s} Chains: kept as they are".format(", ".join(missing)))
+        return {'FINISHED'}
+
+
+class MAGIC_FIT_OT_add_hair_chain(bpy.types.Operator):
+    """Add a chain of hair bones along the selected hair to the hair's own skeleton, hanging from the head
+    (on a new armature when the hair has none). Hair Weights keeps it"""
+    bl_idname = "magic_fit.add_hair_chain"
+    bl_label = "Add Chain"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    bones: IntProperty(
+        name="Bones",
+        description="Bones in the chain. 0: by its length, like the chains Own Skeleton builds",
+        default=0,
+        min=0,
+        max=10,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        problem = check_add_chain_ready(context)
+        if problem is not None:
+            cls.poll_message_set(problem)
+            return False
+        return True
+
+    def execute(self, context):
+        active = context.view_layer.objects.active
+        meshes = [obj for obj in context.objects_in_mode if obj.type == 'MESH']
+        # Object Mode writes the edit meshes' selection back to the meshes.
+        bpy.ops.object.mode_set(mode='OBJECT')
+        try:
+            return self._add(context, meshes)
+        finally:
+            for obj in meshes:
+                obj.select_set(True)
+            context.view_layer.objects.active = active
+            bpy.ops.object.mode_set(mode='EDIT')
+
+    def _add(self, context, meshes):
+        settings = context.scene.magic_fit
+        race = settings.hair_race
+        selected = []
+        for obj in meshes:
+            flags = np.zeros(len(obj.data.vertices), dtype=bool)
+            obj.data.vertices.foreach_get("select", flags)
+            selected.append(flags)
+        if not any(flags.any() for flags in selected):
+            self.report({'ERROR'}, "Select the hair vertices the chain should run along")
+            return {'CANCELLED'}
+        reference = hairing.Reference.get()
+        armature = next((found for found in map(hairing.weighted_armature, meshes) if found is not None), None)
+        if armature is None:
+            # The hair's other parts lend theirs, as for Hair Weights.
+            parts = hairing.hair_parts(context, meshes, None, race)
+            armature = hairing.weighted_armature(parts[0]) if parts else None
+        rig = reference.rig(race, 0).moved(hairing.armature_offset(armature, reference.rig(race, 0)))
+        points, tris = joined_rests(straighten.rest_geometry(context, meshes, ('INDEXED',) * len(meshes)))
+        stored = armature.magic_fit_hair_rig.cap_depth if armature is not None else -1.0
+        cap = stored if stored >= 0.0 else hairing.cap_depth(points, tris, rig)
+        plan = hairrig.plan_selection(points, tris, rig, np.flatnonzero(np.concatenate(selected)), cap=cap,
+                                      bones=self.bones)
+        if plan is None:
+            self.report({'ERROR'}, "The selected hair is shorter than 3 cm: select more of it")
+            return {'CANCELLED'}
+        new = armature is None
+        if new:
+            collection = meshes[0].users_collection[0] if meshes[0].users_collection else context.scene.collection
+            armature = hairing.new_armature(context, "Hair Skeleton", collection)
+        wanted = [hairing.HEAD, hairing.NECK, hairing.UPPER_BACK]
+        if race in hairing.EAR_RACES and settings.hair_ears:
+            wanted += list(hairing.EARS)
+        try:
+            hairing.ensure_bones(context, armature, rig, wanted)
+            names = hairrig.add_chain(context, armature, plan, race, cap_depth=cap)
+        except (RuntimeError, hairing.HairError) as error:
+            if isinstance(error, hairing.HairError):
+                self.report({'ERROR'}, str(error))
+            else:
+                self.report({'ERROR'}, "Couldn't add the chain to '{:s}': {:s}".format(armature.name, str(error)))
+            if new:
+                # Cancelling leaves no undo step to take it away.
+                data = armature.data
+                bpy.data.objects.remove(armature)
+                bpy.data.armatures.remove(data)
+            return {'CANCELLED'}
+        for obj in meshes:
+            if straighten.deforming_armature(obj) is None:
+                hairing.add_armature_modifier(obj, armature)
+        if new:
+            self.report({'INFO'}, "Made armature '{:s}' with the game's bones for the hair".format(armature.name))
+        state = armature.magic_fit_hair_rig
+        self.report({'INFO'}, "Added chain {:s} ({:s}, {:s}): give the hair Hair Weights to use it".format(
+            names[0][len(hairrig.BONE_PREFIX):len(hairrig.BONE_PREFIX) + 2], state.chains[state.active].kind,
+            hairrig.counted(len(names), "bone")))
+        total = sum(len([name for name in chain.bones.split(",") if name]) for chain in state.chains)
+        if total > hairrig.MAX_HAIR_BONES:
+            self.report({'WARNING'}, "The hair's own skeleton now has {:d} bones, more than {:d}".format(
+                total, hairrig.MAX_HAIR_BONES))
+        return {'FINISHED'}
+
+
+class MAGIC_FIT_OT_delete_hair_chain(bpy.types.Operator):
+    """Delete the chain picked in the list from the hair's own skeleton; a chain hanging from it hangs from
+    its parent instead. Hair Weights keeps it deleted"""
+    bl_idname = "magic_fit.delete_hair_chain"
+    bl_label = "Delete Chain"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    # Run by the Delete key (preferences.HOTKEYS): only over the Hair sub-tab of the sidebar.
+    key: BoolProperty(options={'HIDDEN', 'SKIP_SAVE'})
+
+    @classmethod
+    def poll(cls, context):
+        problem = check_delete_chain_ready(context)
+        if problem is not None:
+            cls.poll_message_set(problem)
+            return False
+        return True
+
+    def invoke(self, context, _event):
+        region = context.region
+        if self.key and (region is None or region.type != 'UI' or region.active_panel_category != tabs.CATEGORY
+                         or tabs.current(context) != 'WEIGHTS' or tabs.current_subtab(context, 'WEIGHTS') != 'HAIR'):
+            return {'PASS_THROUGH'}
+        return self.execute(context)
+
+    def execute(self, context):
+        armature = hairing.weighted_armature(context.object)
+        state = armature.magic_fit_hair_rig
+        try:
+            number = hairrig.delete_chain(context, armature, state.active,
+                                          state.race or context.scene.magic_fit.hair_race)
+        except (RuntimeError, hairing.HairError) as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
+        self.report({'INFO'}, "Deleted chain {:s}: give the hair Hair Weights again".format(number))
         return {'FINISHED'}
 
 
@@ -4458,6 +4635,8 @@ classes = (
     MAGIC_FIT_OT_connect_parts,
     MAGIC_FIT_OT_hair_weights,
     MAGIC_FIT_OT_detect_hair_chains,
+    MAGIC_FIT_OT_add_hair_chain,
+    MAGIC_FIT_OT_delete_hair_chain,
     MAGIC_FIT_OT_pick_hair_skeleton,
     MAGIC_FIT_OT_earring_weights,
     MAGIC_FIT_OT_face_weights,

@@ -1343,6 +1343,142 @@ def test_custom_parts_thick_cap():
             " (old rig)" if old else "", "asked" if old else "not asked", older))
 
 
+def edit_select(obj, indices):
+    """Edit Mode on obj with exactly ``indices`` selected."""
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+    bpy.ops.object.mode_set(mode='OBJECT')
+    sel = np.zeros(len(obj.data.vertices), dtype=bool)
+    sel[indices] = True
+    obj.data.vertices.foreach_set("select", sel)
+    # Edges and faces too, or Edit Mode brings back the faces selected before.
+    for element in list(obj.data.edges) + list(obj.data.polygons):
+        element.select = bool(sel[list(element.vertices)].all())
+    bpy.ops.object.mode_set(mode='EDIT')
+
+
+def test_add_chain_kept_by_hair_weights():
+    obj, parts, _settings = own_skeleton_hair()
+    hair_weights_reports()
+    armature = hair_armature(obj)
+    # The built chain down the lock goes first, so the lock hangs from the added one alone.
+    state = armature.magic_fit_hair_rig
+    top = np.array((0.085, -0.035, 1.53))
+    state.active = min(range(len(state.chains)), key=lambda i: float(np.linalg.norm(
+        bone_head(armature, state.chains[i].bones.split(",")[0]) - top)))
+    check(bpy.ops.magic_fit.delete_hair_chain() == {'FINISHED'}, "add chain: the lock's built chain deleted first")
+    chains = len(armature.magic_fit_hair_rig.chains)
+    edit_select(obj, parts['lock_l'])
+    check(operators.check_add_chain_ready(bpy.context) is None, "add chain: ready in Edit Mode")
+    check(bpy.ops.magic_fit.add_hair_chain() == {'FINISHED'} and obj.mode == 'EDIT',
+          "add chain: done, still in Edit Mode")
+    selected = np.zeros(len(obj.data.vertices), dtype=bool)
+    bpy.ops.object.mode_set(mode='OBJECT')
+    obj.data.vertices.foreach_get("select", selected)
+    check(sorted(np.flatnonzero(selected)) == sorted(parts['lock_l']), "add chain: the selection is kept")
+    new = rig_chains(armature)[-1][1]
+    check(len(armature.magic_fit_hair_rig.chains) == chains + 1, "add chain: one chain more")
+    result, reports = hair_weights_reports()
+    check(result == {'FINISHED'} and rig_chains(armature)[-1][1] == new and not [t for t in reports if t.startswith("Built ")],
+          "add chain: Hair Weights keeps it and builds nothing")
+    weights = hair.by_name(obj)
+    tip = float(sum(weights.get(n, 0.0) for n in new)[parts['lock_l'][-4:]].mean())
+    check(tip > 0.5, "add chain: the lock's tip hangs from it ({:.3f})".format(tip))
+
+
+def test_add_chain_without_armature():
+    obj, parts, _settings = own_skeleton_hair()
+    edit_select(obj, parts['ponytail'])
+    check(bpy.ops.magic_fit.add_hair_chain() == {'FINISHED'}, "add chain, no armature: done")
+    armature = hair_armature(obj)
+    check(armature is not None and armature.name == "Hair Skeleton" and len(rig_chains(armature)) == 1
+          and armature.magic_fit_hair_rig.cap_depth >= 0.0,
+          "add chain, no armature: made 'Hair Skeleton' with one chain and the hair's cap depth")
+    bpy.ops.object.mode_set(mode='OBJECT')
+    result, reports = hair_weights_reports()
+    check(result == {'FINISHED'} and len(rig_chains(armature)) == 1
+          and not [t for t in reports if t.startswith("Chains from an older version")],
+          "add chain, no armature: Hair Weights keeps the one chain, no old-version warning")
+
+
+def test_add_chain_refusals():
+    obj, parts, settings = own_skeleton_hair()
+    check(operators.check_add_chain_ready(bpy.context) == "Select the hair's vertices in Edit Mode",
+          "add chain: not in Object Mode")
+    edit_select(obj, parts['bangs'][:2])
+    # An ERROR report makes bpy.ops raise in a script.
+    try:
+        bpy.ops.magic_fit.add_hair_chain()
+        refused = None
+    except RuntimeError as error:
+        refused = str(error)
+    check(refused is not None and "shorter than 3 cm" in refused, "add chain: refuses 2 vertices ({})".format(refused))
+    settings.hair_skeleton_mode = 'AUTO'
+    check(operators.check_add_chain_ready(bpy.context) == "Add Chain is for Own Skeleton: set Skeleton to Own Skeleton",
+          "add chain: only for Own Skeleton")
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+
+def test_delete_chain_kept_by_hair_weights():
+    obj, _parts, _settings = own_skeleton_hair()
+    hair_weights_reports()
+    armature = hair_armature(obj)
+    before = rig_chains(armature)
+    armature.magic_fit_hair_rig.active = 0
+    check(bpy.ops.magic_fit.delete_hair_chain() == {'FINISHED'} and rig_chains(armature) == before[1:],
+          "delete chain: the picked chain is gone")
+    result, reports = hair_weights_reports()
+    check(result == {'FINISHED'} and rig_chains(armature) == before[1:] and not any(
+        g.name in before[0][1] for g in obj.vertex_groups), "delete chain: Hair Weights keeps it deleted and drops its groups")
+    # The key outside the sidebar passes through (headless: no region). Without a window Blender runs execute for
+    # INVOKE_DEFAULT, so invoke is called directly; test_hair_ui presses the real key.
+    class Pressed:
+        key = True
+
+        def execute(self, _context):
+            return {'FINISHED'}
+
+    check(operators.MAGIC_FIT_OT_delete_hair_chain.invoke(Pressed(), bpy.context, None) == {'PASS_THROUGH'},
+          "delete chain: the Delete key passes through outside the sidebar")
+
+
+def test_deleted_chain_survives_joining_part():
+    # Deleted, given Hair Weights (which reads the chains back), then a part joins: the chains stay as the user left
+    # them, not built again over the whole hair.
+    hair.clear_scene()
+    use_settings(hair_skeleton_mode='CUSTOM', hair_bang_chains=4, hair_side_chains_left=1, hair_side_chains_right=1)
+    first = parts_object("Hair", ("cap", "lock_l", "lock_r"))
+    hair_weights_reports()
+    armature = hair_armature(first)
+    armature.magic_fit_hair_rig.active = 0
+    bpy.ops.magic_fit.delete_hair_chain()
+    hair_weights_reports()
+    kept = rig_chains(armature)
+    parts_object("Ponytail", ("ponytail",))
+    result, _reports = hair_weights_reports()
+    check(result == {'FINISHED'} and rig_chains(armature) == kept,
+          "deleted chain: a part joining after Hair Weights keeps the chains as the user left them ({} -> {})".format(
+              len(kept), len(rig_chains(armature))))
+
+
+def test_add_chain_on_another_part():
+    # The hair's other part has its own skeleton already: a chain added on this part goes on that armature.
+    hair.clear_scene()
+    use_settings(hair_skeleton_mode='CUSTOM', hair_bang_chains=4, hair_side_chains_left=1, hair_side_chains_right=1)
+    first = parts_object("Hair", ("cap", "lock_l", "lock_r"))
+    hair_weights_reports()
+    armature = hair_armature(first)
+    chains = len(rig_chains(armature))
+    second = parts_object("Ponytail", ("ponytail",))
+    edit_select(second, np.arange(len(second.data.vertices)))
+    result = bpy.ops.magic_fit.add_hair_chain()
+    bpy.ops.object.mode_set(mode='OBJECT')
+    armatures = [obj.name for obj in bpy.data.objects if obj.type == 'ARMATURE']
+    check(result == {'FINISHED'} and hair_armature(second) == armature and len(rig_chains(armature)) == chains + 1
+          and armatures == [armature.name], "add chain: on the hair's other part, it goes on the hair's armature ({})".format(
+              armatures))
+
+
 def main():
     magic_fit.register()
     try:
@@ -1354,7 +1490,10 @@ def main():
                      test_race_change_rebuilds,
                      test_nothing_hangs,
                      test_custom_brush, test_custom_view_layer, test_custom_parts, test_custom_parts_one_after_another,
-                     test_custom_other_race_parts, test_custom_parts_thick_cap):
+                     test_custom_other_race_parts, test_custom_parts_thick_cap,
+                     test_add_chain_kept_by_hair_weights, test_add_chain_without_armature, test_add_chain_refusals,
+                     test_delete_chain_kept_by_hair_weights, test_deleted_chain_survives_joining_part,
+                     test_add_chain_on_another_part):
             print("==", test.__name__)
             try:
                 test()

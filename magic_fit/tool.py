@@ -23,6 +23,8 @@ from .operators import (
     MAGIC_FIT_OT_close_rips,
     MAGIC_FIT_OT_find_rips,
     MAGIC_FIT_OT_fit_move,
+    MAGIC_FIT_OT_add_hair_chain,
+    MAGIC_FIT_OT_delete_hair_chain,
     MAGIC_FIT_OT_detect_hair_chains,
     MAGIC_FIT_OT_hair_weights,
     MAGIC_FIT_OT_heel_weights,
@@ -1074,7 +1076,10 @@ class VIEW3D_PT_hair_weights_sidebar(tabs.TabPanel, bpy.types.Panel):
         _draw_options(layout, "magic_fit_hair_options", lambda body: _draw_hair_more(
             body, settings, spacing=settings.hair_skeleton_mode == 'CUSTOM'))
         col = layout.column()
-        problem = check_hair_weights_ready(context)
+        # Own Skeleton in Edit Mode: chains are added along the selected hair. Hair Weights waits for Object Mode
+        # (its tooltip says so), and the chains are listed to delete or change.
+        adding = settings.hair_skeleton_mode == 'CUSTOM' and context.mode == 'EDIT_MESH'
+        problem = None if adding else check_hair_weights_ready(context)
         if problem is not None:
             col.box().label(text=problem, icon='ERROR')
         col.separator()
@@ -1082,7 +1087,15 @@ class VIEW3D_PT_hair_weights_sidebar(tabs.TabPanel, bpy.types.Panel):
         row.scale_y = 1.4
         row.prop(settings, "hair_apply_to_selected", text="", icon='RESTRICT_SELECT_OFF')
         row.operator(MAGIC_FIT_OT_hair_weights.bl_idname, icon='OUTLINER_OB_CURVES')
-        self.draw_result(context, col, settings)
+        if not adding:
+            self.draw_result(context, col, settings)
+            return
+        armature = hairing.weighted_armature(context.object)
+        if armature is not None and len(armature.magic_fit_hair_rig.chains):
+            VIEW3D_PT_hair_weights_sidebar.draw_chains(col, context.object)
+        row = col.row()
+        row.scale_y = 1.4
+        row.operator(MAGIC_FIT_OT_add_hair_chain.bl_idname, icon='BONE_DATA')
 
     @staticmethod
     def draw_pick_hint(layout, settings):
@@ -1140,7 +1153,7 @@ class VIEW3D_PT_hair_weights_sidebar(tabs.TabPanel, bpy.types.Panel):
     @staticmethod
     def draw_chains(layout, obj):
         """The chains of the hair's own skeleton, on its armature, with their kinds to change, the Show Chains
-        toggle (an eye) and the button that builds them again."""
+        toggle (an eye), the − button that deletes the picked one and the button that builds them again."""
         armature = hairing.weighted_armature(obj)
         if armature is None:
             return
@@ -1154,7 +1167,9 @@ class VIEW3D_PT_hair_weights_sidebar(tabs.TabPanel, bpy.types.Panel):
         wm = bpy.context.window_manager
         row.prop(wm, "magic_fit_show_chains", text="", icon='HIDE_OFF' if wm.magic_fit_show_chains else 'HIDE_ON',
                  emboss=False)
-        box.template_list("MAGIC_FIT_UL_hair_chains", "", rig_state, "chains", rig_state, "active", rows=4)
+        row = box.row()
+        row.template_list("MAGIC_FIT_UL_hair_chains", "", rig_state, "chains", rig_state, "active", rows=4)
+        row.column(align=True).operator(MAGIC_FIT_OT_delete_hair_chain.bl_idname, text="", icon='REMOVE')
         op = box.operator(MAGIC_FIT_OT_hair_weights.bl_idname, text="Rebuild Chains", icon='FILE_REFRESH')
         op.rebuild = True
 

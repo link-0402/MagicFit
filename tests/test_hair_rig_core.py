@@ -2306,6 +2306,145 @@ def test_ramp_follows_edited_bone():
                                                     float(one_old[between].mean()) if between.any() else math.nan))
 
 
+# -----------------------------------------------------------------------------
+# Chains the user adds along a selection, and deletes
+
+def test_selection_chain():
+    model_rig = rig()
+    # One strip: the left lock of hair.parts (top (0.085,-0.035,1.53), bottom (0.09,-0.045,1.28), 13 rows x 2).
+    co, tris, (lock,) = join([hair.strip((0.085, -0.035, 1.53), (0.09, -0.045, 1.28), 0.025, (0.0, 1.0, 0.0))])
+    plan = hairrig.plan_selection(co, tris, model_rig, lock)
+    check(plan is not None and abs(plan.joints[0][2] - 1.53) < 0.02, "selection: the chain starts at the strip's top")
+    check(plan is not None and abs(plan.tip[2] - 1.28) < 0.02, "selection: ...and ends at its bottom")
+    check(plan is not None and len(plan.joints) == 3, "selection: 25 cm gets 3 bones by length")
+    check(plan is not None and np.allclose(plan.joints, plan.middle), "selection: the joints lie on its own line")
+    check(plan is not None and plan.kind == "side" and plan.sheet == -1 and plan.order == -1,
+          "selection: side hair, no column")
+    # One vertex row of the strip (every second vertex) runs down the same hair: its line lies half the strip's
+    # width (1.25 cm) to one side, so within 2 cm of the whole strip's (less than its 2.5 cm width).
+    row = lock[::2]
+    single = hairrig.plan_selection(co, tris, model_rig, row)
+    check(single is not None and plan is not None and float(np.abs(single.joints - plan.joints).max()) < 0.02,
+          "selection: one vertex row runs down the same hair")
+    # A set bone count.
+    five = hairrig.plan_selection(co, tris, model_rig, lock, bones=5)
+    check(five is not None and len(five.joints) == 5, "selection: Bones 5 gives 5 joints")
+    one = hairrig.plan_selection(co, tris, model_rig, lock, bones=1)
+    check(one is not None and len(one.joints) == 1 and abs(one.tip[2] - 1.28) < 0.02, "selection: Bones 1 gives one bone")
+    # Too short: the top row only.
+    check(hairrig.plan_selection(co, tris, model_rig, lock[:2]) is None, "selection: shorter than 3 cm plans nothing")
+    check(hairrig.plan_selection(co, tris, model_rig, np.array([], dtype=np.int64)) is None,
+          "selection: nothing selected plans nothing")
+
+
+def test_selection_two_cards():
+    model_rig = rig()
+    a = hair.strip((-0.03, 0.10, 1.52), (-0.03, 0.14, 1.20), 0.02, (1.0, 0.0, 0.0))
+    b = hair.strip((0.03, 0.10, 1.52), (0.03, 0.14, 1.20), 0.02, (1.0, 0.0, 0.0))
+    co, tris, (ia, ib) = join([a, b])
+    plan = hairrig.plan_selection(co, tris, model_rig, np.concatenate((ia, ib)))
+    check(plan is not None and abs(plan.joints[0][0]) < 0.005 and abs(plan.joints[0][2] - 1.52) < 0.02,
+          "two cards: one chain rooted between their tops")
+    check(plan is not None and abs(plan.tip[0]) < 0.005 and plan.kind == "back", "two cards: back hair down the middle")
+
+
+def test_selection_stacked_cards():
+    model_rig = rig()
+    # One lock built of two unwelded pieces, one below the other: the chain runs from the upper one's top down to the
+    # lower one's end, not from both tops at once.
+    upper = hair.strip((0.085, -0.035, 1.53), (0.087, -0.040, 1.38), 0.025, (0.0, 1.0, 0.0))
+    lower = hair.strip((0.087, -0.040, 1.375), (0.09, -0.045, 1.23), 0.025, (0.0, 1.0, 0.0))
+    co, tris, (iu, il) = join([upper, lower])
+    plan = hairrig.plan_selection(co, tris, model_rig, np.concatenate((iu, il)))
+    check(plan is not None and abs(plan.joints[0][2] - 1.53) < 0.02 and abs(plan.tip[2] - 1.23) < 0.02,
+          "stacked cards: one chain from the upper card's top to the lower one's end ({})".format(
+              None if plan is None else (round(float(plan.joints[0][2]), 3), round(float(plan.tip[2]), 3))))
+
+
+def test_add_chain():
+    obj, armature, plans, _bones, co, tris, part, names = rig_scene()
+    before = state_chains(armature)
+    stored = armature.magic_fit_hair_rig.bones_hash
+    lock = np.flatnonzero(part == names.index("lock_l"))
+    plan = hairrig.plan_selection(co, tris, rig(), lock)
+    plan.kind = "ponytail"   # the kind given is the one kept, not sync_rig's guess
+    added = hairrig.add_chain(bpy.context, armature, plan, hair.RACE)
+    number = max(int(b[0][10:12]) for _k, b in before) + 1
+    check(added == [hairrig.bone_name(number - 1, k) for k in range(len(plan.joints))],
+          "add chain: bones named for the next chain number ({})".format(added))
+    after = state_chains(armature)
+    check(after[:len(before)] == before and after[-1] == ("ponytail", added), "add chain: the others stay, the new one is last")
+    check(armature.data.bones[added[0]].parent.name == hairing.HEAD, "add chain: it hangs from j_kao")
+    check(np.linalg.norm(world(armature, armature.data.bones[added[0]].head_local) - plan.joints[0]) < 1e-5,
+          "add chain: its first bone starts on the plan's root")
+    check(armature.magic_fit_hair_rig.bones_hash == stored and hairrig.rig_edited(armature),
+          "add chain: counts as a user edit (hash kept)")
+    check(json_matches_state(armature) and chains_are_clean(armature), "add chain: the rig property lists it")
+    check(armature.magic_fit_hair_rig.active == len(after) - 1, "add chain: the new chain is picked in the list")
+
+
+def test_add_chain_keeps_edits():
+    obj, armature, _plans, _bones, co, tris, part, names = rig_scene()
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='EDIT')
+    top = armature.data.edit_bones.new("Bone")
+    top.head, top.tail = (0.0, 0.10, 1.55), (0.0, 0.12, 1.42)
+    top.parent = armature.data.edit_bones[hairrig.BONE_PREFIX + "01_a"]
+    bpy.ops.object.mode_set(mode='OBJECT')
+    plan = hairrig.plan_selection(co, tris, rig(), np.flatnonzero(part == names.index("lock_r")))
+    hairrig.add_chain(bpy.context, armature, plan, hair.RACE)
+    check("Bone" not in armature.data.bones and chains_are_clean(armature),
+          "add chain: an unsynced bone the user added is read back and named first")
+
+
+def test_delete_chain():
+    obj, armature, _plans, _bones, _co, _tris, _part, _names = rig_scene()
+    before = state_chains(armature)
+    stored = armature.magic_fit_hair_rig.bones_hash
+    # Chain 02 gets a branch hanging from its last bone: deleting 02 hands the branch to j_kao.
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='EDIT')
+    last = armature.data.edit_bones[before[1][1][-1]]
+    branch = armature.data.edit_bones.new("j_ex_hair_90_a")
+    branch.head, branch.tail, branch.parent = last.tail, last.tail - Vector((0.0, 0.0, 0.05)), last
+    bpy.ops.object.mode_set(mode='OBJECT')
+    hairrig.sync_rig(bpy.context, armature, hair.RACE)
+    armature.magic_fit_hair_rig.bones_hash = stored
+    number = hairrig.delete_chain(bpy.context, armature, 1, hair.RACE)
+    after = state_chains(armature)
+    check(number == before[1][1][0][10:12], "delete chain: reports its number ({})".format(number))
+    check(not any(name in armature.data.bones for name in before[1][1]), "delete chain: its bones are gone")
+    check([c for c in after if c[1] != ["j_ex_hair_90_a"]] == [before[0]] + before[2:],
+          "delete chain: the other chains stay as they were")
+    check(armature.data.bones["j_ex_hair_90_a"].parent.name == hairing.HEAD,
+          "delete chain: a chain hanging from it now hangs from j_kao")
+    check(armature.magic_fit_hair_rig.bones_hash == stored and json_matches_state(armature),
+          "delete chain: counts as a user edit, the rig property follows")
+    try:
+        hairrig.delete_chain(bpy.context, armature, len(after), hair.RACE)
+        refused = None
+    except hairing.HairError as error:
+        refused = str(error)
+    check(refused == "No chain {:d} in the list".format(len(after) + 1), "delete chain: refuses a chain not in the list")
+
+
+def test_delete_chain_unsynced():
+    obj, armature, _plans, _bones, _co, _tris, _part, _names = rig_scene()
+    before = state_chains(armature)
+    # A bone the user extruded from chain 02's tip in Edit Mode, not read back yet, goes with the chain.
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='EDIT')
+    last = armature.data.edit_bones[before[1][1][-1]]
+    extruded = armature.data.edit_bones.new(last.name + ".001")
+    extruded.head, extruded.tail, extruded.parent = last.tail, last.tail - Vector((0.0, 0.0, 0.05)), last
+    extruded.use_connect = True
+    bpy.ops.object.mode_set(mode='OBJECT')
+    number = hairrig.delete_chain(bpy.context, armature, 1, hair.RACE)
+    left = [bone.name for bone in armature.data.bones if bone.name.startswith(hairrig.BONE_PREFIX + number)]
+    check(not left and state_chains(armature) == [before[0]] + before[2:],
+          "delete chain: a bone extruded from it and not read back goes with it ({})".format(left))
+
+
 def main():
     magic_fit.register()
     try:
@@ -2326,7 +2465,9 @@ def main():
                      test_kind_change_writes_json,
                      test_state_keeps_light, test_state_keeps_columns, test_old_rig_state, test_chain_along,
                      test_ramp_from_first_joint,
-                     test_cap_stays, test_bun_light, test_own_neck_weight, test_ramp_follows_edited_bone):
+                     test_cap_stays, test_bun_light, test_own_neck_weight, test_ramp_follows_edited_bone,
+                     test_selection_chain, test_selection_two_cards, test_selection_stacked_cards, test_add_chain,
+                     test_add_chain_keeps_edits, test_delete_chain, test_delete_chain_unsynced):
             print("==", test.__name__)
             try:
                 test()

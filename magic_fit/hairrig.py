@@ -88,6 +88,10 @@ Then it plans a chain of bones down each lock:
   whole only when both locks were and one's roots lie within the other's, no wider than WHOLE_WIDTH: layers
   of one ponytail. Strands or cards merged side by side make back hair.
 
+The user can also add a chain along hair they select (`plan_selection`, Add Chain): the selected vertices make one
+lock, rooted in each loose part where they come closest to the scalp and measured along the whole mesh from there,
+and its joints lie on the lock's own middle line rather than the arc.
+
 The chains become bones on the hair's armature (`build_armature_rig`), j_ex_hair_01_a and on, hanging from
 j_kao. They are ordinary Blender bones, head on a joint and tail on the next, so they draw along the hair
 and the user can move, delete or add some in Edit Mode; `sync_rig` reads them back as they are and names
@@ -100,7 +104,9 @@ collection, and only they are (`collect_hair_bones`); Show Chains solos it. The 
 `Object.magic_fit_hair_rig` after every change, for exporters (Instant Edit) to make the hair skeleton; its
 version 2 lists each column chain's sheet and order, so the exporter can tie neighboring columns. A
 hair bone points along its X axis in the game and along its Y axis in Blender: ALONG_X turns one into the
-other, here (`custom_rig`) and in the exporter.
+other, here (`custom_rig`) and in the exporter. A chain the user adds along a selection (`add_chain`) takes the
+next free number and hangs from j_kao; deleting one from the list (`delete_chain`) hands what hangs from it to its
+parent. Both leave the stored hash as it was, so they count as the user's edits and Hair Weights keeps them.
 
 Like `hairing`, nothing here depends on the 3D view.
 """
@@ -113,6 +119,7 @@ import re
 from collections import namedtuple
 
 import numpy as np
+from mathutils.kdtree import KDTree
 
 from . import fitting, hairing
 from .hairing import HEAD, SCALP_HALF, STAND_MARGIN, HairError, components, unique_triangles, vertex_areas
@@ -670,6 +677,95 @@ def plan_chain(points, lock, rig=None, bone_length=BONE_SPACING):
         kind = "side"
     return ChainPlan(kind, _spread(_arc(line, seg), count), line[-1].copy(), lock.area, lock.whole,
                      lock.angle, lock.vertices, lock.light, _spread(line, count), length=length)
+
+
+def plan_selection(points, tris, rig, selected, *, cap=None, bones=0, weld=None):
+    """The chain (`ChainPlan`) along the hair the user selected: ``selected`` (indices of ``points``, world
+    space, rest pose, with triangles ``tris``) made one lock, or None when nothing is selected or its spine is
+    shorter than MIN_CHAIN_LENGTH. In each loose part holding selected vertices that comes within ROOT_REACH as
+    near the scalp as the nearest one does, its selected vertices within ROOT_BAND of its closest to the scalp are
+    root candidates (hair lying on the cap is all as close), and those of them within ROOT_BAND of the farthest from
+    the selection's tip are roots. Distances run along the whole welded mesh from them, so a sparse selection (one
+    vertex row) still runs root to tip; the other parts (pieces lower down the lock) are measured on from the nearest
+    measured selected hair. Its kind is planned like any lock's (`plan_chain`),
+    whole when its roots span no more than WHOLE_WIDTH, light by find_locks' rule. ``bones`` joints (0: by its
+    length, as `plan_chain` counts them) lie on the selection's own middle line (`spine`), waves included, not on
+    the arc: the user picked the hair it follows (user ruling 2026-11-13). ``cap`` is the hair's cap depth
+    (`hairing.cap_depth`, measured from these points when None)."""
+    points = np.asarray(points, dtype=np.float64)
+    selected = np.unique(np.asarray(selected, dtype=np.int64))
+    if not len(selected):
+        return None
+    mesh = _welded(points, tris, weld)
+    if mesh is None:
+        return None
+    weld, count, rest, t, edges = mesh
+    if cap is None:
+        cap = hairing.cap_depth(points, tris, rig)
+    model = rig.model(rest)
+    lengths = np.linalg.norm(model[edges[:, 0]] - model[edges[:, 1]], axis=1)
+    area = vertex_areas(model, t)
+    weight = area + 1e-12
+    point_area = (area / np.maximum(np.bincount(weld, minlength=count), 1))[weld]
+    nodes = np.unique(weld[selected])
+    gap = np.full(count, np.inf)
+    gap[nodes] = rig.scalp_gap(rest[nodes], cap)
+    part = components(count, edges)
+    groups = [nodes[part[nodes] == p] for p in np.unique(part[nodes])]
+    # Only parts that start as near the scalp as the nearest one, give or take ROOT_REACH, are rooted: a lock built
+    # of pieces one below the other hangs from its top piece.
+    lowest = min(float(gap[group].min()) for group in groups)
+    rooted = [group for group in groups if float(gap[group].min()) <= lowest + ROOT_REACH]
+    pending = [group for group in groups if float(gap[group].min()) > lowest + ROOT_REACH]
+    near = [_closest_to_scalp(group, gap) for group in rooted]
+    # Hair lying on the cap is all as near the scalp: of those, the roots are the ones at the selection's end,
+    # farthest in a straight line from its tip (the selected vertex farthest along the mesh from them; along the
+    # mesh, a card's two top corners lie up to its width apart from it). The parts don't touch, so one Dijkstra
+    # measures each from its own.
+    distance, _source = _dijkstra(count, edges, lengths, np.concatenate(near))
+    roots = []
+    for group, candidates in zip(rooted, near):
+        tip = group[int(np.argmax(distance[group]))]
+        if distance[tip] <= 0.0:
+            # All of it is as near the scalp: no end to pick.
+            roots.append(candidates)
+            continue
+        far = np.linalg.norm(rest[candidates] - rest[tip], axis=1)
+        roots.append(candidates[far >= far.max() - ROOT_BAND])
+    roots = np.concatenate(roots)
+    distance, _source = _dijkstra(count, edges, lengths, roots)
+    # The other parts are measured on from the measured selected hair nearest them, as if joined there, the
+    # nearest part first.
+    while pending:
+        reached = nodes[np.isfinite(distance[nodes])]
+        tree = KDTree(len(reached))
+        for k, node in enumerate(reached.tolist()):
+            tree.insert(rest[node], k)
+        tree.balance()
+        apart, k, a, b = min((found[2], k, node, int(reached[found[1]]))
+                             for k, group in enumerate(pending) for node in group.tolist()
+                             for found in [tree.find(rest[node])])
+        edges = np.vstack((edges, [[a, b]]))
+        lengths = np.append(lengths, apart)
+        pending.pop(k)
+        distance, _source = _dijkstra(count, edges, lengths, roots)
+    root = np.average(rest[roots], axis=0, weights=weight[roots])
+    # The roots' span around the head's vertical axis, as find_locks measures a region's.
+    axis_y = rig.by_name[HEAD].head[1]
+    theta = np.arctan2(model[roots, 0], -(model[roots, 1] - axis_y))
+    radius = np.hypot(model[roots, 0], model[roots, 1] - axis_y)
+    mean = math.atan2(float((weight[roots] * np.sin(theta)).sum()), float((weight[roots] * np.cos(theta)).sum()))
+    arc = ((theta - mean + math.pi) % (2.0 * math.pi) - math.pi) * float(np.average(radius, weights=weight[roots]))
+    share = rig.scalp(rest[roots])
+    light = bool(weight[roots][share >= SCALP_HALF].sum() > 0.5 * weight[roots].sum())
+    lock = Lock(selected, distance[weld[selected]], float(point_area[selected].sum()), root,
+                float(np.ptp(arc)) <= WHOLE_WIDTH, _angle(rig, root), np.zeros(len(selected), dtype=bool),
+                point_area[selected], None, light)
+    plan = plan_chain(points, lock, rig)
+    if plan is None:
+        return None
+    plan.joints = plan.middle = _spread(spine(points, lock), bones or len(plan.joints))
+    return plan
 
 
 def _roots(lock):
@@ -1494,7 +1590,6 @@ def build_armature_rig(context, armature_object, plans, race, cap_depth=-1.0):
     with the plans' kinds, light flags, sheets and orders and the hair's ``cap_depth`` (`hairing.cap_depth`;
     -1: unknown),
     and writes RIG_PROPERTY. Returns the new bone names."""
-    from mathutils import Vector
     world = np.array(armature_object.matrix_world, dtype=np.float64)
     to_armature = np.array(armature_object.matrix_world.inverted_safe(), dtype=np.float64)
     names, chains = [], []
@@ -1506,23 +1601,32 @@ def build_armature_rig(context, armature_object, plans, race, cap_depth=-1.0):
             edit_bones.remove(edit)
         axis = _transform(world, head.head)
         for c, plan in enumerate(plans):
-            ends = list(plan.joints[1:]) + [plan.tip]
-            parent = head
-            chain = []
-            for b, (joint, end) in enumerate(zip(plan.joints, ends)):
-                edit = edit_bones.new(bone_name(c, b))
-                edit.head = Vector(_transform(to_armature, joint).tolist())
-                edit.tail = Vector(_transform(to_armature, end).tolist())
-                edit.align_roll(Vector((to_armature[:3, :3] @ _away(joint, axis)).tolist()))
-                edit.parent = parent
-                edit.use_connect = b > 0
-                edit.use_deform = True
-                parent = edit
-                chain.append(edit.name)
+            chain = _make_chain(edit_bones, plan, c + 1, head, axis, to_armature)
             names += chain
             chains.append((plan.kind, chain, plan.light, int(plan.sheet), int(plan.order)))
     _fill_state(armature_object, race, chains, cap_depth)
     return names
+
+
+def _make_chain(edit_bones, plan, number, parent, axis, to_armature):
+    """Add chain ``number`` (from 1) of ``plan`` (`ChainPlan`, world space) to ``edit_bones``: a bone per joint,
+    head on it and tail on the next joint (the last one's on the tip), its Z axis away from the head's vertical
+    axis through ``axis`` (world space), the first hanging from ``parent`` (an edit bone) and each next one from
+    the one before. ``to_armature`` is the armature's inverted world matrix. Returns the bone names."""
+    from mathutils import Vector
+    ends = list(plan.joints[1:]) + [plan.tip]
+    chain = []
+    for b, (joint, end) in enumerate(zip(plan.joints, ends)):
+        edit = edit_bones.new(bone_name(number - 1, b))
+        edit.head = Vector(_transform(to_armature, joint).tolist())
+        edit.tail = Vector(_transform(to_armature, end).tolist())
+        edit.align_roll(Vector((to_armature[:3, :3] @ _away(joint, axis)).tolist()))
+        edit.parent = parent
+        edit.use_connect = b > 0
+        edit.use_deform = True
+        parent = edit
+        chain.append(edit.name)
+    return chain
 
 
 def _hair_bones(bones):
@@ -1695,6 +1799,87 @@ def sync_rig(context, armature_object, race):
     result.sort(key=lambda chain: chain[1][0])
     _fill_state(armature_object, race, result)
     return renamed
+
+
+def add_chain(context, armature_object, plan, race, cap_depth=None):
+    """Add ``plan`` (`ChainPlan`, world space; `plan_selection`) to ``armature_object``'s hair bones as a new
+    chain hanging from j_kao, numbered one past the highest chain number there or in the rig state, with the
+    plan's kind and light flag and in no sheet; it is picked in the list. Bones the user edited since are read
+    back first (`sync_rig`). ``cap_depth`` is stored when the rig state has none. The stored `bones_hash` stays
+    as it was, so the chain counts as a user edit (`rig_edited`): Hair Weights reads it back rather than building
+    the chains again. Returns the new bone names."""
+    from . import hairview
+    stored = armature_object.magic_fit_hair_rig.bones_hash
+    if any(bone.name.startswith(BONE_PREFIX) for bone in armature_object.data.bones):
+        sync_rig(context, armature_object, race)
+    state = armature_object.magic_fit_hair_rig
+    listed = [name for chain in state.chains for name in chain.bones.split(",")[:1]]
+    numbers = {parsed[0] for parsed in map(_parse, list(armature_object.data.bones.keys()) + listed)
+               if parsed is not None}
+    number = max(numbers, default=0) + 1
+    if number > MAX_CHAINS:
+        raise HairError("The hair has more than {:d} chains".format(MAX_CHAINS))
+    world = np.array(armature_object.matrix_world, dtype=np.float64)
+    to_armature = np.array(armature_object.matrix_world.inverted_safe(), dtype=np.float64)
+    with hairing.editing_bones(context, armature_object) as edit_bones:
+        head = edit_bones.get(HEAD)
+        if head is None:
+            raise HairError("Armature '{:s}' has no {:s} bone".format(armature_object.name, HEAD))
+        names = _make_chain(edit_bones, plan, number, head, _transform(world, head.head), to_armature)
+    sync_rig(context, armature_object, race)
+    state = armature_object.magic_fit_hair_rig
+    index = next(i for i, chain in enumerate(state.chains) if chain.bones.split(",")[0] == names[0])
+    chain = state.chains[index]
+    chain.kind = plan.kind
+    chain.light = plan.light
+    chain.sheet = chain.order = -1
+    state.active = index
+    if cap_depth is not None and state.cap_depth < 0.0:
+        state.cap_depth = cap_depth
+    write_rig_property(armature_object)
+    hairview.color_bones(armature_object)
+    state.bones_hash = stored
+    return names
+
+
+def delete_chain(context, armature_object, index, race):
+    """Remove chain ``index`` (0-based, in the rig state's list) from ``armature_object``: bones the user edited
+    since are read back first (`sync_rig`; a bone extruded from the chain is in it then), the chain's bones go, and
+    a bone hanging from one of them hangs from the chain's first bone's parent instead (its chain stays a chain).
+    The rest is read back again, and the stored `bones_hash` stays as it was, so the deletion counts as a
+    user edit (`rig_edited`), like `add_chain`. Returns the chain's number ("02")."""
+    state = armature_object.magic_fit_hair_rig
+    if not 0 <= index < len(state.chains):
+        raise HairError("No chain {:d} in the list".format(index + 1))
+    stored = state.bones_hash
+    # Bones the user edited since are read back first: one extruded from the chain goes with it.
+    first_name = state.chains[index].bones.split(",")[0]
+    sync_rig(context, armature_object, race)
+    state = armature_object.magic_fit_hair_rig
+    if not len(state.chains):
+        state.bones_hash = stored
+        raise HairError("No chain {:d} in the list".format(index + 1))
+    index = next((i for i, chain in enumerate(state.chains) if chain.bones.split(",")[0] == first_name),
+                 min(index, len(state.chains) - 1))
+    names = [name for name in state.chains[index].bones.split(",") if name]
+    first = _parse(names[0]) if names else None
+    number = "{:02d}".format(first[0] if first is not None else index + 1)
+    with hairing.editing_bones(context, armature_object) as edit_bones:
+        gone = [edit_bones[name] for name in names if edit_bones.get(name) is not None]
+        if gone:
+            parent = gone[0].parent
+            doomed = {edit.name for edit in gone}
+            for edit in edit_bones:
+                if edit.name not in doomed and edit.parent is not None and edit.parent.name in doomed:
+                    edit.use_connect = False
+                    edit.parent = parent
+            for edit in gone:
+                edit_bones.remove(edit)
+    sync_rig(context, armature_object, race)
+    state = armature_object.magic_fit_hair_rig
+    state.active = max(min(index, len(state.chains) - 1), 0)
+    state.bones_hash = stored
+    return number
 
 
 def custom_rig(armature_object, race, reference=None):
