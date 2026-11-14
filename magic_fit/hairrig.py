@@ -74,9 +74,9 @@ Then it plans a chain of bones down each lock:
   instead of the chain spacing: each sheet's hair goes into its columns vertex by vertex (`_count_labels`), as
   many as its count, equal arcs across the sheet's width around the head (between the COUNT_QUANTILES of its
   area), with no MIN_COLUMN_AREA; a column only goes when it holds no chain. Side hair on the character's left
-  (+X) has the left count. A round lock that isn't a ponytail is no separate piece then: it goes into its area's
-  sheet, so the count holds. With Hair Type Ponytail and more than one ponytail chain, the tied tail is cut into
-  columns side by side the same way. Short hair (`_short`: no lock longer than BANGS_LENGTH, separate pieces
+  (+X) has the left count. A round lock is no separate piece then: it goes into its area's sheet, so the count
+  holds; with Hair Type Loose a ponytail is back hair. With Hair Type Ponytail and more than one ponytail chain,
+  the tied tail is cut into columns side by side the same way. Short hair (`_short`: no lock longer than BANGS_LENGTH, separate pieces
   too) is one bangs sheet around the whole head, cut into the bang count's equal sectors, the first centered
   straight in front; its separate pieces (a bun) keep their chains. Without counts (`detect_counts`, Detect) the columns are the chain spacing wide.
 - The budget: while the rig takes more than MAX_HAIR_BONES bones and some chain has more than CHAIN_BONES[0],
@@ -1316,10 +1316,9 @@ def plan_layout(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BO
                 else:
                     tails = [(lock, chain)]
                 planned = [pair for pair in planned if pair[1].kind not in ("back", "ponytail")]
-    # With counts the user's count decides an area's chains: a round lock of a counted area goes into its sheet.
-    # Ponytails, and short hair's pieces (a bun), keep their own chain.
-    separate = [lock.whole and _round(points, lock) and (counts is None or ring or chain.kind == "ponytail")
-                for lock, chain in planned]
+    # With counts the user's count decides an area's chains: a round lock goes into its area's sheet, a ponytail
+    # (Hair Type Loose: Hair Type Ponytail tied it above) into the back's. Short hair's pieces (a bun) keep theirs.
+    separate = [lock.whole and _round(points, lock) and (counts is None or ring) for lock, _chain in planned]
     pieces = [pair for pair, piece in zip(planned, separate) if piece]
     sheet_locks = _merge_pieces(points, mesh, graph, rig, [pair for pair, piece in zip(planned, separate)
                                                            if not piece], 0.0, math.inf)
@@ -1347,7 +1346,9 @@ def plan_layout(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BO
         theta, radius = _polar(rig, np.array([lock.root for lock, _chain in sheet_locks]).reshape(-1, 3))
         areas = np.array([lock.area for lock, _chain in sheet_locks], dtype=np.float64)
         # Short hair with counts: one bangs sheet around the whole head.
-        kinds = ["bangs" if ring else chain.kind for _lock, chain in sheet_locks]
+        # With counts a ponytail left untied (Hair Type Loose) is back hair.
+        kinds = ["bangs" if ring else "back" if counts is not None and chain.kind == "ponytail" else chain.kind
+                 for _lock, chain in sheet_locks]
         sheets = {}
         for k, kind in enumerate(kinds):
             sheets.setdefault((kind, kind == "side" and bool(theta[k] < 0.0)), []).append(k)

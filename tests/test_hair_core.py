@@ -925,7 +925,8 @@ def test_custom_button():
 
 
 def test_custom_reuses_rig():
-    obj, _parts, _settings = own_skeleton_hair()
+    # Hair Type Loose builds no ponytail chain: the tube is the one ponytail chain with Hair Type Ponytail.
+    obj, _parts, _settings = own_skeleton_hair(hair_type='PONYTAIL', hair_ponytail_chains=1)
     hair_weights_reports()
     armature = hair_armature(obj)
     name = ponytail_root(armature) if armature is not None else None
@@ -1011,7 +1012,7 @@ def test_detect_hair_chains():
 
 
 def test_race_change_rebuilds():
-    obj, _parts, _settings = own_skeleton_hair()
+    obj, _parts, _settings = own_skeleton_hair(hair_type='PONYTAIL', hair_ponytail_chains=1)
     hair_weights_reports()
     armature = hair_armature(obj)
     name = ponytail_root(armature) if armature is not None else None
@@ -1031,7 +1032,7 @@ def test_race_change_rebuilds():
     after = [bone_head(armature, bones[0]) for _kind, bones in rig_chains(armature) if bones]
     co, tris = mesh_arrays(obj)
     base = hairing.Reference.get().rig('c0801', 0)
-    plans = hairrig.plan_rig(co, tris, base.moved(hairing.armature_offset(armature, base)),
+    plans = hairrig.plan_rig(co, tris, base.moved(hairing.armature_offset(armature, base)), ponytail=True,
                              counts=operators.hair_chain_counts(bpy.context.scene.magic_fit))
     gap = max((float(np.linalg.norm(head - plan.joints[0])) for head, plan in zip(after, plans)), default=math.inf)
     check(len(after) == len(plans) and gap < 1e-5, "race change: the chains are planned for c0801's head ({}, "
@@ -1042,7 +1043,7 @@ def test_race_change_rebuilds():
 
 def test_nothing_hangs():
     hair.clear_scene()
-    use_settings(hair_skeleton_mode='CUSTOM')
+    use_settings(hair_skeleton_mode='CUSTOM', hair_type='PONYTAIL', hair_ponytail_chains=1)
     obj = strips_object("Cap", hair.cap())
     bpy.context.view_layer.objects.active = obj
     obj.select_set(True)
@@ -1083,7 +1084,7 @@ def test_nothing_hangs():
 
 
 def test_custom_brush():
-    obj, _parts, settings = own_skeleton_hair()
+    obj, _parts, settings = own_skeleton_hair(hair_type='PONYTAIL', hair_ponytail_chains=1)
     check(hairing.uses_custom_rig(obj, settings), "own brush: a new hair uses its own skeleton in Own Skeleton mode")
     problem = operators.check_hair_ready(obj, settings)
     check(problem is not None and "Hair Weights" in problem, "own brush: a hair without weights asks for Hair Weights")
@@ -1161,7 +1162,7 @@ def test_custom_parts():
     first.select_set(False)
     bpy.context.view_layer.objects.active = second
     second.select_set(True)
-    use_settings(hair_skeleton_mode='CUSTOM')
+    use_settings(hair_skeleton_mode='CUSTOM', hair_type='PONYTAIL', hair_ponytail_chains=1)
     result, reports = hair_weights_reports()
     armature = hair_armature(second)
     check(result == {'FINISHED'} and armature == hair_armature(first) and second.magic_fit_hair.custom,
@@ -1238,7 +1239,7 @@ def test_custom_parts_one_after_another():
         # sectors and 1 chain per side give each lock one chain from the same root either way, so the kind picked
         # stays with its lock.
         use_settings(hair_skeleton_mode='CUSTOM', hair_bang_chains=4, hair_side_chains_left=1,
-                     hair_side_chains_right=1)
+                     hair_side_chains_right=1, hair_type='PONYTAIL', hair_ponytail_chains=1)
         first = parts_object("Hair", ("cap", "lock_l", "lock_r"))
         hair_weights_reports()
         armature = hair_armature(first)

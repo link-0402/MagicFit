@@ -925,6 +925,22 @@ def test_short_hair_ring():
           "short hair: Detect counts its {:d} column chains as bangs ({})".format(total, found))
 
 
+def test_loose_counts_tie_nothing():
+    # Hair Type Loose with counts: a round tube behind the head (a ponytail without counts) gets no ponytail chain
+    # of its own; it is back hair, in the Back Chains' columns.
+    model_rig = rig()
+    co, tris, _parts = back_sheet()
+    tube_co, tube_tris, _ids = join([hair.tube((0.0, 0.12, 1.50), (0.0, 0.22, 1.10), 0.035)])
+    co, tris = np.vstack((co, tube_co)), np.vstack((tris, tube_tris + len(co)))
+    free = hairrig.plan_rig(co, tris, model_rig)
+    check(any(chain.kind == "ponytail" for chain in free),
+          "loose counts: the tube is a ponytail without counts ({})".format(kinds_of(free)))
+    chains, made, _short = hairrig.plan_layout(co, tris, model_rig, counts=counts(back=2))
+    check(len(chains) == 2 and all(chain.kind == "back" and chain.sheet >= 0 for chain in chains)
+          and made["back"] == 2 and made["ponytail"] == 0,
+          "loose counts: Back 2 gives two back columns, no ponytail ({}, {})".format(kinds_of(chains), made))
+
+
 def test_ponytail_counts():
     # Hair Type Ponytail with Ponytail Chains: 1 is the one tail as before; 2 and 3 cut the tail side by side, one
     # sheet of ponytail chains, 2 mirrored across straight behind.
@@ -2470,7 +2486,7 @@ def main():
                      test_parted_locks, test_long_hair_chains, test_bangs_chain, test_pivot_at_root, test_even_joints,
                      test_wavy_lock_straight, test_kinds, test_columns, test_u_bottom, test_mirrored_sheet,
                      test_lopsided_locks, test_back_width, test_swept_sheet, test_ponytail_on_sheet, test_ponytail_hair_type, test_side_columns, test_back_counts,
-                     test_side_counts, test_side_counts_take_round_locks, test_bang_counts, test_short_hair_ring, test_ponytail_counts, test_detect_counts,
+                     test_side_counts, test_side_counts_take_round_locks, test_bang_counts, test_short_hair_ring, test_loose_counts_tie_nothing, test_ponytail_counts, test_detect_counts,
                      test_forward_strand,
                      test_light_column,
                      test_budget, test_lone_kind_survives, test_card_hair_kinds, test_card_hair_time,
