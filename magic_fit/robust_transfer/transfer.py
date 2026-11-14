@@ -9,7 +9,8 @@
 # settings), and fingers and toes are handled on their own (digit_columns). Matches between two walls of a
 # crease take both walls' weights (weighttransfer.between_walls). With Customize+, what bridges a crease is lifted
 # out where the template's skin would bury it (lift_buried), and meshes matched in the rest pose get
-# mirror-symmetric weights where they are symmetric themselves (balance_sides).
+# mirror-symmetric weights where they are symmetric themselves (balance_sides). Without Customize+, those meshes
+# have the weights of the cloth between the legs averaged with their neighbours' (smooth_crotch).
 import numpy as np
 from mathutils.bvhtree import BVHTree
 from scipy import sparse
@@ -122,8 +123,10 @@ def is_deform_group(target, name):
 def stride_source(body, names, vertices, weights, surface_bvh, posed=False):
     """What Hem Follow needs of the body (see weighttransfer.hem_follow), for the weight columns
     ``names``: the strides' deform matrices per column, which columns belong to each leg, and the
-    body's surface. ``posed``: the body is matched as displayed, so the strides start from the
-    armature's pose instead of its rest pose. None without an armature with both thighs."""
+    body's surface; and where the legs are (weighttransfer.smooth_crotch): the hip and knee joints
+    (None without both knees) and which way is down. ``posed``: the body is matched as displayed, so
+    the strides start from the armature's pose instead of its rest pose. None without an armature
+    with both thighs."""
     armature = rest_armature(body)
     if armature is None:
         return None
@@ -170,7 +173,12 @@ def stride_source(body, names, vertices, weights, surface_bvh, posed=False):
         for bone in armature.data.bones[root].children_recursive + [armature.data.bones[root]]:
             if bone.name in columns:
                 legs[columns[bone.name], side] = 1
-    return dict(poses=poses, legs=legs, bvh=surface_bvh, template=template, flex=flex)
+    # The joints are the bones' heads, as the body is matched.
+    hips = np.array([start[index[name]][:3, 3] for name in weighttransfer.HEM_LEGS])
+    knees = (np.array([start[index[name]][:3, 3] for name in weighttransfer.HEM_KNEES])
+             if all(name in index for name in weighttransfer.HEM_KNEES) else None)
+    return dict(poses=poses, legs=legs, bvh=surface_bvh, template=template, flex=flex, hips=hips, knees=knees,
+                down=down)
 
 
 def make_target(obj, depsgraph, settings):
@@ -355,7 +363,9 @@ def follow_hems(batch, domain, settings, partial):
     strides of weighttransfer.hem_follow need, and anywhere as far as sitting needs
     (weighttransfer.flex_follow), and solve again on the same Laplacian. Meshes with a Customize+-like
     template (``target['cplus']``) also follow the skin wherever it would pass through them, with rings of
-    their neighbours (weighttransfer.spread_pull)."""
+    their neighbours (weighttransfer.spread_pull). Without Customize+ (``settings.use_cplus`` off) the
+    template is the built-in one, and its pins mustn't tear the mesh (weighttransfer.FOLLOW_TEAR): it pulls
+    nothing where the mesh bridges a crease, and the pins weighttransfer.torn_pins finds are let go."""
     offsets = np.cumsum([0] + [len(t['vertices']) for t in batch])
     pulls = [np.zeros(len(t['vertices'])) for t in batch]
     # Meshes solved together are checked together (their seams aren't hems), each group of them with
@@ -385,34 +395,56 @@ def follow_hems(batch, domain, settings, partial):
         for position, start, end in zip(members, ends, ends[1:]):
             pulls[position] = pull[start:end]
     # With a template (see cplus_follow), anywhere its skin would pass through the mesh.
-    templates = [weighttransfer.spread_pull(target['triangles'], cplus_follow(target)) if 'cplus' in target
-                 else np.zeros(len(target['vertices'])) for target in batch]
+    built_in = not settings.use_cplus
+    templates = []
+    for target in batch:
+        if 'cplus' not in target:
+            templates.append(np.zeros(len(target['vertices'])))
+            continue
+        pull = cplus_follow(target)
+        if built_in:
+            # Where the mesh bridges a crease, its closest-point weights are either wall's.
+            pull *= 1 - target['spans']
+        templates.append(weighttransfer.spread_pull(target['triangles'], pull))
     if not any(np.any(pull > 1e-3) for pull in pulls + templates):
         return
-    priors, confidences = [], []
-    for target, hem, template in zip(batch, pulls, templates):
-        pull = np.maximum(hem, template)
-        # The Inpaint Mask keeps its vertices free, and MAX_DISTANCE is as far as matches reach.
-        pull[target_confidence(target) <= 0] = 0
-        if 'distances' in target:
-            pull[target['distances'] > MAX_DISTANCE] = 0
-        prior = target.get('closest_weights', target['weights']).astype(np.float64).copy()
-        pulled = pull > 1e-3
-        if np.any(pulled):
-            solved = target['weights'][pulled].astype(np.float64)
-            solved /= np.maximum(solved.sum(axis=1, keepdims=True), np.finfo(np.float64).tiny)
-            prior[pulled] = (1 - pull[pulled, None]) * solved + pull[pulled, None] * prior[pulled]
-        priors.append(prior)
-        # Trusted only where pulled: not in the Inpaint Mask, nor past MAX_DISTANCE.
-        hem = np.where(pulled, hem, 0.0)
-        trust = weighttransfer.hem_follow_trust(target_confidence(target), hem)
-        template[~pulled] = 0
-        confidences.append(weighttransfer.hem_follow_trust(trust, template, weighttransfer.CPLUS_TRUST))
+
+    def held(templates):
+        """The weights to hold the vertices to, and each mesh's trust in them, with these pulls of the templates."""
+        priors, confidences = [], []
+        for target, hem, template in zip(batch, pulls, templates):
+            pull = np.maximum(hem, template)
+            # The Inpaint Mask keeps its vertices free, and MAX_DISTANCE is as far as matches reach.
+            pull[target_confidence(target) <= 0] = 0
+            if 'distances' in target:
+                pull[target['distances'] > MAX_DISTANCE] = 0
+            prior = target.get('closest_weights', target['weights']).astype(np.float64).copy()
+            pulled = pull > 1e-3
+            if np.any(pulled):
+                solved = target['weights'][pulled].astype(np.float64)
+                solved /= np.maximum(solved.sum(axis=1, keepdims=True), np.finfo(np.float64).tiny)
+                prior[pulled] = (1 - pull[pulled, None]) * solved + pull[pulled, None] * prior[pulled]
+            priors.append(prior)
+            # Trusted only where pulled: not in the Inpaint Mask, nor past MAX_DISTANCE.
+            trust = weighttransfer.hem_follow_trust(target_confidence(target), np.where(pulled, hem, 0.0))
+            confidences.append(weighttransfer.hem_follow_trust(
+                trust, np.where(pulled, template, 0.0), weighttransfer.CPLUS_TRUST))
+        return np.concatenate(priors), confidences
+
+    vertices = np.concatenate([t['vertices'] for t in batch])
+    triangles = np.concatenate([t['triangles'] + offset for t, offset in zip(batch, offsets)])
+    prior, confidences = held(templates)
     confidence = np.concatenate(confidences)
-    domain = weighttransfer.reweight_domain(
-        domain, np.concatenate([t['vertices'] for t in batch]),
-        np.concatenate([t['triangles'] + offset for t, offset in zip(batch, offsets)]),
-        np.concatenate(priors), confidence >= 1, confidence)
+    if built_in:
+        before = np.concatenate([target_confidence(t) for t in batch])
+        loose = weighttransfer.torn_pins(
+            triangles, weighttransfer.find_vertex_merge_map(vertices, weld_distance(settings)), prior,
+            np.concatenate([t['weights'] for t in batch]), confidence >= 1, (confidence >= 1) & (before < 1))
+        if np.any(loose):
+            prior, confidences = held([np.where(loose[start:end], 0.0, template)
+                                       for template, start, end in zip(templates, offsets, offsets[1:])])
+            confidence = np.concatenate(confidences)
+    domain = weighttransfer.reweight_domain(domain, vertices, triangles, prior, confidence >= 1, confidence)
     if domain is None:
         return
     try:
@@ -521,6 +553,30 @@ def balance_sides(target, names):
     share = 0.5 * weighttransfer._smoothstep((BALANCE_GAP[1] - gaps) / (BALANCE_GAP[1] - BALANCE_GAP[0]))
     weights[rows] = (1 - share[:, np.newaxis]) * weights[rows] + share[:, np.newaxis] * other
     return int(np.count_nonzero(share > 0))
+
+
+def smooth_crotch(target, settings):
+    """Average ``target``'s weights over the cloth between the legs (weighttransfer.smooth_crotch, with the legs of
+    ``target['strides']``) on the vertices the transfer solves and writes, if it was matched in the rest pose of the
+    body's armature (``target['mirror']``), without Customize+ (``settings.use_cplus``, where it wasn't measured)
+    and isn't Rigid. Before the group limit (process_weights): averaging adds groups. Returns how many vertices
+    changed."""
+    strides = target.get('strides')
+    if (target.get('mirror') is None or strides is None or settings.use_cplus
+            or target['obj'].magic_fit_transfer.rigid):
+        return 0
+    # Partial Reweight keeps the vertices it can't solve or doesn't reach.
+    solved = np.asarray(target.get('supported', np.ones(len(target['vertices']), dtype=bool)), dtype=bool)
+    if 'strength' in target:
+        solved = solved & (target['strength'] > 0)
+    weights = target['weights']
+    smoothed = weighttransfer.smooth_crotch(
+        target['vertices'], target['triangles'],
+        weighttransfer.find_vertex_merge_map(target['vertices'], weld_distance(settings)), weights,
+        strides['hips'], strides['knees'], strides['down'], solved)
+    changed = int(np.count_nonzero(np.any(smoothed != weights, axis=1)))
+    weights[:] = smoothed
+    return changed
 
 
 def solve_lift(weights, places, offset):

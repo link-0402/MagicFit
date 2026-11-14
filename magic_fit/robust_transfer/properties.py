@@ -55,7 +55,7 @@ class WeightTransferSettings(bpy.types.PropertyGroup):
         name="Use Deformed Body",
         description=(
             "Use the body as shaped by its modifiers and shape keys. The pose only counts for meshes that "
-            "don't follow the body's armature. Customize+ only counts with With Customize+"
+            "don't follow the body's armature, or with Pose on. Customize+ only counts with With Customize+"
         ),
         default=True,
     )
@@ -63,9 +63,18 @@ class WeightTransferSettings(bpy.types.PropertyGroup):
         name="Use Deformed Target",
         description=(
             "Use the meshes as shaped by their modifiers and shape keys, in rest pose if they follow the "
-            "body's armature"
+            "body's armature, unless Pose is on"
         ),
         default=True,
+    )
+    use_pose: BoolProperty(
+        name="Use Pose",
+        description=(
+            "Match every mesh in the pose the body shows, also those that follow its armature. Needs Use "
+            "Deformed Body on and With Customize+ off. The meshes then don't follow a template with thick "
+            "thighs and butt, their sides aren't evened out and cloth between the legs isn't averaged"
+        ),
+        default=False,
     )
     use_cplus: BoolProperty(
         name="Customize+",

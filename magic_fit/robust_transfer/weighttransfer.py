@@ -724,12 +724,36 @@ TEMPLATE_BUST_SCALE = 1.3
 # Customize+, 112 % with the rings). Soft rings (trusted 0.95-0.99) lost most of that; 2 rings did a little worse.
 FOLLOW_RINGS = 3
 FOLLOW_RING_SHARE = 0.7
+# Without Customize+ (template_pose), those pins mustn't tear the mesh: two pinned neighbours whose closest points
+# lie on different walls (the two thighs across a crotch) each follow their own, and the edge between them takes
+# the whole difference when posed. So that template pulls nothing where the mesh bridges a crease (crease_bridges),
+# and of two pinned neighbours whose weights differ by FOLLOW_TEAR more (summed over the bones) than the solve's
+# did, both are let go again, with FOLLOW_TEAR_RINGS rings of the pins around them (torn_pins): tight meshes have
+# no crease bridges. Over 7 poses, plain and under a player's template, the inseam edges growing over 5 mm went
+# from 103 % of stock Robust Weight Transfer's to 76 % on 13 shorts and pants, and from 397 % to 91 % on a harness
+# and 4 bikini bottoms, for more clipping into the skin under the mesh (84 % of its to 99 %, and 55 % to 108 %).
+# Against its fork with Crease Smoothing: 133 % to 98 % and 1240 % to 285 %, at 70 % and 59 % of that one's
+# clipping. The bridge rule alone left the bottoms at 187 % of the stock one's; the pin rule alone left a pair of
+# loose shorts 56 edges growing over 10 mm for 14, and by itself tore 12 and 7 % more edges with 0 and 1 rings
+# than with 2, and no fewer with 3. With Customize+ every pin holds, as CPLUS_TRUST found it has to.
+FOLLOW_TEAR = 0.15
+FOLLOW_TEAR_RINGS = 2
 # Sitting: each hip and both flexed HEM_FLEX degrees forward are checked on every matched vertex, like the hems
 # in the strides (follow_needed): over the front of the thighs and hips, inpainted weights 0.1 off the skin's
 # let the thigh through by 5-11 mm. Where the mesh bridges a crease (crease_bridges), only HEM_FLEX_BRIDGE of that
 # pull counts: the crotch midline's skin weights clip standing with a thigh forward, where the blend didn't.
 HEM_FLEX = 100.0
 HEM_FLEX_BRIDGE = 0.5
+# Crotch: cloth between the legs that follows one leg stretches when the legs part. So once solved, the weights of
+# the vertices below the hip joints (HEM_LEGS) and not below the knees (HEM_KNEES), within CROTCH_REACH of the plane
+# midway between the hip joints, are averaged with their neighbours' CROTCH_PASSES times (smooth_crotch). Not below
+# the knees: the lower part of a long dress isn't between the legs, and long trousers clipped less that way for the
+# same tearing. On 13 trousers and shorts over 15 poses, one pass took the inseam edges growing over 5 mm down by
+# 12 %, for 11 % more of the area under the skin (on 5 briefs: 63 % down, for 22 % more); three passes 19 %, for
+# 30 % more (82 %, for 51 % more). Repeating while edges still tore in the poses, or while a pass still shortened
+# the longest growth, did no better than one pass.
+CROTCH_REACH = 0.04
+CROTCH_PASSES = 1
 
 
 def _rotation(axis, degrees):
@@ -932,6 +956,80 @@ def hem_follow_trust(confidence, pull, trust=None):
     by a fifth."""
     trust = HEM_TRUST if trust is None else trust
     return np.where(pull > 1e-3, np.maximum(confidence, trust * _smoothstep(pull / 0.2)), confidence)
+
+
+def torn_pins(triangles, merge_map, held, solved, pinned, added):
+    """Which of the vertices newly pinned (``added``) to their ``held`` weights to let go: the ends of the edges
+    between two ``pinned`` vertices, at least one of them newly, whose held weights differ by FOLLOW_TEAR more
+    (summed over the bones) than their ``solved`` weights did, and the new pins within FOLLOW_TEAR_RINGS rings of
+    those. Coincident vertices (``merge_map``) count as one."""
+    F = np.asarray(triangles, dtype=np.int64).reshape(-1, 3)
+    edges = np.vstack((F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]))
+    a, b = edges[:, 0], edges[:, 1]
+    held = _normalized_rows(np.asarray(held, dtype=np.float64))
+    solved = _normalized_rows(np.asarray(solved, dtype=np.float64))
+    more = np.abs(held[a] - held[b]).sum(axis=1) - np.abs(solved[a] - solved[b]).sum(axis=1)
+    torn = pinned[a] & pinned[b] & (added[a] | added[b]) & (more > FOLLOW_TEAR)
+    if not np.any(torn):
+        return np.zeros(len(held), dtype=bool)
+    a, b = merge_map[a], merge_map[b]
+    loose = np.zeros(int(merge_map.max()) + 1, dtype=bool)
+    loose[a[torn]] = loose[b[torn]] = True
+    for _ring in range(FOLLOW_TEAR_RINGS):
+        grown = loose.copy()
+        grown[a[loose[b]]] = True
+        grown[b[loose[a]]] = True
+        loose = grown
+    return loose[merge_map] & added
+
+
+def smooth_crotch(vertices, triangles, merge_map, weights, hips, knees, down, solved=None, passes=None):
+    """``weights`` averaged ``passes`` (CROTCH_PASSES) times over the cloth between the legs: each ``solved``
+    vertex (all by default) below the ``hips`` (the two hip joints' middle, along ``down``), not below the
+    ``knees`` (the same; None: no bound) and within CROTCH_REACH of the plane midway between the hips takes
+    the mean of its normalized weights and its neighbours' along the ``triangles``' edges, read before any is
+    written, and keeps its own total.
+    Coincident vertices (``merge_map``) count as one; vertices without weights neither change nor count. Returns
+    the new weights."""
+    passes = CROTCH_PASSES if passes is None else passes
+    V = np.asarray(vertices, dtype=np.float64)
+    W = np.asarray(weights, dtype=np.float64)
+    hips = np.asarray(hips, dtype=np.float64)
+    down = np.asarray(down, dtype=np.float64)
+    middle = hips.mean(axis=0)
+    across = (hips[0] - hips[1]) / np.linalg.norm(hips[0] - hips[1])
+    totals = W.sum(axis=1)
+    zone = ((V - middle) @ down >= 0) & (np.abs((V - middle) @ across) < CROTCH_REACH) & (totals > 0)
+    if knees is not None:
+        zone &= (V - np.asarray(knees, dtype=np.float64).mean(axis=0)) @ down <= 0
+    if solved is not None:
+        zone &= solved
+    if passes <= 0 or not zone.any():
+        return W.copy()
+    count = int(merge_map.max()) + 1
+    filled = totals > 0
+    members = np.bincount(merge_map[filled], minlength=count)
+    values = np.zeros((count, W.shape[1]))
+    np.add.at(values, merge_map[filled], _normalized_rows(W[filled]))
+    values /= np.maximum(members, 1)[:, np.newaxis]
+    F = np.asarray(triangles, dtype=np.int64).reshape(-1, 3)
+    edges = merge_map[np.vstack((F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]))]
+    edges = np.unique(np.sort(edges[edges[:, 0] != edges[:, 1]], axis=1), axis=0)
+    a, b = edges[:, 0], edges[:, 1]
+    held = members > 0
+    counts = held.astype(np.float64)
+    np.add.at(counts, a, held[b])
+    np.add.at(counts, b, held[a])
+    changing = np.zeros(count, dtype=bool)
+    changing[merge_map[zone]] = True
+    for _pass in range(int(passes)):
+        sums = values.copy()
+        np.add.at(sums, a, values[b])
+        np.add.at(sums, b, values[a])
+        values = np.where(changing[:, np.newaxis], sums / np.maximum(counts, 1)[:, np.newaxis], values)
+    out = W.copy()
+    out[zone] = values[merge_map[zone]] * totals[zone, np.newaxis]
+    return out
 
 
 def _union_find_components(vertex_count, edges):

@@ -9,6 +9,7 @@ repository root:
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
@@ -660,6 +661,189 @@ class NumericalTests(unittest.TestCase):
         pull[np.isclose(strip[:, 0], 0.02)] = 1.0
         self.assertEqual(wt.spread_pull(sf, pull)[np.isclose(strip[:, 0], 0.02)].min(), 1.0)
         np.testing.assert_array_equal(wt.spread_pull(sf, pull, rings=0), pull)
+
+    def test_pins_that_would_tear_an_edge_are_let_go(self):
+        # A strip of quads along x that the solve blended evenly between two walls (bones 0 and 1). Pinned to its
+        # closest-point weights, each half would follow its own wall, and the edges across x == 0 would take the
+        # whole difference.
+        strip, sf = flat_grid(np.linspace(-0.05, 0.05, 11), np.linspace(0, 0.01, 2))
+        column = np.rint(strip[:, 0] / 0.01).astype(int)
+        merge = wt.find_vertex_merge_map(strip, wt.BRIDGE_WELD)
+        held = np.where(column[:, np.newaxis] < 0, [1.0, 0.0], [0.0, 1.0])
+        solved = np.tile([0.5, 0.5], (len(strip), 1))
+        everywhere = np.ones(len(strip), dtype=bool)
+        loose = wt.torn_pins(sf, merge, held, solved, everywhere, everywhere)
+        # The columns on both sides of the jump (-1 and 0) and FOLLOW_TEAR_RINGS rings around them; the rest
+        # stay pinned.
+        reach = wt.FOLLOW_TEAR_RINGS
+        np.testing.assert_array_equal(loose, (column >= -1 - reach) & (column <= reach))
+        self.assertTrue(loose.any() and not loose.all())
+        # Pins holding what the solve gave anyway tear nothing, however the weights jump.
+        self.assertFalse(wt.torn_pins(sf, merge, held, held, everywhere, everywhere).any())
+        # A jump within FOLLOW_TEAR is let be.
+        mild = np.where(column[:, np.newaxis] < 0, [0.5 + wt.FOLLOW_TEAR / 5, 0.5 - wt.FOLLOW_TEAR / 5], [0.5, 0.5])
+        self.assertFalse(wt.torn_pins(sf, merge, mild, solved, everywhere, everywhere).any())
+        # Only new pins are let go: the ones the first solve already had stay, and an edge to a vertex that
+        # isn't pinned can't tear.
+        new = column < 0
+        np.testing.assert_array_equal(wt.torn_pins(sf, merge, held, solved, everywhere, new),
+                                      (column >= -1 - reach) & new)
+        self.assertFalse(wt.torn_pins(sf, merge, held, solved, column != 0, everywhere).any())
+        self.assertFalse(wt.torn_pins(sf, merge, held, solved, everywhere, np.zeros(len(strip), dtype=bool)).any())
+        # Across a split seam (coincident vertices) the rings go on.
+        left, lf = flat_grid(np.linspace(-0.05, 0.01, 7), np.linspace(0, 0.01, 2))
+        right, rf = flat_grid(np.linspace(0.01, 0.05, 5), np.linspace(0, 0.01, 2))
+        both = np.vstack((left, right))
+        faces = np.vstack((lf, rf + len(left)))
+        column = np.rint(both[:, 0] / 0.01).astype(int)
+        held = np.where(column[:, np.newaxis] < 0, [1.0, 0.0], [0.0, 1.0])
+        solved = np.tile([0.5, 0.5], (len(both), 1))
+        everywhere = np.ones(len(both), dtype=bool)
+        loose = wt.torn_pins(faces, wt.find_vertex_merge_map(both, wt.BRIDGE_WELD), held, solved, everywhere,
+                             everywhere)
+        np.testing.assert_array_equal(loose, (column >= -1 - reach) & (column <= reach))
+
+    def follow_strip(self, use_cplus, spans=0.0):
+        """A strip between two thighs, each half touched from outside by one thigh's skin (bones 0 and 1) 0.5 mm
+        above it, barely trusted and solved onto the hip (bone 2); its template thickens both thighs 4 mm into
+        it. Returns its columns along x and its weights after transfer.follow_hems."""
+        strip, sf = flat_grid(np.linspace(-0.05, 0.05, 11), np.linspace(0, 0.02, 3), z=-0.0005)
+        column = np.rint(strip[:, 0] / 0.01).astype(int)
+        points = strip.copy()
+        points[:, 2] = 0
+        closest = np.where(column[:, np.newaxis] < 0, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0])
+        trust = np.full(len(strip), wt.BRIDGE_FLOOR)
+        matched = np.zeros(len(strip), dtype=bool)
+        template = np.tile(np.eye(4), (3, 1, 1))
+        template[:2, 2, 3] = -0.004
+        target = dict(vertices=strip, triangles=sf, weights=np.tile([0.0, 0.0, 1.0], (len(strip), 1)),
+                      closest_weights=closest, points=points,
+                      point_normals=np.tile([0.0, 0.0, 1.0], (len(strip), 1)),
+                      distances=np.full(len(strip), 0.0005), confidence=trust, matched=matched, cplus=template,
+                      spans=np.full(len(strip), float(spans)))
+        domain = wt.prepare_inpainting(strip, sf, closest, matched, 'COMBINED', wt.BRIDGE_WELD, trust,
+                                       wt.BRIDGE_SOFT_LENGTH)
+        settings = SimpleNamespace(virtual_merge=False, virtual_merge_distance=0.0, use_cplus=use_cplus)
+        transfer.follow_hems([target], domain, settings, False)
+        weights = np.asarray(target['weights'], dtype=np.float64)
+        return column, sf, weights / weights.sum(axis=1, keepdims=True)
+
+    def test_built_in_template_pins_dont_tear_the_mesh(self):
+        column, faces, weights = self.follow_strip(use_cplus=False)
+        # Away from the middle, each half follows its thigh, as the template needs.
+        np.testing.assert_allclose(weights[column <= -4] - [1, 0, 0], 0, atol=1e-6)
+        np.testing.assert_allclose(weights[column >= 4] - [0, 1, 0], 0, atol=1e-6)
+        # Where the halves meet, pinning each to its own thigh would put the whole difference on one edge (a jump
+        # of 2 summed over the bones): those pins are let go, and the weights cross over several edges.
+        edges = np.vstack((faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]))
+        self.assertLess(np.abs(weights[edges[:, 0]] - weights[edges[:, 1]]).sum(axis=1).max(), 0.8)
+
+    def test_built_in_template_leaves_crease_bridges_to_the_solve(self):
+        # All of the strip bridges the crease between the thighs: its closest-point weights are either wall's,
+        # and the solve's are kept.
+        _column, _faces, weights = self.follow_strip(use_cplus=False, spans=1.0)
+        np.testing.assert_allclose(weights, np.tile([0.0, 0.0, 1.0], (len(weights), 1)), atol=1e-6)
+
+    def test_customize_plus_template_pins_all_hold(self):
+        # With Customize+ the skin of that template is what the mesh has to stay clear of: every pin holds, in
+        # crease bridges too.
+        for spans in (0.0, 1.0):
+            column, _faces, weights = self.follow_strip(use_cplus=True, spans=spans)
+            np.testing.assert_allclose(weights[column < 0] - [1, 0, 0], 0, atol=1e-6)
+            np.testing.assert_allclose(weights[column >= 0] - [0, 1, 0], 0, atol=1e-6)
+
+    def crotch_sheet(self):
+        """A sheet hanging between two hip joints 0.2 apart at z == 0 (knees at z == -0.4), cut along x == 0.015
+        into two parts with coincident vertices there: weighted to bone 0 left of x == 0 and to bone 1 right of
+        it, the right part's copies of the cut half to each, with totals from 0.5 to 1.5. Returns its vertices,
+        faces, merge map, weights, hips and knees."""
+        zs = np.linspace(-0.575, 0.175, 16)
+        left, lf = flat_grid(np.linspace(-0.095, 0.015, 12), zs)
+        right, rf = flat_grid(np.linspace(0.015, 0.095, 9), zs)
+        vertices = np.vstack((left, right))[:, [0, 2, 1]]
+        faces = np.vstack((lf, rf + len(left)))
+        x = vertices[:, 0]
+        weights = np.where(x[:, np.newaxis] < 0, [1.0, 0.0], [0.0, 1.0])
+        weights[len(left):][np.isclose(right[:, 0], 0.015)] = [0.5, 0.5]
+        weights *= np.random.default_rng(0).uniform(0.5, 1.5, len(vertices))[:, np.newaxis]
+        hips = np.array([[0.1, 0.0, 0.0], [-0.1, 0.0, 0.0]])
+        return (vertices, faces, wt.find_vertex_merge_map(vertices, wt.BRIDGE_WELD), weights, hips,
+                hips + [0.0, 0.0, -0.4])
+
+    def test_crotch_weights_are_averaged_with_their_neighbours(self):
+        v, f, merge, w, hips, knees = self.crotch_sheet()
+        down = np.array([0.0, 0.0, -1.0])
+        x, z = v[:, 0], v[:, 2]
+        # Below the hips, above the knees, within CROTCH_REACH of the plane between the hips.
+        zone = (z < 0) & (z > -0.4) & (np.abs(x) < wt.CROTCH_REACH)
+        out = wt.smooth_crotch(v, f, merge, w, hips, knees, down)
+        np.testing.assert_array_equal(out[~zone], w[~zone])
+        self.assertTrue(np.any(np.abs(out[zone] - w[zone]) > 1e-6))
+        np.testing.assert_allclose(out.sum(axis=1), w.sum(axis=1), atol=1e-12)
+        # The jump from one bone to the other across x == 0 gets smaller.
+        edges = np.vstack((f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]))
+        across = zone[edges[:, 0]] & zone[edges[:, 1]] & (np.sign(x[edges[:, 0]]) != np.sign(x[edges[:, 1]]))
+        self.assertTrue(across.any())
+
+        def jump(weights):
+            rows = wt._normalized_rows(weights)
+            return np.abs(rows[edges[across, 0]] - rows[edges[across, 1]]).sum(axis=1).max()
+        self.assertAlmostEqual(jump(w), 2.0)
+        self.assertLess(jump(out), 1.5)
+        # Coincident copies end with the same weights, whatever they had.
+        copies = np.flatnonzero(np.isclose(x, 0.015) & zone)
+        copies = copies.reshape(2, -1)
+        np.testing.assert_allclose(wt._normalized_rows(out[copies[0]]), wt._normalized_rows(out[copies[1]]),
+                                   atol=1e-12)
+        self.assertGreater(np.abs(wt._normalized_rows(w[copies[0]]) - wt._normalized_rows(w[copies[1]])).max(), 0.4)
+        # No pass changes nothing; without knees, the cloth below them is averaged too.
+        np.testing.assert_array_equal(wt.smooth_crotch(v, f, merge, w, hips, knees, down, passes=0), w)
+        free = wt.smooth_crotch(v, f, merge, w, hips, None, down)
+        below = (z < -0.4) & (np.abs(x) < wt.CROTCH_REACH)
+        self.assertTrue(np.any(np.abs(free[below] - w[below]) > 1e-6))
+        np.testing.assert_array_equal(free[z > 0], w[z > 0])
+        # Only the vertices solved change.
+        solved = x > 0
+        part = wt.smooth_crotch(v, f, merge, w, hips, knees, down, solved)
+        np.testing.assert_array_equal(part[~solved], w[~solved])
+        np.testing.assert_allclose(part[solved], out[solved], atol=1e-12)
+        # A vertex without weights keeps none and doesn't count: its neighbours, all on bone 0, stay on it.
+        empty = np.flatnonzero(np.isclose(x, -0.025) & np.isclose(z, -0.175))[0]
+        beside = np.flatnonzero(np.isclose(x, -0.015) & np.isclose(z, -0.175))[0]
+        w[empty] = 0
+        out = wt.smooth_crotch(v, f, merge, w, hips, knees, down)
+        np.testing.assert_array_equal(out[empty], [0.0, 0.0])
+        np.testing.assert_allclose(out[beside], w[beside], atol=1e-12)
+
+    def test_crotch_is_averaged_on_meshes_matched_in_the_rest_pose(self):
+        v, f, merge, w, hips, knees = self.crotch_sheet()
+        down = np.array([0.0, 0.0, -1.0])
+        x, z = v[:, 0], v[:, 2]
+
+        def run(rest=True, use_cplus=False, rigid=False, **partial):
+            target = dict(obj=SimpleNamespace(magic_fit_transfer=SimpleNamespace(rigid=rigid)), vertices=v,
+                          triangles=f, weights=w.astype(np.float32), strides=dict(hips=hips, knees=knees, down=down),
+                          **partial)
+            if rest:
+                target['mirror'] = np.eye(4)
+            settings = SimpleNamespace(use_cplus=use_cplus, virtual_merge=False, virtual_merge_distance=0.0)
+            return transfer.smooth_crotch(target, settings), target['weights']
+
+        changed, weights = run()
+        self.assertGreater(changed, 0)
+        self.assertEqual(weights.dtype, np.float32)
+        np.testing.assert_allclose(weights, wt.smooth_crotch(v, f, merge, w.astype(np.float32), hips, knees, down),
+                                   atol=1e-6)
+        # Not matched in the rest pose of the body's armature, With Customize+ or Rigid: left as solved.
+        for skipped in (dict(rest=False), dict(use_cplus=True), dict(rigid=True)):
+            changed, weights = run(**skipped)
+            self.assertEqual(changed, 0, skipped)
+            np.testing.assert_array_equal(weights, w.astype(np.float32))
+        # Partial Reweight: what it can't solve (``supported``) or doesn't reach (``strength``) stays as it is.
+        kept = (x < 0) | (z < -0.2)
+        changed, weights = run(supported=x > 0, strength=np.where(z < -0.2, 0.0, 0.5))
+        self.assertGreater(changed, 0)
+        np.testing.assert_array_equal(weights[kept], w.astype(np.float32)[kept])
 
     def test_soft_matches_anchor_otherwise_rejected_parts(self):
         v, f, w, matched = split_surface()
@@ -2160,23 +2344,223 @@ class CreaseSmoothingTests(TransferScene, unittest.TestCase):
         bone.rotation_euler = (0, 0, 0)
         self.assertLess(stretch['transferred'], stretch['copied'] / 3)
 
-    def test_bound_meshes_match_in_the_rest_pose(self):
+    def pose_left(self, rig, degrees=10):
+        """Swing bone L of ``rig`` about its z axis, which moves the left wall of the crease off the gusset."""
+        bone = rig.pose.bones['L']
+        bone.rotation_mode = 'XYZ'
+        bone.rotation_euler = (0, 0, np.radians(degrees))
+        bpy.context.view_layer.update()
+
+    def modifier_states(self, *objects):
+        return [(obj.name, mod.name, mod.show_viewport) for obj in objects for mod in obj.modifiers]
+
+    def test_what_counts_as_a_pose(self):
+        from magic_fit.cplus import rig as cplus_rig
+        rig, _gusset, _x = self.crease_scene(gusset=True)
+        self.settings.use_deformed_source = True
+        # Pose is off unless asked for.
+        self.assertFalse(self.settings.use_pose)
+        self.settings.use_pose = True
+        self.assertFalse(operators._posed(self.settings, self.body))
+        bone = rig.pose.bones['L']
+        # A scaled bone is a pose, and so is one a constraint turns.
+        bone.scale = (1.5, 1.5, 1.5)
+        bpy.context.view_layer.update()
+        self.assertTrue(operators._posed(self.settings, self.body))
+        self.settings.use_pose = False
+        self.assertFalse(operators._posed(self.settings, self.body))
+        self.settings.use_pose = True
+        bone.scale = (1, 1, 1)
+        turn = bpy.data.objects.new('Turn', None)
+        bpy.context.collection.objects.link(turn)
+        turn.rotation_euler = (0, 0.3, 0)
+        constraint = bone.constraints.new('COPY_ROTATION')
+        constraint.target = turn
+        bpy.context.view_layer.update()
+        self.assertEqual(bone.matrix_basis, bone.matrix_basis.Identity(4))
+        self.assertTrue(operators._posed(self.settings, self.body))
+        # Not shown: the armature in its rest position, or the body's modifier off.
+        rig.data.pose_position = 'REST'
+        bpy.context.view_layer.update()
+        self.assertFalse(operators._posed(self.settings, self.body))
+        rig.data.pose_position = 'POSE'
+        self.body.modifiers[0].show_viewport = False
+        bpy.context.view_layer.update()
+        self.assertFalse(operators._posed(self.settings, self.body))
+        self.body.modifiers[0].show_viewport = True
+        bpy.context.view_layer.update()
+        self.assertTrue(operators._posed(self.settings, self.body))
+        # The Transfer's report says so.
+        self.assertEqual(operators._transferred(self.settings, self.body, 2),
+                         f"Weights transferred from {self.body.name} to 2 object(s), matched in the body's pose")
+        # Nor without Use Deformed Body, nor with With Customize+.
+        self.settings.use_deformed_source = False
+        self.assertFalse(operators._posed(self.settings, self.body))
+        self.settings.use_deformed_source = True
+        self.settings.use_cplus = True
+        self.assertFalse(operators._posed(self.settings, self.body))
+        self.settings.use_cplus = False
+        self.assertFalse(operators._posed(self.settings, None))
+        # The Customize+ preview shows the pose through its rig, with the same modifiers on afterwards.
+        fake = bpy.data.objects.new('C+ CreaseRig', rig.data.copy())
+        bpy.context.collection.objects.link(fake)
+        fake.parent = rig
+        fake[cplus_rig.MARK] = '{}'
+        bpy.context.view_layer.update()
+        self.assertEqual(cplus_rig.connect(rig, fake), 2)
+        states = self.modifier_states(self.body)
+        self.assertTrue(operators._posed(self.settings, self.body))
+        self.assertEqual(self.modifier_states(self.body), states)
+        rig.data.pose_position = 'REST'
+        bpy.context.view_layer.update()
+        self.assertFalse(operators._posed(self.settings, self.body))
+        self.assertEqual(operators._transferred(self.settings, self.body, 2),
+                         f'Weights transferred from {self.body.name} to 2 object(s)')
+
+    def test_a_pose_counts_with_the_customize_plus_preview_on(self):
+        from magic_fit.cplus import rig as cplus_rig
+        rig, gusset, _x = self.crease_scene(gusset=True)
+        self.settings.use_deformed_source = True
+        self.settings.use_deformed_target = True
+        self.settings.use_pose = True
+        # Without weights the gusset stays where it is in the pose, for both transfers.
+        gusset.vertex_groups.clear()
+        self.pose_left(rig)
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        posed = self.read(gusset, ['L', 'R'])
+        gusset.vertex_groups.clear()
+        fake = bpy.data.objects.new('C+ CreaseRig', rig.data.copy())
+        bpy.context.collection.objects.link(fake)
+        fake.parent = rig
+        fake[cplus_rig.MARK] = '{}'
+        bpy.context.view_layer.update()
+        self.assertEqual(cplus_rig.connect(rig, fake), 2)
+        fake.pose.bones['L'].scale = (1.4, 1.4, 1.4)
+        bpy.context.view_layer.update()
+        states = self.modifier_states(self.body, gusset)
+        targets, _groups = operators.match_objects(bpy.context, self.settings, self.body, [gusset])
+        self.assertNotIn('mirror', targets[0])
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        np.testing.assert_allclose(self.read(gusset, ['L', 'R']), posed, atol=1e-6)
+        self.assertEqual(self.modifier_states(self.body, gusset), states)
+
+    def test_bound_meshes_match_in_the_rest_pose_without_a_pose_shown(self):
+        rig, gusset, _x = self.crease_scene(gusset=True)
+        self.settings.use_deformed_source = True
+        self.settings.use_deformed_target = True
+        self.settings.use_pose = True
+        targets, _groups = operators.match_objects(bpy.context, self.settings, self.body, [gusset])
+        # Matched in the rest pose: with the frame balance_sides mirrors across.
+        self.assertIn('mirror', targets[0])
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        rest = self.read(gusset, ['L', 'R'])
+        # A pose stored but not shown changes nothing.
+        self.pose_left(rig, 35)
+        rig.data.pose_position = 'REST'
+        bpy.context.view_layer.update()
+        states = self.modifier_states(self.body, gusset)
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        np.testing.assert_array_equal(self.read(gusset, ['L', 'R']), rest)
+        self.assertEqual(self.modifier_states(self.body, gusset), states)
+
+    def test_bound_meshes_match_in_the_pose_the_body_shows(self):
+        rig, gusset, _x = self.crease_scene(gusset=True)
+        self.settings.use_deformed_source = True
+        self.settings.use_deformed_target = True
+        self.settings.use_pose = True
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        rest = self.read(gusset, ['L', 'R'])
+        # Without weights the gusset stays where it is in the pose, like an unbound copy of it.
+        gusset.vertex_groups.clear()
+        loose = self.mesh('Loose', [v.co[:] for v in gusset.data.vertices],
+                          [p.vertices[:] for p in gusset.data.polygons], rig=False)
+        self.pose_left(rig)
+        states = self.modifier_states(self.body, gusset)
+        targets, _groups = operators.match_objects(bpy.context, self.settings, self.body, [gusset])
+        self.assertNotIn('mirror', targets[0])
+        results = {}
+        for obj in (loose, gusset):
+            self.select(obj)
+            self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+            results[obj.name] = self.read(obj, ['L', 'R'])
+        np.testing.assert_allclose(results[gusset.name], results[loose.name], atol=1e-6)
+        self.assertGreater(np.abs(results[gusset.name] - rest).max(), 0.1)
+        self.assertEqual(self.modifier_states(self.body, gusset), states)
+
+    def test_a_pose_needs_the_pose_setting(self):
         rig, gusset, _x = self.crease_scene(gusset=True)
         self.settings.use_deformed_source = True
         self.settings.use_deformed_target = True
         self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
         rest = self.read(gusset, ['L', 'R'])
-        # A pose (or the weights the gusset has now) doesn't change what it gets.
-        bone = rig.pose.bones['L']
-        bone.rotation_mode = 'XYZ'
-        bone.rotation_euler = (0, np.radians(35), 0)
-        bone.scale = (1.5, 1.5, 1.5)
-        bpy.context.view_layer.update()
-        states = [(mod.name, mod.show_viewport) for obj in (self.body, gusset) for mod in obj.modifiers]
+        self.pose_left(rig)
+        states = self.modifier_states(self.body, gusset)
+        targets, _groups = operators.match_objects(bpy.context, self.settings, self.body, [gusset])
+        self.assertIn('mirror', targets[0])
         self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
-        np.testing.assert_allclose(self.read(gusset, ['L', 'R']), rest, atol=1e-6)
-        self.assertEqual([(mod.name, mod.show_viewport) for obj in (self.body, gusset) for mod in obj.modifiers],
-                         states)
+        np.testing.assert_array_equal(self.read(gusset, ['L', 'R']), rest)
+        self.assertEqual(self.modifier_states(self.body, gusset), states)
+
+    def test_a_pose_needs_use_deformed_body(self):
+        rig, gusset, _x = self.crease_scene(gusset=True)
+        self.settings.use_deformed_target = True
+        self.settings.use_pose = True
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        rest = self.read(gusset, ['L', 'R'])
+        self.pose_left(rig)
+        states = self.modifier_states(self.body, gusset)
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        np.testing.assert_array_equal(self.read(gusset, ['L', 'R']), rest)
+        self.assertEqual(self.modifier_states(self.body, gusset), states)
+
+    def test_a_pose_does_not_count_with_customize_plus(self):
+        from magic_fit.cplus import rig as cplus_rig
+        rig, gusset, _x = self.crease_scene(gusset=True)
+        self.settings.use_deformed_source = True
+        self.settings.use_deformed_target = True
+        self.settings.use_pose = True
+        self.settings.use_cplus = True
+        fake = bpy.data.objects.new('C+ CreaseRig', rig.data.copy())
+        bpy.context.collection.objects.link(fake)
+        fake.parent = rig
+        fake[cplus_rig.MARK] = '{}'
+        bpy.context.view_layer.update()
+        self.assertEqual(cplus_rig.connect(rig, fake), 2)
+        fake.pose.bones['L'].scale = (1.4, 1.4, 1.4)
+        bpy.context.view_layer.update()
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        rest = self.read(gusset, ['L', 'R'])
+        self.pose_left(rig)
+        states = self.modifier_states(self.body, gusset)
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        np.testing.assert_array_equal(self.read(gusset, ['L', 'R']), rest)
+        self.assertEqual(self.modifier_states(self.body, gusset), states)
+
+    def test_inpaint_matches_in_the_pose_like_the_transfer(self):
+        rig, gusset, x = self.crease_scene(gusset=True)
+        self.settings.use_deformed_source = True
+        self.settings.use_deformed_target = True
+        self.settings.use_pose = True
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        self.weights(gusset, ['Inpaint'], (np.abs(x) < 0.02).astype(float)[:, None])
+        gusset.magic_fit_transfer.inpaint_group = 'Inpaint'
+        base = np.array([vertex.co[:] for vertex in gusset.data.vertices])
+        self.pose_left(rig)
+        shown = self.posed(gusset)
+        self.assertGreater(np.abs(shown - base).max(), 0.01)
+        states = self.modifier_states(self.body, gusset)
+        original, made = transfer.make_target, []
+
+        def make(*args):
+            made.append(original(*args))
+            return made[-1]
+        # Matched as shown in the pose, and in the rest pose without Use Deformed Body.
+        for deformed, expected in ((True, shown), (False, base)):
+            self.settings.use_deformed_source = deformed
+            with patch.object(transfer, 'make_target', side_effect=make):
+                self.assertEqual(bpy.ops.magic_fit.inpaint_weights(), {'FINISHED'})
+            np.testing.assert_allclose(made[-1]['vertices'], expected, atol=1e-6)
+            self.assertEqual(self.modifier_states(self.body, gusset), states)
 
     def test_customize_plus_is_left_out(self):
         from magic_fit.cplus import rig as cplus_rig
@@ -2485,6 +2869,57 @@ class CreaseSmoothingTests(TransferScene, unittest.TestCase):
         self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
         for obj, used in parts:
             np.testing.assert_allclose(self.read(obj, ['L', 'R']), whole[used], atol=0.02)
+
+    def test_cloth_between_the_legs_is_averaged_before_the_group_limit(self):
+        rig, gusset, x = self.crease_scene(gusset=True)
+        rest = np.array([vertex.co[:] for vertex in gusset.data.vertices])
+        edges = np.array([edge.vertices[:] for edge in gusset.data.edges])
+        bone = rig.pose.bones['L']
+        bone.rotation_mode = 'XYZ'
+        # With its bones as the thighs (their heads at z == 0.03, no knees), the pass reaches the gusset's middle
+        # where it lies lower than them.
+        zone = (rest[:, 2] < 0.03) & (np.abs(x) < wt.CROTCH_REACH)
+        smooth, process = transfer.smooth_crotch, transfer.process_weights
+        calls, results, stretch = [], {}, {}
+
+        def smoothed(*args):
+            calls.append(('smooth_crotch', smooth(*args)))
+            return calls[-1][1]
+
+        def limited(*args):
+            calls.append(('process_weights', None))
+            return process(*args)
+        with patch.object(wt, 'HEM_LEGS', ('L', 'R')), \
+                patch.object(transfer, 'smooth_crotch', side_effect=smoothed), \
+                patch.object(transfer, 'process_weights', side_effect=limited):
+            for label, passes in (('plain', 0), ('averaged', wt.CROTCH_PASSES)):
+                calls.clear()
+                bone.rotation_euler = (0, 0, 0)
+                bpy.context.view_layer.update()
+                with patch.object(wt, 'CROTCH_PASSES', passes):
+                    self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+                results[label] = self.read(gusset, ['L', 'R'])
+                bone.rotation_euler = (0, np.radians(20), 0)
+                bpy.context.view_layer.update()
+                posed = self.posed(gusset)
+                stretch[label] = (np.linalg.norm(posed[edges[:, 1]] - posed[edges[:, 0]], axis=1)
+                                  / np.linalg.norm(rest[edges[:, 1]] - rest[edges[:, 0]], axis=1)).max()
+            # Averaged first, then limited.
+            self.assertEqual([name for name, _changed in calls], ['smooth_crotch', 'process_weights'])
+            self.assertGreater(calls[0][1], 0)
+            bone.rotation_euler = (0, 0, 0)
+            self.settings.num_limit_groups = 1
+            self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+            limited_weights = self.read(gusset, ['L', 'R'])
+        changed = np.any(np.abs(results['averaged'] - results['plain']) > 1e-5, axis=1)
+        self.assertTrue(changed.any())
+        np.testing.assert_allclose(results['averaged'][~zone], results['plain'][~zone], atol=1e-6)
+        np.testing.assert_allclose(results['averaged'].sum(axis=1), 1, atol=1e-5)
+        # Turning one thigh stretches the gusset less (5.6 times its length at most for 6.3).
+        self.assertLess(stretch['averaged'], stretch['plain'])
+        # The group limit still holds.
+        self.assertLessEqual(np.count_nonzero(limited_weights > 0, axis=1).max(), 1)
+        np.testing.assert_allclose(limited_weights.sum(axis=1), 1, atol=1e-5)
 
 
 if __name__ == '__main__':

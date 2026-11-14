@@ -118,6 +118,10 @@ class VIEW3D_PT_weight_transfer_sidebar(tabs.TabPanel, bpy.types.Panel):
         row = col.row(align=True, heading="Use Deformed")
         row.prop(settings, "use_deformed_source", text="Body", toggle=True)
         row.prop(settings, "use_deformed_target", text="Meshes", toggle=True)
+        # The pose only counts with the body as shaped, and not With Customize+.
+        pose = row.row(align=True)
+        pose.active = settings.use_deformed_source and not settings.use_cplus
+        pose.prop(settings, "use_pose", text="Pose", toggle=True)
         row = col.row(heading="With")
         row.active = cplus_on(body_settings.target) if body_settings.target is not None else False
         row.prop(settings, "use_cplus")

@@ -3,8 +3,8 @@
 # Operators of Robust Weight Transfer by sentfromspacevr (https://github.com/sentfromspacevr), GPL-2.0-or-later.
 # Changed for Magic Fit (2026-09): renamed into this add-on, the source is the body
 # shared by all tools, the solver modules (which load SciPy) are imported on first use, meshes following
-# the body's armature are matched in the rest pose and others without Customize+, and there's no
-# Smoothed Limit Vertex Groups operator or Visualize Rejected Weights.
+# the body's armature are matched in the rest pose unless Pose is on and the body shows one, others without Customize+,
+# and there's no Smoothed Limit Vertex Groups operator or Visualize Rejected Weights.
 
 import contextlib
 
@@ -178,6 +178,40 @@ def _bound(body, objects):
     return [obj for obj in objects if armatures and _armatures_of(obj) & armatures]
 
 
+def _posed(settings, body):
+    """Whether the meshes are matched to the body as displayed in its pose, also those following its armature:
+    with Pose and Use Deformed Body on and With Customize+ off, while the body shows its own armature (the one
+    transfer.stride_source reads the pose of; never its Customize+ rig, which always looks posed) out of
+    its rest pose. The Customize+ preview shows the armature's pose too."""
+    if body is None or not settings.use_pose or not settings.use_deformed_source or settings.use_cplus:
+        return False
+    transfer, _weighttransfer = engine()
+    armature = transfer.rest_armature(body)
+    if armature is None or armature.pose is None or armature.data.pose_position != 'POSE':
+        return False
+    # As the matching shows the body: without Customize+.
+    with _without_cplus([body]):
+        shown = any(mod.type == 'ARMATURE' and mod.object == armature and mod.show_viewport
+                    for mod in body.modifiers)
+    if not shown:
+        return False
+    # The evaluated pose, so constraints and animation count too.
+    return any(not np.allclose(pose_bone.matrix, pose_bone.bone.matrix_local, atol=1e-5)
+               for pose_bone in armature.pose.bones)
+
+
+def _matched_at_rest(settings, body, objects):
+    """Those of ``objects`` matched with the body in the rest pose: those following its armature (`_bound`),
+    unless the transfer is `_posed`."""
+    return [] if _posed(settings, body) else _bound(body, objects)
+
+
+def _transferred(settings, body, count):
+    """The Transfer's closing report. It says when the meshes were matched in the body's pose (`_posed`)."""
+    posed = ", matched in the body's pose" if _posed(settings, body) else ''
+    return f'Weights transferred from {body.name} to {count} object(s){posed}'
+
+
 def cplus_on(body):
     """Whether Customize+ is on for the body's armature."""
     from ..cplus import rig as cplus_rig
@@ -196,7 +230,8 @@ def cplus_deform(context, body):
 def match_objects(context, settings, body, objects, cplus=None):
     """Match ``objects`` to the body. Meshes that follow the body's armature (or its Customize+ rig) are
     matched with both in the rest pose, where their weights apply, so neither the pose nor Customize+
-    nor the weights they have now change the result. Others are matched as displayed, but without
+    nor the weights they have now change the result, unless Pose is on and the body shows a pose, with Use
+    Deformed Body on and With Customize+ off (`_posed`). Others, and then all, are matched as displayed, but without
     Customize+ on either. Returns the targets (in the order of ``objects``) and the body's group names,
     which of them are deform bones and which are transferred.
 
@@ -204,7 +239,7 @@ def match_objects(context, settings, body, objects, cplus=None):
     Customize+ template would push it into them (see transfer.follow_hems); without it, where a template
     like the ones players use would (weighttransfer.template_pose)."""
     transfer, weighttransfer = engine()
-    bound = _bound(body, objects)
+    bound = _matched_at_rest(settings, body, objects)
     loose = [obj for obj in objects if obj not in bound]
     targets, groups = {}, None
     fallback = transfer.rest_armature(body)
@@ -283,6 +318,7 @@ class MAGIC_FIT_OT_transfer_weights(bpy.types.Operator):
                 if settings.use_cplus:
                     transfer.lift_buried(target, names)
                 transfer.balance_sides(target, names)
+                transfer.smooth_crotch(target, settings)
                 transfer.process_weights(target, settings)
                 transfer.stage_weights(target, names, included, apply_mask=not settings.apply_to_selected,
                                        clear_others=True)
@@ -313,7 +349,7 @@ class MAGIC_FIT_OT_transfer_weights(bpy.types.Operator):
         transfer.report_stability(self, targets)
         transfer.report_postprocess(self, post_counts)
         transfer.report_rigid(self, targets, made_rigid, holding)
-        self.report({'INFO'}, f'Weights transferred from {source_original.name} to {len(targets)} object(s)')
+        self.report({'INFO'}, _transferred(settings, source_original, len(targets)))
         return {'FINISHED'}
 
 
@@ -387,9 +423,10 @@ class MAGIC_FIT_OT_inpaint_weights(bpy.types.Operator):
         settings = context.scene.magic_fit_transfer
         obj = context.active_object
         try:
-            # Shown as Transfer Weights matches it: in the rest pose if it follows the body's armature,
-            # otherwise without Customize+.
-            with (_rest_pose if _bound(context.scene.magic_fit.target, [obj]) else _without_cplus)([obj]):
+            # Shown as Transfer Weights matches it: in the rest pose if it follows the body's armature and
+            # the transfer isn't posed, otherwise without Customize+.
+            at_rest = _matched_at_rest(settings, context.scene.magic_fit.target, [obj])
+            with (_rest_pose if at_rest else _without_cplus)([obj]):
                 target = transfer.make_target(obj, context.evaluated_depsgraph_get(), settings)
             names = [g.name for g in obj.vertex_groups]
             deform = [util.is_vertex_group_deform_bone(obj, name) for name in names]
