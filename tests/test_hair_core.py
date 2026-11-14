@@ -985,10 +985,23 @@ def test_custom_chain_spacing():
           "hair type: Ponytail with 3 Ponytail Chains builds 3 ponytail chains and no back chains ({})".format(kinds))
 
 
+def test_no_hair_note():
+    # An area asked for that gets no chain says so; one that gets fewer than asked says how many.
+    settings = use_settings(hair_side_chains_left=2)
+    made = {"back": 2, "ponytail": 0, "left": 0, "right": 2, "bangs": 2}
+    notes = operators.chain_count_notes(settings, made, False)
+    check("No hair found for Left Side Chains: none built" in notes, "no hair note: says so ({})".format(notes))
+    notes = operators.chain_count_notes(settings, dict(made, left=1), False)
+    check("Built 1 of 2 Left Side chains: too little hair there for more" in notes
+          and not [note for note in notes if note.startswith("No hair found")],
+          "no hair note: 1 of 2 built says how many ({})".format(notes))
+
+
 def test_detect_hair_chains():
-    # Detect sets the counts to the ones the hair gets without any: on the long hair one chain per side lock. It
-    # has no back sheet (its tube is a ponytail of its own) and its bangs hang too little for a chain, so Back and
-    # Bang Chains stay. Built with them, each side lock has one chain.
+    # Detect sets the counts to the ones the hair gets without any: on the long hair one chain per side lock and one
+    # for the back, its tube (with Hair Type Loose a tube is hair of the area it hangs in, and narrower than Chain
+    # Spacing it gets one lane, `hairlanes.lane_count`). Its bangs hang too little for a chain, so Bang Chains stays.
+    # Built with them, each side lock has one chain and the bangs none.
     obj, _parts, settings = own_skeleton_hair(hair_back_chains=4, hair_bang_chains=5)
     co, tris = mesh_arrays(obj)
     base = hairing.Reference.get().rig('c0201', 0)
@@ -996,19 +1009,21 @@ def test_detect_hair_chains():
     run = _HairWeightsRun()
     result = operators.MAGIC_FIT_OT_detect_hair_chains.execute(run, bpy.context)
     print("      reports:", run.reports)
-    check(result == {'FINISHED'} and expected == {"left": 1, "right": 1}
+    check(result == {'FINISHED'} and expected == {"back": 1, "left": 1, "right": 1}
           and settings.hair_side_chains_left == 1 and settings.hair_side_chains_right == 1
-          and settings.hair_bang_chains == 5 and settings.hair_back_chains == 4,
-          "detect: 1 per side, Back and Bang Chains kept ({}; left {:d}, right {:d}, bangs {:d}, back {:d})".format(
+          and settings.hair_bang_chains == 5 and settings.hair_back_chains == 1,
+          "detect: 1 back, 1 per side, Bang Chains kept ({}; left {:d}, right {:d}, bangs {:d}, back {:d})".format(
               expected, settings.hair_side_chains_left, settings.hair_side_chains_right, settings.hair_bang_chains,
               settings.hair_back_chains))
-    check("Detected 1 Left Side, 1 Right Side chains" in run.reports
-          and "No hair found for Back, Bang Chains: kept as they are" in run.reports,
+    check("Detected 1 Back, 1 Left Side, 1 Right Side chains" in run.reports
+          and "No hair found for Bang Chains: kept as they are" in run.reports,
           "detect: reports what it found and what it kept")
-    hair_weights_reports()
+    result, reports = hair_weights_reports()
     armature = hair_armature(obj)
     kinds = [kind for kind, _bones in rig_chains(armature)] if armature is not None else []
-    check(kinds.count("side") == 2, "detect: built with the counts, one chain per side lock ({})".format(kinds))
+    check(kinds.count("side") == 2 and kinds.count("back") == 1 and "bangs" not in kinds,
+          "detect: built with the counts, one chain per side lock and one back ({})".format(kinds))
+    check("No hair found for Bang Chains: none built" in reports, "detect: the build says the bangs got none")
 
 
 def test_race_change_rebuilds():
@@ -1487,7 +1502,8 @@ def main():
                      test_best_match_unchanged, test_chains, test_layers, test_ears, test_matching, test_button,
                      test_existing_armature, test_customize_plus, test_armature_out_of_view_layer, test_parts,
                      test_selected, test_replace, test_masks, test_pick, test_brush, test_readiness,
-                     test_custom_button, test_custom_reuses_rig, test_custom_chain_spacing, test_detect_hair_chains,
+                     test_custom_button, test_custom_reuses_rig, test_custom_chain_spacing, test_no_hair_note,
+                     test_detect_hair_chains,
                      test_race_change_rebuilds,
                      test_nothing_hangs,
                      test_custom_brush, test_custom_view_layer, test_custom_parts, test_custom_parts_one_after_another,

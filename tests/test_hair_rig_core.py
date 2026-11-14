@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Headless tests for the hair rig Hair Weights builds for the hair itself (Own Skeleton): its locks, the
-chains planned on them (kinds, joints, the bone budget) and the bones they make on the hair's armature.
+"""Headless tests for the hair rig Hair Weights builds for the hair itself (Own Skeleton): the hair's areas, the
+chains planned in them (`hairlanes`: lanes, rows, kinds, the bone budget), the bones they make on the hair's armature,
+and the chains the user adds and deletes.
 
 Run from the repository root:
     blender -b --factory-startup --python tests/test_hair_rig_core.py
@@ -13,6 +14,7 @@ import os
 import sys
 import time
 import traceback
+import warnings
 
 import bpy
 import numpy as np
@@ -25,7 +27,7 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 
 import hair  # noqa: E402
 import magic_fit  # noqa: E402
-from magic_fit import fitting, hairing, hairrig  # noqa: E402
+from magic_fit import hairing, hairlanes, hairrig  # noqa: E402
 
 FAILURES = []
 # The head the scalp fixtures hang from: the scalp map is tuned on the Miqo'te, Au Ra and Viera women.
@@ -38,8 +40,8 @@ BRIAR = os.environ.get("MAGIC_FIT_BRIAR", r"G:\Penumbra\Briar Hair with custom p
                                           r"\h0137\model\c0801h0137_hir.mdl")
 # Where the neck fixtures' sheet ends (metres, world Z), far below the nape hairline (about 1.42).
 NECK_BOTTOM = 1.15
-# plan_rig on 3000 cards (test_card_hair_time) before sheets were cut into columns, in seconds (measured
-# 2026-11-09): the columns may cost at most as much again, plus a second.
+# The lock planner's plan_rig on 3000 cards before it cut sheets into columns, in seconds (measured 2026-11-09):
+# the lanes (test_lanes_card_hair_time) may cost at most as much again, plus a second.
 CARDS_TIME = 3.863
 
 
@@ -68,7 +70,7 @@ def rig(race=hair.RACE):
 
 
 def hanging(co, tris, model_rig):
-    """Which of hair ``co`` hang (go into locks), by the scalp and the hair's cap depth."""
+    """Which of hair ``co`` hang (go into chains), by the scalp and the hair's cap depth."""
     return hairrig._hanging(model_rig.scalp(co), model_rig.head_distance(co), hairing.cap_depth(co, tris, model_rig))
 
 
@@ -148,28 +150,6 @@ def side_strip(azimuth, length, width, race=hair.RACE, polar=95.0):
     return hair.strip(top, top + d * length / np.linalg.norm(d), width, np.array((math.cos(a), -math.sin(a), 0.0)))
 
 
-def columns_by_sheet(chains):
-    """{sheet: its chains by order} of the column chains (sheet 0 and on) among ``chains``."""
-    sheets = {}
-    for chain in chains:
-        if chain.sheet >= 0:
-            sheets.setdefault(chain.sheet, []).append(chain)
-    return {sheet: sorted(mine, key=lambda chain: chain.order) for sheet, mine in sheets.items()}
-
-
-def crossed(a, b):
-    """Whether chains ``a`` and ``b`` cross around the head: the sign of a's X less b's at their first joints
-    differs from its sign at a joint both have, or at their tips."""
-    sign = np.sign(a.joints[0][0] - b.joints[0][0])
-    later = [a.joints[k][0] - b.joints[k][0] for k in range(1, min(len(a.joints), len(b.joints)))]
-    return any(np.sign(x) != sign for x in later + [a.tip[0] - b.tip[0]])
-
-
-def any_crossed(chains):
-    """Whether any two neighbors of ``chains`` (one sheet's, by order) cross."""
-    return any(crossed(a, b) for a, b in zip(chains, chains[1:]))
-
-
 def drift(chain):
     """How far a chain's joints and tip lie at most from its first joint's X (metres)."""
     return max(abs(float(point[0] - chain.joints[0][0])) for point in np.vstack((chain.joints, chain.tip)))
@@ -201,589 +181,22 @@ def bangs_hair():
     return co, tris, {"cap": cap_ids, "bangs": bangs_ids}
 
 
-def spine_length(co, lock):
-    line = hairrig.spine(co, lock)
-    return float(np.linalg.norm(np.diff(line, axis=0), axis=1).sum())
-
-
-def lock_of(chain, locks):
-    """The lock (of `find_locks`) a chain was planned from: the one with its vertices."""
-    return next((lock for lock in locks if np.array_equal(lock.vertices, chain.vertices)), None)
-
-
-def along(line, point):
-    """How far along the polyline ``line`` its closest point to ``point`` is."""
-    a, b = line[:-1], line[1:]
-    seg = b - a
-    lengths = np.linalg.norm(seg, axis=1)
-    t = np.clip(((point - a) * seg).sum(1) / np.maximum(lengths ** 2, 1e-18), 0.0, 1.0)
-    gap = np.linalg.norm(a + seg * t[:, None] - point, axis=1)
-    best = int(np.argmin(gap))
-    return float(np.concatenate(([0.0], np.cumsum(lengths)))[best] + t[best] * lengths[best])
-
-
 def main_part(chain, part, area):
     """The part holding most of a chain's area."""
     return int(np.argmax(np.bincount(part[chain.vertices], area[chain.vertices])))
 
 
-def describe_chains(chains, co, locks):
-    for chain in chains:
-        lock = lock_of(chain, locks)
-        print("      chain: {:9s} {:d} bones, angle {:5.1f}, area {:.4f} m2, whole {!s:5}, spine {:s}, root {}, "
-              "tip {}".format(chain.kind, len(chain.joints), chain.angle, chain.area, chain.whole,
-                              "{:.3f} m".format(spine_length(co, lock)) if lock is not None else "(merged)",
-                              np.round(chain.joints[0], 3), np.round(chain.tip, 3)))
-
-
-def phi(points, model_rig):
-    """Angle (degrees) of world ``points`` around the head's vertical axis: 0 in front, 180 behind."""
-    model = model_rig.model(points)
-    axis_y = model_rig.by_name[hairing.HEAD].head[1]
-    return np.degrees(np.arctan2(np.abs(model[:, 0]), -(model[:, 1] - axis_y)))
-
-
-def root_span(lock, co, model_rig):
-    """How far around the head a lock's roots (its vertices at distance 0) reach: their angles around the
-    head's axis, about their mean, times their mean distance from it."""
-    roots = model_rig.model(co[lock.vertices[lock.distance <= 1e-9]])
-    axis_y = model_rig.by_name[hairing.HEAD].head[1]
-    angle = np.arctan2(roots[:, 0], -(roots[:, 1] - axis_y))
-    mean = math.atan2(np.sin(angle).sum(), np.cos(angle).sum())
-    relative = (angle - mean + math.pi) % (2.0 * math.pi) - math.pi
-    radius = np.hypot(roots[:, 0], roots[:, 1] - axis_y).mean()
-    return float((relative.max() - relative.min()) * radius)
-
-
-def describe(locks, co, model_rig):
-    for lock in locks:
-        print("      lock: {:4d} vertices, angle {:5.1f}, area {:.4f} m2, whole {!s:5}, root span {:.3f} m, "
-              "length {:.3f} m".format(len(lock.vertices), lock.angle, lock.area, lock.whole,
-                                       root_span(lock, co, model_rig), float(lock.distance.max())))
-
-
-def test_long_hair_locks():
-    model_rig = rig()
-    named = hair.parts(long=True)
-    co, tris, ranges = join([(verts, faces) for _name, verts, faces in named])
-    names = [name for name, _verts, _faces in named]
-    part = np.zeros(len(co), dtype=np.int64)
-    for index, indices in enumerate(ranges):
-        part[indices] = index
-    started = time.perf_counter()
-    locks = hairrig.find_locks(co, tris, model_rig)
-    print("      find_locks: {:.3f} s for {:d} vertices".format(time.perf_counter() - started, len(co)))
-    describe(locks, co, model_rig)
-    lock_parts = [set(part[lock.vertices].tolist()) for lock in locks]
-    check(all(lock.area >= hairrig.MIN_LOCK_AREA for lock in locks), "long hair: no lock under MIN_LOCK_AREA")
-    # The outer bangs strips each hang at two vertices only (a crumb under MIN_LOCK_AREA), and a crumb joins
-    # the nearest lock (by root) of at least MIN_LOCK_AREA: the temple lock on its side. Beyond such crumbs,
-    # no lock mixes two parts.
-    area = hairing.vertex_areas(co, tris)
-    mixed, main = [], []
-    for lock in locks:
-        shares = np.bincount(part[lock.vertices], area[lock.vertices], minlength=len(names))
-        main.append(int(np.argmax(shares)))
-        shares[main[-1]] = 0.0
-        mixed.append(float(shares.max()))
-    check(max(mixed) < hairrig.MIN_LOCK_AREA, "long hair: no lock mixes two parts beyond crumbs ({}, {})".format(
-        [sorted(names[i] for i in p) for p in lock_parts], [round(m, 5) for m in mixed]))
-    of = {index: [lock for lock, p in zip(locks, lock_parts) if index in p] for index in range(len(names))}
-    check(not of[names.index("cap")], "long hair: the cap gives no lock")
-    for name in ("lock_l", "lock_r"):
-        mine = of[names.index(name)]
-        check(len(mine) == 1 and 45.0 <= mine[0].angle <= 110.0,
-              "long hair: {:s} gives one lock at the side ({})".format(name, [round(lock.angle, 1) for lock in mine]))
-    mine = of[names.index("ponytail")]
-    check(len(mine) == 1 and mine[0].whole and mine[0].angle > 110.0,
-          "long hair: the ponytail gives one whole lock behind ({})".format(
-              [(round(lock.angle, 1), lock.whole) for lock in mine]))
-    if len(mine) == 1:
-        length = float(mine[0].distance.max())
-        check(0.35 < length < 0.5, "long hair: the ponytail's distance runs down its 42 cm ({:.3f} m)".format(length))
-    # The bangs strips run down over the forehead, below the hairline: each hangs there however close to the
-    # skin, a lock of its own (too short for a chain, see test_long_hair_chains).
-    for index, name in enumerate(names):
-        if name != "bangs":
-            continue
-        mine = of[index]
-        check(len(mine) == 1 and set(part[mine[0].vertices].tolist()) == {index} and not mine[0].joined.any(),
-              "long hair: bangs strip {:d} gives a lock of its own ({:d} locks)".format(index, len(mine)))
-    # Each lock's root lies where its (main) part leaves the head: the part's hanging vertex closest to the
-    # head; crumbs that joined it don't move it. The ponytail's root is the middle of the ring where its 7 cm
-    # tube leaves the head, and that vertex is on the ring's side: within the tube's radius.
-    distance = model_rig.head_distance(co)
-    hangs = hanging(co, tris, model_rig)
-    for lock, index in zip(locks, main):
-        candidates = ranges[index][hangs[ranges[index]]]
-        leaves = co[candidates[np.argmin(distance[candidates])]]
-        gap = float(np.linalg.norm(lock.root - leaves))
-        reach = 0.035 if names[index] == "ponytail" else 0.02
-        check(gap <= reach, "long hair: the {:s} lock's root is where it leaves the head ({:.3f} m off)".format(
-            names[index], gap))
-
-
-def test_one_piece_long_hair():
-    model_rig = rig()
-    co, tris, _parts = one_piece_long_hair()
-    started = time.perf_counter()
-    locks = hairrig.find_locks(co, tris, model_rig)
-    print("      find_locks: {:.3f} s for {:d} vertices".format(time.perf_counter() - started, len(co)))
-    describe(locks, co, model_rig)
-    check(5 <= len(locks) <= 8, "one piece: the sheet down the back is cut into 5 to 8 locks ({:d})".format(len(locks)))
-    check(all(lock.angle > 110.0 for lock in locks), "one piece: all of them behind ({})".format(
-        [round(lock.angle, 1) for lock in locks]))
-    spans = [root_span(lock, co, model_rig) for lock in locks]
-    check(all(span <= 0.08 for span in spans), "one piece: each lock's roots span 8 cm at most ({})".format(
-        [round(span, 3) for span in spans]))
-    angles = [lock.angle for lock in locks]
-    check(angles == sorted(angles), "one piece: the locks come sorted by angle")
-    check(all(a.root[0] < b.root[0] for a, b in zip(locks, locks[1:]) if abs(a.angle - b.angle) < 1e-6),
-          "one piece: mirrored locks come lower root X first")
-    weld = fitting.weld_groups(co, fitting.WELD_DISTANCE)[0]
-    given = hairrig.find_locks(co, tris, model_rig, weld=weld)
-    check(len(given) == len(locks) and all(np.array_equal(a.vertices, b.vertices) for a, b in zip(given, locks)),
-          "one piece: the same locks with the weld given")
-    check(not any(lock.joined.any() for lock in locks), "one piece: no crumbs joined")
-    # Hair whose armature has its head elsewhere: the same locks, their roots moved along.
-    offset = np.array((0.05, -0.1, 0.2))
-    moved = hairrig.find_locks(co + offset, tris, model_rig.moved(offset))
-    check(len(moved) == len(locks) and all(
-        abs(a.angle - b.angle) < 1e-6 and np.allclose(a.root, b.root + offset)
-        and np.array_equal(a.vertices, b.vertices) for a, b in zip(moved, locks)),
-        "one piece: hair moved with its head gets the same locks")
-
-
-def test_separate_strands():
-    model_rig = rig()
-    # Five 2 cm strands 6 cm apart, hanging 30 cm from just behind the head.
-    strands = [hair.strip((x, 0.08, 1.53), (x, 0.10, 1.23), 0.02, (1.0, 0.0, 0.0))
-               for x in (-0.12, -0.06, 0.0, 0.06, 0.12)]
-    co, tris, ranges = join(strands)
-    locks = hairrig.find_locks(co, tris, model_rig)
-    describe(locks, co, model_rig)
-    check(len(locks) == 5 and all(lock.whole for lock in locks),
-          "strands: five separate strands give five whole locks ({:d})".format(len(locks)))
-    strand = np.concatenate([np.full(len(indices), index) for index, indices in enumerate(ranges)])
-    owners = [set(strand[lock.vertices].tolist()) for lock in locks]
-    check(sorted(min(o) for o in owners if len(o) == 1) == list(range(5)), "strands: one lock per strand")
-
-
-def test_crumbs():
-    # Two tiny pieces of hair (1 x 2 cm) hanging behind the head, nothing else: no lock of 4 cm² to join, so
-    # both are dropped.
-    crumbs = [hair.strip((x, 0.12, 1.47), (x, 0.13, 1.45), 0.01, (1.0, 0.0, 0.0), rows=2) for x in (-0.05, 0.05)]
-    co, tris, _ranges = join(crumbs)
-    hangs = hanging(co, tris, rig())
-    locks = hairrig.find_locks(co, tris, rig())
-    check(hangs.all() and not locks, "crumbs: two tiny hanging crumbs give no lock ({:d})".format(len(locks)))
-
-
-def test_parted_locks():
-    model_rig = rig()
-    cap, faces, ring, azimuth = back_ring(96)
-
-    def at(angle):
-        return cap[ring[np.argmin(np.abs(azimuth[ring] - angle))]]
-
-    # Two strips of about 3 cm, 4 cm apart, each hanging from two of the cap's ring vertices, one to the
-    # left and one to the right: their bottoms 20 cm apart.
-    strips = [(cap, faces)]
-    for sign in (-1.0, 1.0):
-        inner, outer = at(sign * 3.75), at(sign * 22.5)
-        side = outer - inner
-        width = float(np.linalg.norm(side))
-        top = 0.5 * (inner + outer)
-        strips.append(hair.strip(top, (sign * 0.10, 0.08, top[2] - 0.25), width, side / width))
-    co, tris, _ranges = join(strips)
-    locks = hairrig.find_locks(co, tris, model_rig)
-    describe(locks, co, model_rig)
-    check(len(locks) == 2, "parted: two strips parting left and right give two locks ({:d})".format(len(locks)))
-    check(len(locks) == 2 and locks[0].root[0] * locks[1].root[0] < 0.0, "parted: one on each side")
-
-    # The cap between the two strips doesn't hang, so they are two regions already. The same width as one
-    # sheet is one region: hanging straight down it is one lock (its roots span 7 cm); its two sides parting
-    # left and right (the bottom 23 cm wide) make it two, by where they hang.
-    tops = cap[ring[np.abs(azimuth[ring]) <= 22.5 + 1e-6]]
-    for spread, expected in ((None, 1), (0.23, 2)):
-        bottoms = tops + np.array((0.0, 0.01, -0.25))
-        if spread is not None:
-            bottoms[:, 0] = np.linspace(-0.5 * spread, 0.5 * spread, len(tops))
-        co, tris, _ranges = join([(cap, faces), sheet(tops, bottoms)])
-        locks = hairrig.find_locks(co, tris, model_rig)
-        describe(locks, co, model_rig)
-        check(len(locks) == expected, "parted: a 7 cm sheet {:s} gives {:d} lock(s) ({:d})".format(
-            "hanging straight down" if spread is None else "parting left and right", expected, len(locks)))
-
-
-def test_long_hair_chains():
-    model_rig = rig()
-    co, tris, part, names = long_hair()
-    started = time.perf_counter()
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    print("      plan_rig: {:.3f} s for {:d} vertices".format(time.perf_counter() - started, len(co)))
-    locks = hairrig.find_locks(co, tris, model_rig)
-    describe_chains(chains, co, locks)
-    check(all(lock_of(chain, locks) is not None for chain in chains),
-          "long hair chains: each from one lock (nothing over the budget to merge)")
-    planned = [lock for lock in locks if lock_of(lock, chains) is not None]
-    check([lock_of(chain, locks) for chain in chains] == planned, "long hair chains: in the locks' order")
-    area = hairing.vertex_areas(co, tris)
-    mains = [names[main_part(chain, part, area)] for chain in chains]
-    # The temple locks hang from the side hairline (about z 1.45) down to z 1.28.
-    for name in ("lock_l", "lock_r"):
-        mine = [chain for chain, m in zip(chains, mains) if m == name]
-        length = spine_length(co, lock_of(mine[0], locks)) if len(mine) == 1 else math.nan
-        check(len(mine) == 1 and mine[0].kind == "side" and 0.15 <= length <= 0.20 and len(mine[0].joints) == 2,
-              "long hair chains: {:s} is one side chain, its spine 0.15-0.20 m, 2 bones ({})".format(
-                  name, [(chain.kind, len(chain.joints)) for chain in mine] + [round(length, 3)]))
-    sides = [chain.sheet for chain in chains if chain.kind == "side"]
-    check(len(sides) == 2 and len(set(sides)) == 2,
-          "long hair chains: the two side chains are in different sheets ({})".format(sides))
-    mine = [chain for chain, m in zip(chains, mains) if m == "ponytail"]
-    length = spine_length(co, lock_of(mine[0], locks)) if len(mine) == 1 else math.nan
-    check(len(mine) == 1 and mine[0].kind == "ponytail" and len(mine[0].joints) in (4, 5),
-          "long hair chains: the ponytail is one ponytail chain of 4 or 5 bones ({})".format(
-              [(chain.kind, len(chain.joints)) for chain in mine]))
-    # The tube's rows are 2 cm apart and its roots on one side of its top rows: a 1 cm band holds the back of
-    # one row and the front of the next. Smoothed, the spine runs down its 42 cm instead of zig-zagging.
-    check(0.36 <= length <= 0.48, "long hair chains: the ponytail's spine runs down its 42 cm ({:.3f} m)".format(
-        length))
-    # The fixture's bangs hang only below the hairline, too short for chains (test_long_hair_locks), so there
-    # are no others here; test_bangs_chain has bangs that hang.
-    others = [(m, chain.kind, len(chain.joints)) for chain, m in zip(chains, mains)
-              if m not in ("lock_l", "lock_r", "ponytail")]
-    check(all(other == ("bangs", "bangs", 2) for other in others),
-          "long hair chains: every other chain is a bangs strip's, bangs with 2 bones ({})".format(others))
-
-
-def test_bangs_chain():
-    model_rig = rig()
-    co, tris, parts = bangs_hair()
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    describe_chains(chains, co, hairrig.find_locks(co, tris, model_rig))
-    check(len(chains) == 1 and chains[0].kind == "bangs" and len(chains[0].joints) == 2,
-          "bangs: a strip hanging over the forehead is one bangs chain of 2 bones ({})".format(
-              [(chain.kind, len(chain.joints)) for chain in chains]))
-    check(len(chains) == 1 and np.isin(chains[0].vertices, parts["bangs"]).all(), "bangs: ...made of the strip")
-
-
-def chain_fixtures():
-    """(name, points, triangles) of the hair the chain tests plan."""
-    co, tris, _part, _names = long_hair()
-    one_co, one_tris, _parts = one_piece_long_hair()
-    bangs_co, bangs_tris, _parts = bangs_hair()
-    return (("long hair", co, tris), ("one piece", one_co, one_tris), ("bangs", bangs_co, bangs_tris))
-
-
-def planned_alone(co, locks, model_rig):
-    """The chain of each of ``locks`` on its own (`hairrig.plan_chain`), those too short for one left out."""
-    return [chain for chain in (hairrig.plan_chain(co, lock, model_rig) for lock in locks) if chain is not None]
-
-
-def test_pivot_at_root():
-    model_rig = rig()
-    for name, co, tris in chain_fixtures():
-        locks = hairrig.find_locks(co, tris, model_rig)
-        # Each chain from one lock.
-        chains = planned_alone(co, locks, model_rig)
-        gaps = []
-        for chain in chains:
-            lock = lock_of(chain, locks)
-            first = chain.joints[0]
-            gaps.append((float(np.linalg.norm(first - lock.root)), abs(float(first[2] - lock.root[2])))
-                        if lock is not None else (math.inf, math.inf))
-        check(chains and all(gap <= 0.02 and height <= 0.02 for gap, height in gaps),
-              "pivot: {:s}: every chain's first joint at its lock's root, at its height ({})".format(
-                  name, [(round(gap, 4), round(height, 4)) for gap, height in gaps]))
-
-
-def test_even_joints():
-    model_rig = rig()
-    for name, co, tris in chain_fixtures():
-        locks = hairrig.find_locks(co, tris, model_rig)
-        chains = planned_alone(co, locks, model_rig)
-        spreads, short = [], []
-        for chain in chains:
-            lock = lock_of(chain, locks)
-            if lock is None:
-                spreads.append(math.inf)
-                continue
-            line = hairrig.spine(co, lock)
-            length = float(np.linalg.norm(np.diff(line, axis=0), axis=1).sum())
-            at = [along(line, joint) for joint in chain.joints] + [along(line, chain.tip)]
-            gaps = np.diff(at)
-            spreads.append(float((gaps.max() - gaps.min()) / gaps.max()))
-            short.append(bool(at[-2] < length - 1e-6 and np.linalg.norm(chain.tip - line[-1]) < 1e-9
-                              and np.linalg.norm(chain.tip - chain.joints[-1]) > 0.01))
-        check(chains and all(spread < 0.25 for spread in spreads) and all(short),
-              "even joints: {:s}: joint gaps along the spine within 25 %, the last joint short of the tip ({}, {})"
-              .format(name, [round(spread, 3) for spread in spreads], short))
-
-
 def wavy_strip(amplitude=0.03, wavelength=0.30, rows=60):
-    """A 3 cm strip hanging 40 cm down behind the head, waving ``amplitude`` (metres) from side to side once every
+    """A 3 cm strip hanging 40 cm down behind the head, waving ``amplitude`` (meters) from side to side once every
     ``wavelength`` down it, like a wavy ribbon card: (points, triangles)."""
     top, bottom = np.array((0.0, 0.08, 1.53)), np.array((0.0, 0.10, 1.13))
     verts = []
     for i in range(rows + 1):
-        centre = top + (bottom - top) * (i / rows)
-        centre[0] += amplitude * math.sin(2.0 * math.pi * float(np.linalg.norm(bottom - top)) * (i / rows) / wavelength)
-        verts += [centre - (0.015, 0.0, 0.0), centre + (0.015, 0.0, 0.0)]
+        center = top + (bottom - top) * (i / rows)
+        center[0] += amplitude * math.sin(2.0 * math.pi * float(np.linalg.norm(bottom - top)) * (i / rows) / wavelength)
+        verts += [center - (0.015, 0.0, 0.0), center + (0.015, 0.0, 0.0)]
     co, tris, _ranges = join([(np.array(verts), [(2 * i, 2 * i + 1, 2 * i + 3, 2 * i + 2) for i in range(rows)])])
     return co, tris
-
-
-def test_wavy_lock_straight():
-    # A wavy card swings 3 cm from side to side as it hangs; its chain runs down the card's general line in one
-    # arc, as the game's chains do (none bends over 23 degrees between bones, none crosses the line from its root
-    # to its tip), not from crest to crest.
-    model_rig = rig()
-    co, tris = wavy_strip()
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    describe_chains(chains, co, [])
-    check(len(chains) == 1, "wavy lock: one chain ({:d})".format(len(chains)))
-    if len(chains) != 1:
-        return
-    chain = chains[0]
-    line = np.vstack((chain.joints, chain.tip))
-    chord = (line[-1] - line[0]) / np.linalg.norm(line[-1] - line[0])
-    offsets = line[1:-1] - line[0]
-    offsets -= np.outer(offsets @ chord, chord)
-    widest = offsets[int(np.argmax(np.linalg.norm(offsets, axis=1)))]
-    across = offsets @ (widest / max(float(np.linalg.norm(widest)), 1e-12))
-    bones = np.diff(line, axis=0)
-    bones /= np.linalg.norm(bones, axis=1)[:, None]
-    bends = [math.degrees(math.acos(float(np.clip(a @ b, -1.0, 1.0)))) for a, b in zip(bones[:-1], bones[1:])]
-    check(float(across.min()) >= -0.005 and max(bends) <= 25.0,
-          "wavy lock: the joints stay on one side of the line from root to tip, bends up to 25 degrees "
-          "(offsets {} m, bends {})".format(np.round(across, 3).tolist(), [round(bend, 1) for bend in bends]))
-    check(off_hair(chain, co) <= hairrig.SPINE_REACH,
-          "wavy lock: the chain stays on its hair ({:.4f} m)".format(off_hair(chain, co)))
-
-
-def test_kinds():
-    for angle, length, whole, kind in ((10, 0.1, False, "bangs"), (10, 0.3, False, "side"), (80, 0.5, False, "side"),
-                                       (150, 0.4, True, "ponytail"), (150, 0.4, False, "back"),
-                                       (150, 0.2, True, "back")):
-        got = hairrig.chain_kind(angle, length, whole)
-        check(got == kind, "kinds: ({}, {}, {}) is {:s} ({:s})".format(angle, length, whole, kind, got))
-    check(set(hairrig.KINDS) == {"bangs", "side", "back", "ponytail"}, "kinds: the four kinds")
-
-
-def test_columns():
-    r, w = 0.1, 0.08
-    side_areas = (0.002, 0.02, 0.02, 0.02)
-    for case, kind, arcs, areas, expected in (
-            ("wide back", "back", (-0.12, -0.05, 0.0, 0.03, 0.06, 0.20), None, [[0, 1], [2, 3], [4, 5]]),
-            ("narrow back", "back", (-0.02, 0.0, 0.03), None, [[0, 1, 2]]),
-            ("bangs, no limit", "bangs", (-0.17, -0.08, 0.0, 0.09, 0.16), None, [[0], [1], [2], [3], [4]]),
-            ("small edge column", "back", (-0.08, 0.0, 0.08), (0.002, 0.02, 0.02), [[0, 1], [2]]),
-            ("tie goes to the larger", "back", (-0.08, 0.0, 0.08), (0.02, 0.002, 0.03), [[0], [1, 2]]),
-            ("a sheet's only column", "back", (0.0,), (0.001,), [[0]]),
-            ("stray before 3 side columns", "side", (0.01, 0.09, 0.17, 0.25), side_areas, [[0, 1], [2, 3]]),
-            ("the other side", "side", (-0.01, -0.09, -0.17, -0.25), side_areas, [[0, 1], [2, 3]])):
-        theta = np.array(arcs) / r + (math.pi if kind == "back" else 0.0)
-        got = hairrig._columns(kind, theta, np.full(len(arcs), 0.01) if areas is None else np.array(areas), r, w)
-        check(got == expected, "columns: {:s} gives {} ({})".format(case, expected, got))
-    model_rig = rig()
-    head = np.asarray(model_rig.by_name[hairing.HEAD].head, dtype=np.float64) + model_rig.offset
-    theta, radius = hairrig._polar(model_rig, np.array((head + (0.0, 0.1, 0.0), head + (0.1, 0.0, 0.0))))
-    # The head bone is stored in single precision, its X a little off 0.
-    check(abs(abs(float(theta[0])) - math.pi) < 1e-5 and abs(float(radius[0]) - 0.1) < 1e-5
-          and abs(float(theta[1]) - 0.5 * math.pi) < 1e-5,
-          "columns: a point behind the head is at |theta| pi, radius 0.1, one to +X at pi/2 ({}, {})".format(
-              np.round(theta, 6).tolist(), np.round(radius, 6).tolist()))
-
-
-def back_columns(name, chains):
-    """The back chains of ``chains`` if they are 3 in one sheet, by order (else None), checked as such."""
-    back = [chain for chain in chains if chain.kind == "back"]
-    sheets = {chain.sheet for chain in back}
-    ok = len(back) == 3 and len(sheets) == 1 and min(sheets) >= 0
-    check(ok and [chain.order for chain in columns_by_sheet(back)[min(sheets)]] == [0, 1, 2],
-          "{:s}: 3 back chains in one sheet, orders 0-2 ({})".format(
-              name, [(chain.kind, chain.sheet, chain.order) for chain in chains]))
-    return columns_by_sheet(back)[min(sheets)] if ok else None
-
-
-def test_u_bottom():
-    # A sheet whose sides are 20 cm shorter than its middle: the middle column's chain hangs straight down, and
-    # the outer ones don't swing in under it.
-    model_rig = rig()
-    co, tris, _parts = back_sheet(depth=0.45, shape=lambda x: 0.20 * (x / 0.15) ** 2)
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    describe_columns(chains)
-    back = back_columns("u bottom", chains)
-    if back is None:
-        return
-    middle = back[1]
-    check(drift(middle) <= hairrig.CHAIN_SPACING / 2, "u bottom: the middle chain hangs straight down ({:.3f})".format(
-        drift(middle)))
-    check(not any_crossed(back), "u bottom: no neighbors cross")
-    apart = [(abs(float(chain.tip[0] - middle.tip[0])), abs(float(chain.joints[0][0] - middle.joints[0][0])))
-             for chain in (back[0], back[2])]
-    check(all(tip >= 0.5 * root for tip, root in apart),
-          "u bottom: each outer tip at least half its root gap from the middle's tip, along X ({})".format(
-              [(round(tip, 3), round(root, 3)) for tip, root in apart]))
-
-
-def test_mirrored_sheet():
-    model_rig = rig()
-    co, tris, _parts = one_piece_long_hair()
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    describe_columns(chains)
-    back = back_columns("mirrored", chains)
-    if back is None:
-        return
-    left, middle, right = back
-    check(abs(float(middle.joints[0][0])) <= 0.005 and abs(float(middle.tip[0])) <= 0.02,
-          "mirrored: the middle chain straight behind (first joint X {:.3f}, tip X {:.3f})".format(
-              float(middle.joints[0][0]), float(middle.tip[0])))
-    pairs = ((left.joints[0], right.joints[0]), (left.tip, right.tip))
-    check(all(abs(float(a[0] + b[0])) <= 0.02 and abs(float(a[1] - b[1])) <= 0.02 and abs(float(a[2] - b[2])) <= 0.02
-              for a, b in pairs),
-          "mirrored: the outer chains mirror each other within 2 cm (roots {}, {}; tips {}, {})".format(
-              np.round(left.joints[0], 3), np.round(right.joints[0], 3), np.round(left.tip, 3), np.round(right.tip, 3)))
-
-
-def test_lopsided_locks():
-    # Back hair whose outline is symmetric but whose cards aren't cut at the columns: two cards on the right, one
-    # across the middle reaching well over to the left, one at the left edge. The back's hair goes into its
-    # columns by where it hangs, not card by card: the middle chain straight behind, the outer ones mirrored. Cut
-    # by the cards' roots, the middle chain followed its card 1.6 to 2.2 cm to the left (measured 2026-11-12).
-    model_rig = rig()
-    co, tris = card_back(((-75.0, -45.0), (-37.5, -22.5), (-15.0, 37.5), (45.0, 75.0)))
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    describe_columns(chains)
-    back = back_columns("lopsided locks", chains)
-    if back is None:
-        return
-    left, middle, right = back
-    off = max(abs(float(point[0])) for point in np.vstack((middle.joints, middle.tip)))
-    check(off <= 0.01, "lopsided locks: the middle chain straight behind, X within 1 cm ({:.3f})".format(off))
-    # Only the roots: the cap's hanging edge differs by a root vertex between the outer cards, so the right one's
-    # spine runs 1.2 cm longer and ends on its outer edge (a spine follows whichever strands reach farthest).
-    gap = abs(float(left.joints[0][0] + right.joints[0][0]))
-    check(gap <= 0.01, "lopsided locks: the outer chains' roots mirror each other within 1 cm in X ({:.3f}; {:.3f} and "
-          "{:.3f})".format(gap, float(left.joints[0][0]), float(right.joints[0][0])))
-
-
-def test_back_width():
-    # A sheet whose roots span 21 cm around the back, 50 cm wide at the bottom: still 3 back chains; a strip 3 cm
-    # wide, 1.
-    model_rig = rig()
-    co, tris, _parts = back_sheet(half_width=0.25)
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    describe_columns(chains)
-    back = back_columns("back width", chains)
-    check(back is not None and not any_crossed(back), "back width: none crossed")
-    co, tris = wavy_strip()
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    check(len(chains) == 1, "back width: a 3 cm strip gives 1 chain ({:d})".format(len(chains)))
-
-
-def test_swept_sheet():
-    # The sheet's bottom swept 12 cm to the side: the column chains lean along, none across another.
-    model_rig = rig()
-    co, tris, _parts = back_sheet(sweep=0.12)
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    describe_columns(chains)
-    back = back_columns("swept", chains)
-    check(back is not None and not any_crossed(back), "swept: none crossed (roots at X {})".format(
-        [round(float(chain.joints[0][0]), 3) for chain in back] if back is not None else None))
-
-
-def test_ponytail_on_sheet():
-    # A ponytail tube hanging over the back sheet: a separate piece, its own chain, and the sheet's columns.
-    model_rig = rig()
-    co, tris, _parts = back_sheet()
-    tube_co, tube_tris, (tube_ids,) = join([hair.tube((0.0, 0.12, 1.50), (0.0, 0.22, 1.10), 0.035)])
-    tube_ids = tube_ids + len(co)
-    co, tris = np.vstack((co, tube_co)), np.vstack((tris, tube_tris + len(co)))
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    describe_columns(chains)
-    tails = [chain for chain in chains if chain.kind == "ponytail"]
-    check(len(tails) == 1 and tails[0].sheet == -1 and np.isin(tails[0].vertices, tube_ids).all(),
-          "ponytail on sheet: one ponytail chain, a separate piece of the tube only ({})".format(
-              [(chain.kind, chain.sheet) for chain in tails]))
-    back = back_columns("ponytail on sheet", chains)
-    check(back is not None and len(chains) == 4, "ponytail on sheet: ...and the sheet's 3 ({:d} chains)".format(
-        len(chains)))
-
-
-def test_ponytail_hair_type():
-    # Hair Type Ponytail: the back sheet and the tube over it, all the hair behind the head, make one ponytail
-    # chain, a separate piece; the side strips keep their chains. Loose (the default) is as before.
-    model_rig = rig()
-    co, tris, _parts = back_sheet()
-    sides = [side_strip(azimuth, 0.25, 0.03) for azimuth in (130.0, -130.0)]
-    extra_co, extra_tris, (tube_ids, *side_ids) = join(
-        [hair.tube((0.0, 0.12, 1.50), (0.0, 0.22, 1.10), 0.035)] + sides)
-    tube_ids, side_ids = tube_ids + len(co), [ids + len(co) for ids in side_ids]
-    co, tris = np.vstack((co, extra_co)), np.vstack((tris, extra_tris + len(co)))
-    loose = hairrig.plan_rig(co, tris, model_rig)
-    describe_columns(loose)
-    tied = hairrig.plan_rig(co, tris, model_rig, ponytail=True)
-    describe_chains(tied, co, [])
-    tails = [chain for chain in tied if chain.kind == "ponytail"]
-    kept = [chain for chain in tied if chain.kind == "side"]
-    check(len([chain for chain in loose if chain.kind == "back"]) == 3
-          and len([chain for chain in loose if chain.kind == "ponytail"]) == 1,
-          "hair type: Loose keeps the 3 back columns and the tube's own chain ({})".format(
-              [chain.kind for chain in loose]))
-    check(len(tails) == 1 and not [chain for chain in tied if chain.kind == "back"] and tails[0].sheet == -1
-          and np.isin(tube_ids, tails[0].vertices).any() and np.isin(_parts["sheet"], tails[0].vertices).any(),
-          "hair type: Ponytail ties the sheet and the tube into one ponytail chain, a separate piece ({})".format(
-              [(chain.kind, chain.sheet) for chain in tied]))
-    check(len(kept) == 2 and all(any(np.isin(ids, chain.vertices).any() for chain in kept) for ids in side_ids),
-          "hair type: ...and each side strip keeps a side chain ({})".format([chain.kind for chain in tied]))
-    # The sheet is 30 cm wide at the bottom and curves round the back, so the middle of its rows lies inside the
-    # curve, as in test_hollow_ponytail: 4.5 cm from the hair (measured 2026-11-11; a real tail, c0801 h0055,
-    # 1.4 cm).
-    far = off_hair(tails[0], co) if tails else math.nan
-    middle = max(abs(float(point[0])) for point in np.vstack((tails[0].joints, tails[0].tip))) if tails else math.nan
-    check(far <= 0.05 and middle <= 0.02,
-          "hair type: the tail's chain runs down the middle, within 5 cm of the hair ({:.4f} m off, X within {:.4f} "
-          "m)".format(far, middle))
-    # Over the bone budget the tail stays a ponytail as its bones get longer.
-    small = hairrig.plan_rig(co, tris, model_rig, ponytail=True, max_bones=6)
-    check([chain.kind for chain in small].count("ponytail") == 1 and sum(len(chain.joints) for chain in small) <= 6,
-          "hair type: with room for 6 bones the tail is still one ponytail chain ({})".format(
-              [(chain.kind, len(chain.joints)) for chain in small]))
-
-
-def test_side_columns():
-    # On each side three strips and a narrow stray in front of them, mirrored: at the slider's minimum spacing,
-    # each side is cut into two columns, the frontmost with the stray and the first strip.
-    model_rig = rig()
-    plus = [side_strip(142.0, 0.22, 0.01)] + [side_strip(azimuth, 0.30, 0.04) for azimuth in (128.0, 113.0, 99.0)]
-    minus = [(verts * np.array((-1.0, 1.0, 1.0)), [tuple(reversed(quad)) for quad in quads]) for verts, quads in plus]
-    co, tris, ranges = join(plus + minus)
-    chains = hairrig.plan_rig(co, tris, model_rig, spacing=0.02)
-    describe_columns(chains)
-    sheets = columns_by_sheet(chains)
-    sides = {}
-    for sheet, mine in sheets.items():
-        sides[np.sign(float(mine[0].joints[0][0]))] = mine
-    check(len(chains) == 4 and len(sheets) == 2 and set(sides) == {-1.0, 1.0}
-          and all(len(mine) == 2 and all(chain.kind == "side" for chain in mine) for mine in sides.values()),
-          "side columns: each side one sheet of 2 side chains ({})".format(
-              [(chain.kind, chain.sheet, chain.order) for chain in chains]))
-    if set(sides) != {-1.0, 1.0} or any(len(mine) != 2 for mine in sides.values()):
-        return
-    for sign, strips in ((1.0, ranges[:4]), (-1.0, ranges[4:])):
-        held = [[int(np.isin(chain.vertices, strip).sum()) for strip in strips] for chain in sides[sign]]
-        check(all(count > 0 for count in held[0][:2]) and not any(held[0][2:])
-              and all(count > 0 for count in held[1][2:]) and not any(held[1][:2])
-              and all(sum(row) == len(chain.vertices) for row, chain in zip(held, sides[sign])),
-              "side columns: on the {:s} side the front chain holds the stray and the first strip, the other the "
-              "last two (vertices of each: {})".format("+X" if sign > 0 else "-X", held))
-    pairs = [(a.joints[0], b.joints[0]) for a, b in zip(sides[1.0], sides[-1.0])]
-    check(all(abs(float(a[0] + b[0])) <= 0.02 and abs(float(a[1] - b[1])) <= 0.02 and abs(float(a[2] - b[2])) <= 0.02
-              for a, b in pairs),
-          "side columns: the two sides' first joints mirror within 2 cm ({})".format(
-              [(np.round(a, 3).tolist(), np.round(b, 3).tolist()) for a, b in pairs]))
 
 
 def counts(back=2, ponytail=2, left=2, right=2, bangs=2):
@@ -795,95 +208,9 @@ def kinds_of(chains):
     return [(chain.kind, chain.sheet, chain.order) for chain in chains]
 
 
-def test_back_counts():
-    # Back Chains: exactly that many back columns, one sheet side by side; 2 split straight behind, the +X one
-    # first, 3 have the middle one there.
-    model_rig = rig()
-    co, tris, _parts = one_piece_long_hair()
-    for n in range(1, 5):
-        chains = hairrig.plan_rig(co, tris, model_rig, counts=counts(back=n))
-        back = [chain for chain in chains if chain.kind == "back"]
-        sheets = {chain.sheet for chain in back}
-        check(len(back) == n == len(chains) and len(sheets) == 1 and min(sheets) >= 0,
-              "back counts: {:d} asked, {:d} back chains in one sheet ({})".format(n, len(back), kinds_of(chains)))
-        if len(sheets) != 1:
-            continue
-        ordered = columns_by_sheet(back)[min(sheets)]
-        check(not any_crossed(ordered), "back counts: {:d}: none crossed".format(n))
-        if n == 2 and len(ordered) == 2:
-            a, b = ordered
-            check(a.joints[0][0] > 0.0 > b.joints[0][0] and abs(float(a.joints[0][0] + b.joints[0][0])) <= 0.01
-                  and abs(float(a.tip[0] + b.tip[0])) <= 0.02,
-                  "back counts: 2 mirror each other across straight behind, +X first (roots X {:.3f}, {:.3f}; tips X "
-                  "{:.3f}, {:.3f})".format(float(a.joints[0][0]), float(b.joints[0][0]), float(a.tip[0]),
-                                           float(b.tip[0])))
-        if n == 3 and len(ordered) == 3:
-            check(abs(float(ordered[1].joints[0][0])) <= 0.005,
-                  "back counts: 3 have the middle one straight behind ({:.3f})".format(float(ordered[1].joints[0][0])))
-
-
-def test_side_counts():
-    # Left and Right Side Chains: the character's left (+X) and right side each get their own count, the front
-    # chain first.
-    model_rig = rig()
-    plus = [side_strip(142.0, 0.22, 0.01)] + [side_strip(azimuth, 0.30, 0.04) for azimuth in (128.0, 113.0, 99.0)]
-    minus = [(verts * np.array((-1.0, 1.0, 1.0)), [tuple(reversed(quad)) for quad in quads]) for verts, quads in plus]
-    co, tris, _ranges = join(plus + minus)
-    chains, made, _short = hairrig.plan_layout(co, tris, model_rig, counts=counts(left=1, right=2))
-    sides = {}
-    for chain in chains:
-        if chain.kind == "side":
-            sides.setdefault(float(np.sign(chain.joints[0][0])), []).append(chain)
-    check(len(sides.get(1.0, [])) == 1 and len(sides.get(-1.0, [])) == 2 and len(chains) == 3
-          and made["left"] == 1 and made["right"] == 2,
-          "side counts: Left 1 gives +X one chain, Right 2 gives -X two ({}, {})".format(kinds_of(chains), made))
-    right = sorted(sides.get(-1.0, []), key=lambda chain: chain.order)
-    if len(right) == 2:
-        front, behind = (hairrig._angle(model_rig, chain.joints[0]) for chain in right)
-        check(front < behind, "side counts: the first of the right side's chains in front ({:.1f} and {:.1f} "
-              "degrees)".format(front, behind))
-
-
-def test_side_counts_take_round_locks():
-    # A round side strand (a separate piece without counts) goes into its side's columns with counts: Left Side
-    # Chains 2 gives the +X side two chains, not two and the strand's own (Maeve h0108 got three).
-    model_rig = rig()
-    p, a = math.radians(95.0), math.radians(120.0)
-    top = hair._onto_head(np.array(((math.sin(p) * math.sin(a), math.sin(p) * math.cos(a), math.cos(p)),)), 0.015,
-                          hair.RACE)[0][0]
-    strand = hair.tube(top, top + np.array((0.03, -0.02, -0.30)), 0.025, bend=(0.0, 0.0, 0.0))
-    co, tris, _ranges = join([side_strip(azimuth, 0.30, 0.04) for azimuth in (135.0, 100.0)] + [strand])
-    free, _made, _short = hairrig.plan_layout(co, tris, model_rig)
-    check(any(chain.kind == "side" and chain.sheet < 0 for chain in free),
-          "round side strand: a separate side piece without counts ({})".format(kinds_of(free)))
-    chains, made, _short = hairrig.plan_layout(co, tris, model_rig, counts=counts(left=2))
-    sides = [chain for chain in chains if chain.kind == "side"]
-    check(len(sides) == 2 and all(chain.sheet >= 0 for chain in sides) and made["left"] == 2,
-          "round side strand: Left 2 gives two side columns, the strand in them ({}, {})".format(kinds_of(chains), made))
-
-
 def bangs_strip(x=0.0, width=0.04):
     """`bangs_hair`'s strip, moved ``x`` along X and ``width`` wide: (vertices, quads)."""
     return hair.strip((x, -0.10, 1.625), (x, -0.19, 1.54), width, (1.0, 0.0, 0.0))
-
-
-def test_bang_counts():
-    # Bang Chains: that many bangs chains side by side across the front, made of the bangs, -X first. The sheet
-    # down the back keeps the hair from being short.
-    model_rig = rig()
-    co, tris, _parts = back_sheet()
-    bangs_co, bangs_tris, _ids = join([bangs_strip(x, 0.03) for x in (-0.035, 0.0, 0.035)])
-    bangs_ids = np.arange(len(co), len(co) + len(bangs_co))
-    co, tris = np.vstack((co, bangs_co)), np.vstack((tris, bangs_tris + len(co)))
-    for n in (1, 3):
-        chains = hairrig.plan_rig(co, tris, model_rig, counts=counts(bangs=n))
-        bangs = sorted((chain for chain in chains if chain.kind == "bangs"), key=lambda chain: chain.order)
-        check(len(bangs) == n and len({chain.sheet for chain in bangs}) == 1
-              and all(np.isin(chain.vertices, bangs_ids).all() for chain in bangs),
-              "bang counts: {:d} asked, {:d} bangs chains of the bangs ({})".format(n, len(bangs), kinds_of(chains)))
-        check(all(a.joints[0][0] < b.joints[0][0] for a, b in zip(bangs, bangs[1:])),
-              "bang counts: {:d}: side by side, -X first ({})".format(
-                  n, [round(float(chain.joints[0][0]), 3) for chain in bangs]))
 
 
 def short_hair():
@@ -895,203 +222,1264 @@ def short_hair():
     return co, tris
 
 
-def test_short_hair_ring():
-    # Short hair (no lock longer than BANGS_LENGTH): with counts one bangs sheet around the whole head, Bang Chains
-    # sectors, the first in front; not tied into a ponytail. Without counts it keeps its kinds, and Detect counts
-    # all of its column chains as bangs.
+def around(angle, z, gap=0.01):
+    """The point ``gap`` off the head at height ``z`` in the direction ``angle`` (degrees around the head's vertical
+    axis through j_kao, 0 straight in front, positive toward +X): bisection along the ray from the axis."""
+    field = hair.head()
+    a = math.radians(angle)
+    start = np.array((0.0, rig().by_name[hairing.HEAD].head[1], z))
+    direction = np.array((math.sin(a), -math.cos(a), 0.0))
+    lo, hi = 0.0, 0.3
+    for _ in range(40):
+        mid = 0.5 * (lo + hi)
+        if field.distance(start + direction * mid)[0] > gap:
+            hi = mid
+        else:
+            lo = mid
+    return start + direction * hi
+
+
+def swung(root, swing, length=0.38, width=0.03, tube=False, rows=12, segments=8):
+    """Hair rooted 1 cm off the head at ear height ``root`` degrees around the head's axis (as `around`), hanging
+    ``length`` down: its top third there, moving out to 14 cm from the axis, its lower two thirds swung round to
+    ``swing`` degrees. A flat strip ``width`` wide running around the head, or with ``tube`` a tube ``width``
+    across. One loose part: (vertices, quads)."""
+    top = around(root, hair.CENTER[2] - 0.01, 0.01 + (width / 2.0 if tube else 0.0))
+    axis_y = rig().by_name[hairing.HEAD].head[1]
+    reach = math.hypot(top[0], top[1] - axis_y)
+    verts = []
+    for i in range(rows + 1):
+        a = math.radians(root if 3 * i <= rows else swing)
+        r = reach + (0.14 - reach) * min(1.0, 3.0 * i / rows)
+        c = np.array((r * math.sin(a), axis_y - r * math.cos(a), top[2] - length * i / rows))
+        if tube:
+            verts += [c + width / 2.0 * np.array((math.cos(b), math.sin(b), 0.0))
+                      for b in np.linspace(0.0, 2.0 * math.pi, segments, endpoint=False)]
+        else:
+            side = np.array((math.cos(a), math.sin(a), 0.0))
+            verts += [c - side * width / 2.0, c + side * width / 2.0]
+    ring = segments if tube else 2
+    quads = [(i * ring + j, i * ring + (j + 1) % ring, (i + 1) * ring + (j + 1) % ring, (i + 1) * ring + j)
+             for i in range(rows) for j in range(ring if tube else 1)]
+    return np.array(verts), quads
+
+
+def wrapped_hair(depth=0.40):
+    """Long hair in one piece round the back and both sides: the scalp cap, and a sheet hanging ``depth`` from its
+    lowest ring 120 degrees to either side of straight behind (around the skull's middle, as `back_ring`), sharing
+    the ring's vertices; its bottom row lies 12 cm from the head's axis, its ends fanned forward to 50 degrees from
+    the front (as `around`). One loose part spread over the back and the sides (`one_piece_long_hair` is all back
+    hair): (points, triangles, {"cap": indices, "sheet": indices})."""
+    cap, faces, ring, azimuth = back_ring(48)
+    keep = ring[np.abs(azimuth[ring]) <= 120.0 + 1e-6]
+    tops = cap[keep]
+    a = np.radians(np.where(azimuth[keep] >= 0.0, 1.0, -1.0) * (180.0 - 130.0 * np.abs(azimuth[keep]) / 120.0))
+    axis_y = rig().by_name[hairing.HEAD].head[1]
+    bottoms = np.column_stack((0.12 * np.sin(a), axis_y - 0.12 * np.cos(a),
+                               np.full(len(tops), tops[:, 2].mean() - depth)))
+    co, tris, (cap_ids, sheet_ids) = join([(cap, faces), sheet(tops, bottoms)])
+    return co, tris, {"cap": cap_ids, "sheet": sheet_ids}
+
+
+def front_lock(bottom):
+    """A 3 cm strip hanging from 1 cm off the face 20 degrees from the front (as `around`) at height 1.57 down to
+    height ``bottom``: (vertices, quads)."""
+    top = around(20.0, 1.57)
+    return hair.strip(top, np.array((top[0], top[1] - 0.02, bottom)), 0.03, np.array((1.0, 0.0, 0.0)))
+
+
+def lanes_of(measured, label, ids):
+    """The areas (`hairlanes.areas`'s ``label``) of those of vertices ``ids`` that hang, and their angles (degrees,
+    as `around`)."""
+    on = np.isin(measured.index, ids)
+    return label[on], np.degrees(measured.phi[on])
+
+
+def lane_share(measured, label, ids, *names):
+    """The share (by area) of the hanging hair of vertices ``ids`` that is in one of the areas ``names``."""
+    on = np.isin(measured.index, ids)
+    return float(measured.area[on & np.isin(label, names)].sum() / max(measured.area[on].sum(), 1e-18))
+
+
+def describe_lanes(name, measured, label, ids):
+    mine, angles = lanes_of(measured, label, ids)
+    shares = [round(lane_share(measured, label, ids, k), 3) for k in range(4)]
+    print("      {:s}: {:d} hanging, angles {:.1f} to {:.1f}, back/left/right/bangs {}".format(
+        name, len(mine), float(angles.min()) if len(mine) else 0.0, float(angles.max()) if len(mine) else 0.0, shares))
+
+
+def test_lanes_areas_by_where_it_hangs():
+    # Areas by where the hair hangs around the head: a strip 60 degrees from the front is side hair, left (+X) or
+    # right by its side, all of it; a sheet down the back is back hair, a strip over the forehead bangs.
+    model_rig = rig()
+    co, tris, (_cap_ids, plus_ids, minus_ids) = join([hair.cap(), side_strip(120.0, 0.30, 0.04),
+                                                       side_strip(-120.0, 0.30, 0.04)])
+    measured = hairlanes.measure(co, tris, model_rig)
+    label, _short = hairlanes.areas(measured)
+    describe_lanes("+X strip", measured, label, plus_ids)
+    describe_lanes("-X strip", measured, label, minus_ids)
+    check(lane_share(measured, label, plus_ids, hairlanes.LEFT) == 1.0
+          and lane_share(measured, label, minus_ids, hairlanes.RIGHT) == 1.0,
+          "lanes areas: the +X side strip is left, the -X one right, all of each")
+    # Hair whose armature has its head elsewhere: the same areas.
+    offset = np.array((0.05, -0.1, 0.2))
+    moved = hairlanes.measure(co + offset, tris, model_rig.moved(offset))
+    moved_label, _short = hairlanes.areas(moved)
+    check(np.array_equal(moved.index, measured.index) and np.array_equal(moved_label, label)
+          and np.allclose(moved.at, measured.at),
+          "lanes areas: hair moved with its head gets the same areas")
+    co, tris, ids = back_sheet()
+    measured = hairlanes.measure(co, tris, model_rig)
+    label, _short = hairlanes.areas(measured)
+    describe_lanes("back sheet", measured, label, ids["sheet"])
+    check(lane_share(measured, label, ids["sheet"], hairlanes.BACK) == 1.0, "lanes areas: a back sheet is all back")
+    co, tris, ids = bangs_hair()
+    measured = hairlanes.measure(co, tris, model_rig)
+    label, _short = hairlanes.areas(measured)
+    describe_lanes("bangs", measured, label, ids["bangs"])
+    check(lane_share(measured, label, ids["bangs"], hairlanes.BANGS) == 1.0, "lanes areas: a bangs strip is all bangs")
+    co, tris, _part, _names = long_hair()
+    _label, short = hairlanes.areas(hairlanes.measure(co, tris, model_rig))
+    check(not short, "lanes areas: long hair isn't short")
+
+
+def test_lanes_forward_card_is_side():
+    # A strip rooted behind the ear (125 degrees from the front) whose lower two thirds fall forward over the
+    # shoulder (to 60) is side hair, all of it; the same strip rooted in front of the ear (95) falling back (to 150)
+    # is back hair, all of it.
+    model_rig = rig()
+    for root, swing, names, what in ((125.0, 60.0, (hairlanes.LEFT, hairlanes.RIGHT), "side"),
+                                     (95.0, 150.0, (hairlanes.BACK,), "back")):
+        co, tris, (_cap_ids, strip_ids) = join([hair.cap(), swung(root, swing)])
+        measured = hairlanes.measure(co, tris, model_rig)
+        label, _short = hairlanes.areas(measured)
+        describe_lanes("strip {:.0f} to {:.0f}".format(root, swing), measured, label, strip_ids)
+        mine, _angles = lanes_of(measured, label, strip_ids)
+        check(len(mine) > 0 and len(set(mine.tolist())) == 1 and lane_share(measured, label, strip_ids, *names) == 1.0,
+              "lanes forward card: rooted at {:.0f} and hanging at {:.0f}, it is {:s} hair, all of it ({})".format(
+                  root, swing, what, sorted(set(mine.tolist()))))
+
+
+def test_lanes_one_piece_is_split():
+    # Long hair in one piece round the back and the sides is split vertex by vertex: back hair beyond SIDE_ANGLE,
+    # side hair in front of it.
+    model_rig = rig()
+    co, tris, ids = wrapped_hair()
+    measured = hairlanes.measure(co, tris, model_rig)
+    label, _short = hairlanes.areas(measured)
+    describe_lanes("one piece", measured, label, ids["sheet"])
+    mine, angles = lanes_of(measured, label, ids["sheet"])
+    check(len(set(measured.part[np.isin(measured.index, ids["sheet"])].tolist())) == 1,
+          "lanes one piece: the sheet is one loose part")
+    check((mine == hairlanes.BACK).any() and np.isin(mine, (hairlanes.LEFT, hairlanes.RIGHT)).any(),
+          "lanes one piece: it has back hair and side hair ({})".format(sorted(set(mine.tolist()))))
+    check((mine[np.abs(angles) > hairrig.SIDE_ANGLE] == hairlanes.BACK).all(),
+          "lanes one piece: every vertex beyond SIDE_ANGLE is back hair")
+
+
+def test_lanes_long_front_lock_is_side():
+    # A lock 20 degrees from the front hanging 10 cm below the neck pivot is side hair, not bangs; cut to end 3 cm
+    # above the neck pivot it is bangs.
+    model_rig = rig()
+    neck = float(model_rig.by_name[hairing.NECK].head[2])
+    for bottom, names, what in ((neck - 0.10, (hairlanes.LEFT, hairlanes.RIGHT), "side hair"),
+                                (neck + 0.03, (hairlanes.BANGS,), "bangs")):
+        co, tris, (_cap_ids, lock_ids) = join([hair.cap(), front_lock(bottom)])
+        measured = hairlanes.measure(co, tris, model_rig)
+        label, _short = hairlanes.areas(measured)
+        describe_lanes("front lock to {:.3f}".format(bottom), measured, label, lock_ids)
+        check(lane_share(measured, label, lock_ids, *names) == 1.0,
+              "lanes front lock: ending {:+.2f} m from the neck pivot it is {:s}".format(bottom - neck, what))
+
+
+def test_lanes_middle_part():
+    # A loose part hanging across the middle in front, most of it in neither side: narrow, it goes whole to one side
+    # (a long lock centered on the face is one side's hair, not bangs and not halved); wide, it stays split (a 14 cm
+    # fringe is bangs, a curtain from one side round the front to the other is left on +X and right on -X).
+    model_rig = rig()
+    neck = float(model_rig.by_name[hairing.NECK].head[2])
+    top = around(0.0, 1.57)
+    lock = hair.strip(top, np.array((top[0], top[1] - 0.02, neck - 0.10)), 0.03, np.array((1.0, 0.0, 0.0)))
+    co, tris, (_cap_ids, lock_ids) = join([hair.cap(), lock])
+    measured = hairlanes.measure(co, tris, model_rig)
+    label, _short = hairlanes.areas(measured)
+    describe_lanes("centered lock", measured, label, lock_ids)
+    mine, _angles = lanes_of(measured, label, lock_ids)
+    check(len(mine) > 0 and len(set(mine.tolist())) == 1 and int(mine[0]) in (hairlanes.LEFT, hairlanes.RIGHT),
+          "lanes middle part: a long lock centered on the face is one side's hair, all of it ({})".format(
+              sorted(set(mine.tolist()))))
+    co, tris, (_cap_ids, fringe_ids) = join([hair.cap(), bangs_strip(0.0, 0.14)])
+    measured = hairlanes.measure(co, tris, model_rig)
+    label, _short = hairlanes.areas(measured)
+    describe_lanes("14 cm fringe", measured, label, fringe_ids)
+    check(lane_share(measured, label, fringe_ids, hairlanes.BANGS) == 1.0,
+          "lanes middle part: a 14 cm wide fringe is bangs, all of it")
+    tops = np.array([around(angle, 1.52, 0.02) for angle in np.arange(-70.0, 71.0, 10.0)])
+    co, tris, (_cap_ids, curtain_ids) = join([hair.cap(), sheet(tops, tops - (0.0, 0.0, 0.30))])
+    measured = hairlanes.measure(co, tris, model_rig)
+    label, _short = hairlanes.areas(measured)
+    describe_lanes("curtain", measured, label, curtain_ids)
+    mine, _angles = lanes_of(measured, label, curtain_ids)
+    x = measured.at[np.isin(measured.index, curtain_ids), 0]
+    check((mine == hairlanes.LEFT).any() and (mine == hairlanes.RIGHT).any()
+          and (x[mine == hairlanes.LEFT] >= 0.0).all() and (x[mine == hairlanes.RIGHT] < 0.0).all(),
+          "lanes middle part: a curtain joining both sides is split, left on +X and right on -X")
+
+
+def test_lanes_short():
+    # Short hair: hardly any of it hangs below the chin.
     model_rig = rig()
     co, tris = short_hair()
-    chains, made, short = hairrig.plan_layout(co, tris, model_rig, counts=counts(bangs=4))
-    check(short and len(chains) == 4 and all(chain.kind == "bangs" for chain in chains)
-          and len({chain.sheet for chain in chains}) == 1 and made["bangs"] == 4,
-          "short hair: 4 bangs chains in one sheet around the head ({}, {})".format(kinds_of(chains), made))
-    if chains:
-        first = min(chains, key=lambda chain: chain.order)
-        angle = hairrig._angle(model_rig, first.joints[0])
-        check(angle <= 45.0, "short hair: the first chain in front ({:.1f} degrees)".format(angle))
-        angles = sorted(hairrig._angle(model_rig, chain.joints[0]) for chain in chains)
-        check(angles[-1] >= 135.0, "short hair: one behind ({})".format([round(a, 1) for a in angles]))
-        # A sector holding strips far apart has its chain between them, off the hair: measured, not checked.
-        print("      off the hair: {} m".format([round(off_hair(chain, co), 3) for chain in chains]))
-    tied = hairrig.plan_rig(co, tris, model_rig, ponytail=True, counts=counts(bangs=4))
-    check(len(tied) == 4 and all(chain.kind == "bangs" for chain in tied),
-          "short hair: Hair Type Ponytail ties nothing ({})".format(kinds_of(tied)))
-    auto, _made, auto_short = hairrig.plan_layout(co, tris, model_rig)
-    check(auto_short and any(chain.kind != "bangs" for chain in auto),
-          "short hair: without counts it keeps its kinds ({})".format(kinds_of(auto)))
-    found, found_short = hairrig.detect_counts(co, tris, model_rig)
-    total = len([chain for chain in auto if chain.sheet >= 0])
-    check(found_short and found == {"bangs": min(total, 6)},
-          "short hair: Detect counts its {:d} column chains as bangs ({})".format(total, found))
+    _label, short = hairlanes.areas(hairlanes.measure(co, tris, model_rig))
+    check(short, "lanes short: short hair is short")
 
 
-def test_loose_counts_tie_nothing():
-    # Hair Type Loose with counts: a round tube behind the head (a ponytail without counts) gets no ponytail chain
-    # of its own; it is back hair, in the Back Chains' columns.
+def test_lanes_ponytail_areas():
+    # Hair Type Ponytail: the tail is the back hair and every whole loose part rooted behind the ears, wherever it
+    # hangs: a tube rooted behind the head (170 degrees from the front) falling forward over the shoulder (to 40) is
+    # all tail, and side hair without Hair Type Ponytail. A side strip stays side hair, and a one-piece mesh stays
+    # split: only its hair beyond SIDE_ANGLE is the tail.
     model_rig = rig()
-    co, tris, _parts = back_sheet()
-    tube_co, tube_tris, _ids = join([hair.tube((0.0, 0.12, 1.50), (0.0, 0.22, 1.10), 0.035)])
-    co, tris = np.vstack((co, tube_co)), np.vstack((tris, tube_tris + len(co)))
-    free = hairrig.plan_rig(co, tris, model_rig)
-    check(any(chain.kind == "ponytail" for chain in free),
-          "loose counts: the tube is a ponytail without counts ({})".format(kinds_of(free)))
-    chains, made, _short = hairrig.plan_layout(co, tris, model_rig, counts=counts(back=2))
-    check(len(chains) == 2 and all(chain.kind == "back" and chain.sheet >= 0 for chain in chains)
-          and made["back"] == 2 and made["ponytail"] == 0,
-          "loose counts: Back 2 gives two back columns, no ponytail ({}, {})".format(kinds_of(chains), made))
+    co, tris, (_cap_ids, tube_ids, strip_ids) = join([hair.cap(), swung(170.0, 40.0, 0.40, 0.06, tube=True),
+                                                      side_strip(120.0, 0.30, 0.04)])
+    measured = hairlanes.measure(co, tris, model_rig)
+    loose, _short = hairlanes.areas(measured)
+    label, _short = hairlanes.areas(measured, ponytail=True)
+    describe_lanes("tube, loose", measured, loose, tube_ids)
+    describe_lanes("tube, ponytail", measured, label, tube_ids)
+    describe_lanes("side strip, ponytail", measured, label, strip_ids)
+    check(lane_share(measured, loose, tube_ids, hairlanes.LEFT, hairlanes.RIGHT) == 1.0,
+          "lanes ponytail: without Hair Type Ponytail the tube is side hair")
+    check(lane_share(measured, label, tube_ids, hairlanes.BACK) == 1.0, "lanes ponytail: the tube is all tail")
+    check(lane_share(measured, label, strip_ids, hairlanes.LEFT, hairlanes.RIGHT) == 1.0,
+          "lanes ponytail: the side strip stays side hair")
+    co, tris, ids = wrapped_hair()
+    measured = hairlanes.measure(co, tris, model_rig)
+    label, _short = hairlanes.areas(measured, ponytail=True)
+    mine, angles = lanes_of(measured, label, ids["sheet"])
+    check(np.array_equal(mine == hairlanes.BACK, np.abs(angles) > hairrig.SIDE_ANGLE),
+          "lanes ponytail: of the one-piece mesh only the hair beyond SIDE_ANGLE is the tail")
 
 
-def test_ponytail_counts():
-    # Hair Type Ponytail with Ponytail Chains: 1 is the one tail as before; 2 and 3 cut the tail side by side, one
-    # sheet of ponytail chains, 2 mirrored across straight behind.
+def test_lanes_nothing_hangs():
+    co, tris, _ranges = join([hair.cap()])
+    check(hairlanes.measure(co, tris, rig()) is None, "lanes nothing hangs: a cap alone measures as None")
+
+
+# Lopsided back cards: two on the right, one across the middle reaching well over to the left, one at the left edge
+# (degrees around the skull's middle, as `card_back`).
+LOPSIDED = ((-75.0, -45.0), (-37.5, -22.5), (-15.0, 37.5), (45.0, 75.0))
+
+
+def back_lanes(co, tris, count, model_rig=None):
+    """The hanging hair of a mesh (`hairlanes.measure`), its areas, and its back area cut into ``count`` lanes:
+    (measured, label, lanes)."""
+    measured = hairlanes.measure(co, tris, model_rig or rig())
+    label, _short = hairlanes.areas(measured)
+    lanes = hairlanes.plan_area(measured, np.flatnonzero(label == hairlanes.BACK), hairlanes.across_back(measured),
+                                count)
+    return measured, label, lanes
+
+
+def rows(lane):
+    """The heights of a lane's joints."""
+    return lane.joints[:, 2]
+
+
+def lane_line(lane):
+    """A lane's chain: its joints and tip, (n + 1, 3)."""
+    return np.vstack((lane.joints, lane.tip))
+
+
+def describe_lane_plan(lanes):
+    for lane in lanes:
+        print("      lane {:d}: {:d} joints, {:d} vertices, first {}, last {}, tip {}, light {!s}, moved {:d}, lifted "
+              "{:d}".format(lane.number, len(lane.joints), len(lane.members), np.round(lane.joints[0], 3),
+                            np.round(lane.joints[-1], 3), np.round(lane.tip, 3), lane.light, lane.moved, lane.lifted))
+
+
+def x_at(line, heights):
+    """The X of the polyline ``line`` at ``heights``."""
+    order = np.argsort(line[:, 2], kind="stable")
+    return np.interp(heights, line[order, 2], line[order, 0])
+
+
+def lanes_crossed(a, b):
+    """Whether the chains of lanes ``a`` and ``b`` swap their order in X at any of 20 heights both cover."""
+    line_a, line_b = lane_line(a), lane_line(b)
+    low = max(line_a[:, 2].min(), line_b[:, 2].min())
+    high = min(line_a[:, 2].max(), line_b[:, 2].max())
+    if high <= low:
+        return False
+    heights = np.linspace(low, high, 20)
+    side = np.sign(x_at(line_a, heights) - x_at(line_b, heights))
+    return bool((side != side[0]).any())
+
+
+def nearest(points, hair_points):
+    """How far each of ``points`` lies from the nearest of ``hair_points``."""
+    return np.array([float(np.min(np.linalg.norm(hair_points - point, axis=1))) for point in points])
+
+
+def flat_sheet(scale, depth=0.40):
+    """A flat sheet of hair 15 cm behind the head's axis, 20 cm wide at its top (height 1.47, below the nape's
+    hairline) and ``scale`` times as wide at its bottom ``depth`` lower: (points, triangles)."""
+    axis_y = rig().by_name[hairing.HEAD].head[1]
+    x = np.linspace(-0.10, 0.10, 11)
+    tops = np.column_stack((x, np.full(len(x), axis_y + 0.15), np.full(len(x), 1.47)))
+    bottoms = np.column_stack((x * scale, np.full(len(x), axis_y + 0.15), np.full(len(x), 1.47 - depth)))
+    co, tris, _ranges = join([sheet(tops, bottoms)])
+    return co, tris
+
+
+def crown_layer_hair():
+    """`back_sheet` and a layer standing 6 cm off the head over the back of the crown, its own loose part: 20 to 70
+    degrees from the top, 60 degrees to either side of straight behind (as `hair.patch`). Returns (points,
+    triangles, {"cap", "sheet", "layer": indices})."""
+    co, tris, ids = back_sheet()
+    layer_co, layer_tris, (layer_ids,) = join([hair.patch(np.arange(20.0, 71.0, 5.0), np.arange(-60.0, 61.0, 7.5),
+                                                          0.06)])
+    return (np.vstack((co, layer_co)), np.vstack((tris, layer_tris + len(co))),
+            dict(ids, layer=layer_ids + len(co)))
+
+
+def test_lanes_count_and_order():
+    # The back sheet cut into 1 to 4 lanes: as many as asked, numbered from +X, every back vertex in one lane.
+    co, tris, _ids = back_sheet()
+    for count in range(1, 5):
+        measured, label, lanes = back_lanes(co, tris, count)
+        describe_lane_plan(lanes)
+        back = np.flatnonzero(label == hairlanes.BACK)
+        firsts = [float(lane.joints[0][0]) for lane in lanes]
+        check(len(lanes) == count and [lane.number for lane in lanes] == list(range(count))
+              and all(a > b for a, b in zip(firsts, firsts[1:])),
+              "lanes count: {:d} asked, {:d} lanes numbered {}, first joints' X {} falling".format(
+                  count, len(lanes), [lane.number for lane in lanes], [round(x, 3) for x in firsts]))
+        members = np.concatenate([lane.members for lane in lanes]) if lanes else np.zeros(0, dtype=np.int64)
+        check(len(members) == len(set(members.tolist())) and set(members.tolist()) == set(back.tolist()),
+              "lanes count: with {:d} lanes every back vertex is in one lane ({:d} in lanes, {:d} back)".format(
+                  count, len(members), len(back)))
+
+
+def test_lanes_never_cross():
+    # The sheet swept 12 cm to the side, and lopsided cards: 3 lanes, no two neighbors swapping sides.
+    swept_co, swept_tris, _ids = back_sheet(sweep=0.12)
+    for name, (co, tris) in (("swept sheet", (swept_co, swept_tris)), ("lopsided cards", card_back(LOPSIDED))):
+        _measured, _label, lanes = back_lanes(co, tris, 3)
+        describe_lane_plan(lanes)
+        crossed = [lanes_crossed(a, b) for a, b in zip(lanes, lanes[1:])]
+        check(len(lanes) == 3 and not any(crossed),
+              "lanes never cross: {:s}: 3 lanes ({:d}), neighbors crossed {}".format(name, len(lanes), crossed))
+
+
+def test_lanes_rows_shared():
+    # The back sheet's straight bottom: 3 lanes with the same number of joints, on the same rows.
+    co, tris, _ids = back_sheet()
+    _measured, _label, lanes = back_lanes(co, tris, 3)
+    describe_lane_plan(lanes)
+    counts = [len(lane.joints) for lane in lanes]
+    apart = max((float(np.abs(rows(a) - rows(b)).max()) for a in lanes for b in lanes
+                 if len(a.joints) == len(b.joints)), default=math.inf)
+    check(len(lanes) == 3 and len(set(counts)) == 1 and apart <= 0.02,
+          "lanes rows: 3 lanes ({:d}) of equal joints ({}), rows within 2 cm ({:.4f} m apart)".format(
+              len(lanes), counts, apart))
+
+
+def test_lanes_mirrored():
+    # The back sheet is mirror symmetric: so are its lanes.
+    co, tris, _ids = back_sheet()
+    for count in (2, 3):
+        _measured, _label, lanes = back_lanes(co, tris, count)
+        describe_lane_plan(lanes)
+        apart = [float(np.linalg.norm(lane.joints * (-1.0, 1.0, 1.0) - other.joints, axis=1).max())
+                 if lane.joints.shape == other.joints.shape else math.inf
+                 for lane, other in zip(lanes, lanes[::-1])]
+        check(len(lanes) == count and max(apart) <= 0.005,
+              "lanes mirrored: {:d} lanes, each lane's joints mirrored within 5 mm of its twin's ({})".format(
+                  count, [round(a, 4) for a in apart]))
+
+
+def test_lanes_u_bottom():
+    # A sheet whose outer parts (beyond 3 cm either side of the middle) end 20 cm above its middle (45 cm): the outer
+    # lanes run out of hair first. Their chains end there with fewer joints, on the middle chain's rows, the last bone
+    # under the last joint; the middle chain reaches lowest. On a U (middle 45 cm, edges 25 cm, a
+    # parabola in between) the outer lanes' hair within FOLLOW across of their last joints runs on nearly as far as
+    # the middle's (to 0.36 m below the top against the middle's 0.40, measured 2026-11-14), so their chains keep
+    # the middle's joints; only the rest holds there. Both start at the scalp's lower edge: no chain is light.
+    for name, shape, fewer in (("stepped", lambda x: 0.20 if abs(x) > 0.03 else 0.0, True),
+                               ("parabola", lambda x: 0.20 * (x / 0.15) ** 2, False)):
+        co, tris, _ids = back_sheet(depth=0.45, shape=shape)
+        _measured, _label, lanes = back_lanes(co, tris, 3)
+        describe_lane_plan(lanes)
+        if len(lanes) != 3:
+            check(False, "u bottom lanes: {:s}: 3 lanes ({:d})".format(name, len(lanes)))
+            continue
+        outer, middle = (lanes[0], lanes[2]), lanes[1]
+        check(not any(lane.light for lane in lanes),
+              "u bottom lanes: {:s}: started at the scalp's edge, none light ({})".format(
+                  name, [lane.light for lane in lanes]))
+        if fewer:
+            check(all(len(lane.joints) < len(middle.joints) for lane in outer),
+                  "u bottom lanes: {:s}: the outer lanes have fewer joints than the middle one ({})".format(
+                      name, [len(lane.joints) for lane in lanes]))
+        apart = [float(np.abs(rows(lane) - rows(middle)[:len(lane.joints)]).max()) if len(lane.joints) <= len(
+            middle.joints) else math.inf for lane in outer]
+        check(max(apart) <= 0.02, "u bottom lanes: {:s}: the outer joints on the middle lane's first rows ({})".format(
+            name, [round(a, 4) for a in apart]))
+        swing = [abs(float(lane.tip[0] - lane.joints[-1][0])) for lane in outer]
+        check(max(swing) <= 0.03,
+              "u bottom lanes: {:s}: the outer tips' X within 3 cm of their last joint's ({})".format(
+                  name, [round(s, 3) for s in swing]))
+        check(middle.tip[2] < min(lane.tip[2] for lane in outer),
+              "u bottom lanes: {:s}: the middle lane's tip lowest ({})".format(
+                  name, [round(float(lane.tip[2]), 3) for lane in lanes]))
+
+
+def test_lanes_fan_and_narrow():
+    # A flat sheet twice as wide at the bottom as at the top: the outer chains fan out with it. One half as wide at
+    # the bottom: the outer chains stop narrowing with it partway down (NARROW).
+    co, tris = flat_sheet(2.0)
+    _measured, _label, lanes = back_lanes(co, tris, 3)
+    describe_lane_plan(lanes)
+    out = [(abs(float(lane.joints[0][0])), abs(float(lane.tip[0]))) for lane in (lanes[0], lanes[-1])] if lanes else []
+    check(len(lanes) == 3 and all(tip > root for root, tip in out),
+          "lanes fan: the outer tips lie farther out in X than their roots ({})".format(
+              [(round(root, 3), round(tip, 3)) for root, tip in out]))
+    co, tris = flat_sheet(0.5)
+    _measured, _label, lanes = back_lanes(co, tris, 3)
+    describe_lane_plan(lanes)
+    # The sheet is half as wide at its bottom: chains following it all the way would end at half their roots' X.
+    # They stop narrowing at NARROW of the lane's width, so the outer tips stay beyond 0.55 of it (measured 0.62).
+    kept = [abs(float(lane.tip[0])) / abs(float(lane.joints[0][0])) for lane in (lanes[0], lanes[-1])] if lanes else []
+    check(len(lanes) == 3 and min(kept) >= 0.55 and max(kept) < 1.0,
+          "lanes narrow: the outer tips' X between 0.55 of their roots' and all of it ({})".format(
+              [round(k, 3) for k in kept]))
+
+
+def test_lanes_clumps():
+    # One lane over two strips 12 cm apart starting at the same height, one 20 cm longer: no joint between them, and
+    # the chain stays on the strip it follows (it ends with it), not moved across by the check. So too with a hole
+    # cut across the followed strip around its second joint.
     model_rig = rig()
-    co, tris, _parts = back_sheet()
-    tube_co, tube_tris, _ids = join([hair.tube((0.0, 0.12, 1.50), (0.0, 0.22, 1.10), 0.035)])
-    co, tris = np.vstack((co, tube_co)), np.vstack((tris, tube_tris + len(co)))
-    for n in (1, 2, 3):
-        chains, made, _short = hairrig.plan_layout(co, tris, model_rig, ponytail=True, counts=counts(ponytail=n))
-        tails = sorted((chain for chain in chains if chain.kind == "ponytail"), key=lambda chain: chain.order)
-        sheets = {chain.sheet for chain in tails}
-        check(len(tails) == n == len(chains) and made["ponytail"] == n
-              and (sheets == {-1} if n == 1 else len(sheets) == 1 and min(sheets) >= 0),
-              "ponytail counts: {:d} asked, {:d} ponytail chains ({}, {})".format(n, len(tails), kinds_of(chains), made))
-        check(not any_crossed(tails), "ponytail counts: {:d}: none crossed".format(n))
+    axis_y = model_rig.by_name[hairing.HEAD].head[1]
+    y, top, width = axis_y + 0.15, 1.47, 0.03
+    strips = ((-0.06, 0.30), (0.06, 0.50))
+
+    def off_strip(points, x, length):
+        # How far ``points`` lie from the flat strip at ``x`` hanging ``length`` from ``top`` (model space is world
+        # space for this rig).
+        side = np.maximum(np.abs(points[:, 0] - x) - width / 2.0, 0.0)
+        down = np.maximum(np.maximum(points[:, 2] - top, top - length - points[:, 2]), 0.0)
+        return np.sqrt(side ** 2 + (points[:, 1] - y) ** 2 + down ** 2)
+
+    def one_strip(name, lanes):
+        describe_lane_plan(lanes)
+        line = [off_strip(lane_line(lane), x, length) for lane in lanes for x, length in strips]
+        check(len(lanes) == 1 and any((o <= 0.01).all() for o in line),
+              "lanes clumps: {:s}: every joint and the tip within 1 cm of the same strip ({})".format(
+                  name, [np.round(o, 3).tolist() for o in line]))
+
+    co, tris, ranges = join([hair.strip((x, y, top), (x, y, top - length), width, (1.0, 0.0, 0.0),
+                                        rows=int(round(length / 0.02))) for x, length in strips])
+    _measured, _label, lanes = back_lanes(co, tris, 1)
+    off = [off_strip(lane.joints, x, length) for lane in lanes for x, length in strips]
+    print("      joints off the short strip {}, off the long strip {}".format(
+        *[np.round(o, 3).tolist() for o in off]))
+    check(len(lanes) == 1 and (np.minimum(off[0], off[1]) <= 0.01).all(),
+          "lanes clumps: one lane ({:d}), every joint within 1 cm of a strip".format(len(lanes)))
+    one_strip("strips", lanes)
+    if len(lanes) != 1 or len(lanes[0].joints) < 2:
+        return
+    # The followed strip (by the first joint's side) with a hole 8 and 10 cm high around the second joint.
+    followed = ranges[int(lanes[0].joints[0][0] > 0.0)]
+    center = float(lanes[0].joints[1][2])
+    middle = co[tris].mean(axis=1)
+    for half in (0.04, 0.05):
+        hole = np.isin(tris, followed).all(axis=1) & (np.abs(middle[:, 2] - center) < half)
+        one_strip("a {:.0f} cm hole at the second joint".format(200.0 * half), back_lanes(co, tris[~hole], 1)[2])
+    # The strips with vertex rows 6 cm apart: a joint on a strip between two rows can lie 3 cm from every vertex, so
+    # the check fires there; it keeps to the strip the chain follows. Measured across (X) only: every joint and the
+    # tip within 1 cm of one strip's sides.
+    co, tris, _ranges = join([hair.strip((x, y, top), (x, y, top - length), width, (1.0, 0.0, 0.0),
+                                         rows=int(round(length / 0.06))) for x, length in strips])
+    lanes = back_lanes(co, tris, 1)[2]
+    describe_lane_plan(lanes)
+    across = [np.maximum(np.abs(lane_line(lane)[:, 0] - x) - width / 2.0, 0.0) for lane in lanes for x, _l in strips]
+    check(len(lanes) == 1 and any((a <= 0.01).all() for a in across),
+          "lanes clumps: vertex rows 6 cm apart: every joint and the tip within 1 cm across of the same strip "
+          "({})".format([np.round(a, 3).tolist() for a in across]))
+
+
+def test_lanes_start_at_scalp_edge():
+    # A layer standing off the cap at the back of the crown over a sheet hanging from the nape: the back lanes start
+    # at the scalp's lower edge behind the head, not on the crown, and aren't light.
+    co, tris, ids = crown_layer_hair()
+    measured, label, lanes = back_lanes(co, tris, 3)
+    describe_lane_plan(lanes)
+    back = np.flatnonzero(label == hairlanes.BACK)
+    layer = np.isin(measured.index[back], ids["layer"])
+    edge = measured.edge[back]
+    edge = float(np.median(edge[np.isfinite(edge)]))
+    print("      the scalp's edge behind at {:.3f}, the crown layer from {:.3f} to {:.3f} ({:d} back vertices)".format(
+        edge, float(measured.at[back[layer], 2].min()), float(measured.at[back[layer], 2].max()), int(layer.sum())))
+    firsts = [round(float(lane.joints[0][2]), 3) for lane in lanes]
+    check(len(lanes) == 3 and layer.any() and all(abs(z - edge) <= 0.03 for z in firsts),
+          "lanes scalp edge: 3 lanes ({:d}) starting within 3 cm of the scalp's edge (first joints at {})".format(
+              len(lanes), firsts))
+    check(lanes and not any(lane.light for lane in lanes), "lanes scalp edge: none light")
+
+
+def test_lanes_bun():
+    # A bun standing up from the crown: one lane, starting in the bun, light.
+    model_rig = rig(MIQOTE)
+    co, tris, _ids = bun_hair()
+    measured, label, lanes = back_lanes(co, tris, 1, model_rig)
+    describe_lane_plan(lanes)
+    edge = measured.edge[label == hairlanes.BACK]
+    edge = float(edge[np.isfinite(edge)].max())
+    check(len(lanes) == 1 and lanes[0].joints[0][2] > edge and lanes[0].light,
+          "lanes bun: one lane ({:d}), first joint above the scalp's edge ({:.3f}; tip at {:.3f}; edge {:.3f}), "
+          "light".format(len(lanes), float(lanes[0].joints[0][2]) if lanes else math.nan,
+                         float(lanes[0].tip[2]) if lanes else math.nan, edge))
+
+
+def test_lanes_check_keeps_rows():
+    # One lane over a flat strip 20 cm wide, with a hole 10 cm across and 8 cm high cut around its middle row: the
+    # check moves that joint onto the hair beside the hole, on its row. Without the hole it moves nothing.
+    model_rig = rig()
+    co, tris = flat_sheet(1.0)
+    _measured, _label, plain = back_lanes(co, tris, 1)
+    describe_lane_plan(plain)
+    if len(plain) != 1 or len(plain[0].joints) < 3 or plain[0].moved:
+        check(False, "lanes check: one lane of 3 joints or more without the hole, none moved ({})".format(
+            [(len(lane.joints), lane.moved) for lane in plain]))
+        return
+    row = len(plain[0].joints) // 2
+    center = plain[0].joints[row]
+    middle = model_rig.model(co)[tris].mean(axis=1)
+    hole = (np.abs(middle[:, 0] - center[0]) < 0.05) & (np.abs(middle[:, 2] - center[2]) < 0.04)
+    measured, _label, lanes = back_lanes(co, tris[~hole], 1)
+    describe_lane_plan(lanes)
+    if len(lanes) != 1 or len(lanes[0].joints) != len(plain[0].joints):
+        check(False, "lanes check: one lane of {:d} joints with the hole ({})".format(
+            len(plain[0].joints), [len(lane.joints) for lane in lanes]))
+        return
+    lane = lanes[0]
+    joint = lane.joints[row]
+    off = float(nearest(joint[None], measured.at[lane.members])[0])
+    print("      row {:d}: at {} without the hole, {} with it, {:.4f} m off the hair".format(
+        row, np.round(center, 3), np.round(joint, 3), off))
+    check(lane.moved >= 1 and lane.lifted == 0 and abs(float(joint[2] - center[2])) <= 0.02
+          and off <= hairlanes.CHECK_REACH,
+          "lanes check: the joint in the hole moved onto the hair (moved {:d}, lifted {:d}), its height within 2 cm of "
+          "its row ({:.4f} m)".format(lane.moved, lane.lifted, abs(float(joint[2] - center[2]))))
+
+
+def test_lanes_short_followed_hair():
+    # One lane over two strips behind the head: a wide one 8 cm long, which the chain follows, and a narrow one 12 cm
+    # across running on to 30 cm, which sets the area's rows. The wide strip ends just above the second row, so with
+    # two bones no hair lies under the second joint: that strip is too short for two rows and the chain splits its
+    # length in two, the tip at its end. Before, the tip went on past the strip and the check lifted it back above the
+    # second joint (measured 2026-11-14: a 178 degree fold, as on c0801h0120's left chain).
+    model_rig = rig()
+    axis_y = model_rig.by_name[hairing.HEAD].head[1]
+    y, top = axis_y + 0.15, 1.47
+    strips = ((0.0, 0.04, 0.08), (0.12, 0.01, 0.30))
+    co, tris, _ranges = join([hair.strip((x, y, top), (x, y, top - length), width, (1.0, 0.0, 0.0),
+                                         rows=int(round(length / 0.01))) for x, width, length in strips])
+    measured, _label, lanes = back_lanes(co, tris, 1, model_rig)
+    describe_lane_plan(lanes)
+    x, width, length = strips[0]
+    if len(lanes) != 1 or abs(float(lanes[0].joints[0][0]) - x) > width / 2.0 + hairlanes.CHECK_REACH:
+        check(False, "lanes short followed hair: one lane, starting on the wide strip ({})".format(
+            [np.round(lane.joints[0], 3).tolist() for lane in lanes]))
+        return
+    lane = lanes[0]
+    line = lane_line(lane)
+    side = np.maximum(np.abs(line[:, 0] - x) - width / 2.0, 0.0)
+    down = np.maximum(np.maximum(line[:, 2] - top, top - length - line[:, 2]), 0.0)
+    off = np.sqrt(side ** 2 + (line[:, 1] - y) ** 2 + down ** 2)
+    bones = np.diff(line, axis=0)
+    bend = [round(math.degrees(math.acos(float(np.clip(a @ b / np.linalg.norm(a) / np.linalg.norm(b), -1.0, 1.0)))), 1)
+            for a, b in zip(bones, bones[1:])]
+    print("      off the wide strip {}, bends {}".format(np.round(off, 3).tolist(), bend))
+    check(len(lane.joints) == 2 and lane.tip[2] < lane.joints[-1][2] and lane.moved == 0
+          and (off <= 0.02).all(),
+          "lanes short followed hair: two joints ({:d}), the tip below the last joint ({:.3f} < {:.3f}), none moved "
+          "({:d}), every joint and the tip within 2 cm of the wide strip ({})".format(
+              len(lane.joints), float(lane.tip[2]), float(lane.joints[-1][2]), lane.moved, np.round(off, 3).tolist()))
+    # The split, not the area's second row (0.0836 below the top): the second joint halfway between the first and the
+    # strip's end, give or take half a level band (the end is where the strip's last band holds hair).
+    halfway = 0.5 * (float(lane.joints[0][2]) + top - length)
+    check(len(lane.joints) == 2 and abs(float(lane.joints[1][2]) - halfway) <= hairlanes.LEVEL_BAND / 2.0,
+          "lanes short followed hair: the second joint halfway down the wide strip ({:.3f}, halfway {:.3f})".format(
+              float(lane.joints[-1][2]), halfway))
+
+
+def bone_lengths(joints, tip):
+    """The lengths of a chain's bones (meters)."""
+    return np.linalg.norm(np.diff(np.vstack((joints, tip)), axis=0), axis=1)
+
+
+def test_lanes_joints_on_one_spot():
+    # One lane over a strip 4 cm wide that hangs 14 cm, stops, and goes on from 48 to 54 cm: the rows at 20 and 30 cm
+    # lie in the gap, with no hair on their row, so the check lifts both joints onto the strip's end above, the same
+    # vertex (c0801h0130's back chains, measured 2026-11-15: two joints on one vertex, a bone of length 0). The
+    # second of them goes: no bone is shorter than MIN_BONE, and the chain still runs to the lower hair.
+    model_rig = rig()
+    axis_y = model_rig.by_name[hairing.HEAD].head[1]
+    y, top = axis_y + 0.15, 1.47
+    co, tris, _ranges = join([hair.strip((0.0, y, top - start), (0.0, y, top - end), 0.04, (1.0, 0.0, 0.0),
+                                         rows=int(round((end - start) / 0.01)))
+                              for start, end in ((0.0, 0.14), (0.48, 0.54))])
+    _measured, _label, lanes = back_lanes(co, tris, 1, model_rig)
+    describe_lane_plan(lanes)
+    if len(lanes) != 1:
+        check(False, "lanes joints on one spot: one lane ({:d})".format(len(lanes)))
+        return
+    lane = lanes[0]
+    bones = bone_lengths(lane.joints, lane.tip)
+    print("      joints at {}, bones {} m".format(np.round(lane.joints[:, 2], 3).tolist(), np.round(bones, 4).tolist()))
+    check(lane.lifted >= 1 and float(bones.min()) >= hairlanes.MIN_BONE,
+          "lanes joints on one spot: a joint was lifted ({:d}), no bone under {:.3f} m ({:.4f})".format(
+              lane.lifted, hairlanes.MIN_BONE, float(bones.min())))
+    check(len(lane.joints) >= 3 and lane.tip[2] < top - 0.48,
+          "lanes joints on one spot: 3 joints or more ({:d}), the tip on the lower hair (z {:.3f})".format(
+              len(lane.joints), float(lane.tip[2])))
+
+
+def test_lanes_bone_length():
+    # No bone of any chain is shorter than MIN_BONE: `_spaced` on a line by hand, then the whole rig on the fixtures.
+    line = np.array(((0.0, 0.0, 1.0), (0.0, 0.0, 0.9), (0.02, 0.0, 0.85), (0.02, 0.0, 0.85), (0.024, 0.0, 0.848),
+                     (0.0, 0.0, 0.7)))
+    kept, state = hairlanes._spaced(line, np.array((0, 0, 2, 2, 1, 0)))
+    check(np.array_equal(kept, line[[0, 1, 2, 5]]) and state.tolist() == [0, 0, 2, 0],
+          "lanes bone length: joints on one spot and 4.5 mm from it leave the first of them ({})".format(
+              np.round(kept, 3).tolist()))
+    # At two bones nothing can go: a second joint 3.5 mm from the first goes halfway to the tip instead (short hair's
+    # ring, c0801h0138), and one 5 mm above the tip too.
+    for name, second in (("near the root", (0.003, 0.0, 1.002)), ("near the tip", (0.0, 0.004, 0.953))):
+        line = np.array(((0.0, 0.0, 1.0), second, (0.0, 0.0, 0.95)))
+        kept, state = hairlanes._spaced(line, np.zeros(3, dtype=np.int64))
+        check(len(kept) == 3 and np.allclose(kept[1], (0.0, 0.0, 0.975)) and np.array_equal(kept[[0, 2]], line[[0, 2]]),
+              "lanes bone length: two bones, the second joint {:s} goes halfway ({})".format(
+                  name, np.round(kept, 4).tolist()))
+    # Root and tip under MIN_CHAIN_LENGTH apart with nothing between them to keep: no chain.
+    line = np.array(((0.0, 0.0, 1.0), (0.0, 0.0, 0.995), (0.0, 0.0, 0.98)))
+    check(hairlanes._spaced(line, np.zeros(3, dtype=np.int64))[0] is None,
+          "lanes bone length: root and tip 2 cm apart with the joint on the root: no chain")
+    model_rig = rig()
+    full = counts(back=4, left=2, right=2, bangs=6)
+    fixtures = (("rig counts hair", rig_counts_hair(), full, model_rig), ("card hair", card_hair(300), full, model_rig),
+                ("short hair, 4", short_hair(), counts(bangs=4), model_rig),
+                ("short hair, 6", short_hair(), counts(bangs=6), model_rig),
+                ("bun", bun_hair()[:2], counts(back=1), rig(MIQOTE)),
+                ("fringe and neck", fringe_and_neck()[:2], None, rig(MIQOTE)))
+    for name, (co, tris), asked, fixture_rig in fixtures:
+        chains, _made, _short = hairlanes.plan(co, tris, fixture_rig, counts=asked)
+        shortest = min((float(bone_lengths(chain.joints, chain.tip).min()) for chain in chains), default=math.nan)
+        check(chains and shortest >= hairlanes.MIN_BONE,
+              "lanes bone length: {:s}: {:d} chains, no bone under {:.3f} m ({:.4f})".format(
+                  name, len(chains), hairlanes.MIN_BONE, shortest))
+
+
+def test_lanes_sweeping_hair():
+    # One lane over a strand behind the head that hangs 10 cm, sweeps 12 cm sideways over the next 6 cm, and hangs on
+    # to 45 cm (a braid swept over the shoulder, c0801h0153): the chain follows it to its end, though the strand
+    # moves farther than FOLLOW across between two rows. Before, it ended above the sweep (measured 2026-11-14).
+    model_rig = rig()
+    axis_y = model_rig.by_name[hairing.HEAD].head[1]
+    y, top = axis_y + 0.15, 1.47
+    bends = ((0.0, top), (0.0, top - 0.10), (0.12, top - 0.16), (0.12, top - 0.45))
+    co, tris, _ranges = join([hair.strip((a[0], y, a[1]), (b[0], y, b[1]), 0.03, (0.0, 1.0, 0.0), rows=10)
+                              for a, b in zip(bends, bends[1:])])
+    measured, _label, lanes = back_lanes(co, tris, 1, model_rig)
+    describe_lane_plan(lanes)
+    if len(lanes) != 1:
+        check(False, "lanes sweeping hair: one lane ({:d})".format(len(lanes)))
+        return
+    lane = lanes[0]
+    line = lane_line(lane)
+    off = nearest(line, measured.at[lane.members])
+    bottom = np.array((0.12, y, top - 0.45))
+    # The strand itself turns by atan(12 / 6) at each end of its sweep: the chain turns no sharper.
+    turn = math.degrees(math.atan2(0.12, 0.06))
+    bend = line_bends(line)
+    # And its joints lie on the strand: within 2 cm of its middle line (the strip is 3 cm deep).
+    along = off_line(line, [(x, top - z) for x, z in bends], y, top)
+    print("      joints off the strand {}, off its line {}, tip {} from its bottom, bends {} (the strand turns "
+          "{:.1f})".format(np.round(off, 3).tolist(), np.round(along, 3).tolist(),
+                           round(float(np.linalg.norm(lane.tip - bottom)), 3), bend, turn))
+    check(float(np.linalg.norm(lane.tip - bottom)) <= hairlanes.CHECK_REACH and lane.lifted == 0 and max(bend) <= turn
+          and (along <= 0.02).all(),
+          "lanes sweeping hair: the tip within 3 cm of the strand's bottom ({}), none lifted ({:d}), no bend sharper "
+          "than the strand's ({}), every joint within 2 cm of its line ({})".format(
+              np.round(lane.tip, 3).tolist(), lane.lifted, bend, np.round(along, 3).tolist()))
+
+
+def strand(bends, y, top, width=0.01, step=0.01):
+    """A strand of hair behind the head through ``bends`` ((x, depth below ``top``) pairs) at ``y``: flat strips
+    ``width`` deep in Y, a vertex row every ``step`` at most, sharing their vertices at the bends. (points, triangles,
+    its vertex indices)."""
+    parts = [hair.strip((a[0], y, top - a[1]), (b[0], y, top - b[1]), width, (0.0, 1.0, 0.0),
+                        rows=max(1, int(round(max(abs(b[1] - a[1]), abs(b[0] - a[0])) / step))))
+             for a, b in zip(bends, bends[1:])]
+    co, tris, ranges = join(parts)
+    return co, tris, np.concatenate(ranges)
+
+
+def off_line(points, bends, y, top):
+    """How far each of ``points`` lies from the middle line of a `strand` through ``bends``."""
+    corners = np.array([(x, y, top - depth) for x, depth in bends])
+    starts, spans = corners[:-1], np.diff(corners, axis=0)
+    offset = points[:, None, :] - starts[None]
+    t = np.clip((offset * spans[None]).sum(axis=2) / (spans * spans).sum(axis=1)[None], 0.0, 1.0)
+    return np.linalg.norm(offset - t[:, :, None] * spans[None], axis=2).min(axis=1)
+
+
+def card(left, right, start, end, y, top, step=0.01):
+    """A flat card behind the head at ``y``, from ``left`` to ``right`` in X and ``start`` to ``end`` below ``top``,
+    its vertices on a ``step`` grid: (points, triangles)."""
+    x = np.linspace(left, right, int(round((right - left) / step)) + 1)
+    co, tris, _ranges = join([sheet(np.column_stack((x, np.full(len(x), y), np.full(len(x), top - start))),
+                                    np.column_stack((x, np.full(len(x), y), np.full(len(x), top - end))),
+                                    rows=int(round((end - start) / step)))])
+    return co, tris
+
+
+def together(*meshes):
+    """The (points, triangles) of ``meshes`` as one mesh, not joined."""
+    co, tris, start = [], [], 0
+    for points, triangles in meshes:
+        co.append(points)
+        tris.append(triangles + start)
+        start += len(points)
+    return np.vstack(co), np.vstack(tris)
+
+
+def line_bends(line):
+    """The angle between each two bones of the polyline ``line`` (degrees)."""
+    bones = np.diff(line, axis=0)
+    cos = (bones[:-1] * bones[1:]).sum(axis=1) / (np.linalg.norm(bones[:-1], axis=1)
+                                                  * np.linalg.norm(bones[1:], axis=1))
+    return [round(math.degrees(math.acos(float(c))), 1) for c in np.clip(cos, -1.0, 1.0)]
+
+
+def test_lanes_separate_strand():
+    # One lane over strand A, sweeping from x 0 to 4.7 cm and ending 17 cm down, and a second strand of its own at
+    # x 7.9 cm: "jump" from 12 to 40 cm down (beside A's end, 3.2 cm across of it), "void" only from 30 to 40 cm down.
+    # Neither is joined to A through the mesh, so the chain ends with A (a clump of its own, as test_lanes_clumps).
+    # Before, the sweep's walk took the middle of all hair within FOLLOW, slid onto the second strand and ran on down
+    # it (measured 2026-11-14: tips at 0.397 and 0.396).
+    model_rig = rig()
+    y, top = model_rig.by_name[hairing.HEAD].head[1] + 0.15, 1.47
+    a_co, a_tris, _a = strand(((0.0, 0.0), (0.047, 0.17)), y, top)
+    for name, start in (("jump", 0.12), ("void", 0.30)):
+        b_co, b_tris, _b = strand(((0.079, start), (0.079, 0.40)), y, top)
+        co, tris = np.vstack((a_co, b_co)), np.vstack((a_tris, b_tris + len(a_co)))
+        _measured, _label, lanes = back_lanes(co, tris, 1, model_rig)
+        describe_lane_plan(lanes)
+        off = nearest(lane_line(lanes[0]), model_rig.model(a_co)) if len(lanes) == 1 else np.full(1, math.inf)
+        check(len(lanes) == 1 and (off <= 0.02).all(),
+              "lanes separate strand: {:s}: every joint and the tip within 2 cm of strand A ({})".format(
+                  name, np.round(off, 3).tolist()))
+
+
+def test_lanes_sweep_to_end():
+    # One lane over a strand behind the head that hangs 10 cm, then sweeps sideways to its end: as far as it drops
+    # (slope 1.0, 30 cm) or twice as far (slope 2.0, 24 cm over 12 cm). The chain follows it to its end, also under its
+    # last row. Before, the trim loop measured the hair under the last joint within FOLLOW across of it and cut the
+    # chain back to two joints (measured 2026-11-14 on slope 1.0: tip 25 cm above the strand's end).
+    model_rig = rig()
+    y, top = model_rig.by_name[hairing.HEAD].head[1] + 0.15, 1.47
+    for slope, end_x, depth in ((1.0, 0.30, 0.40), (2.0, 0.24, 0.22)):
+        co, tris, _ids = strand(((0.0, 0.0), (0.0, 0.10), (end_x, depth)), y, top)
+        measured, _label, lanes = back_lanes(co, tris, 1, model_rig)
+        describe_lane_plan(lanes)
+        if len(lanes) != 1:
+            check(False, "lanes sweep to end: slope {:.1f}: one lane ({:d})".format(slope, len(lanes)))
+            continue
+        lane = lanes[0]
+        end = model_rig.model(np.array([(end_x, y, top - depth)]))[0]
+        off = nearest(lane_line(lane), measured.at[lane.members])
+        print("      joints off the strand {}, tip {} from its end".format(
+            np.round(off, 3).tolist(), round(float(np.linalg.norm(lane.tip - end)), 3)))
+        check(float(np.linalg.norm(lane.tip - end)) <= hairlanes.CHECK_REACH and lane.lifted == 0
+              and (off <= 0.02).all(),
+              "lanes sweep to end: slope {:.1f}: the tip within 3 cm of the strand's end ({}), none lifted ({:d}), "
+              "every joint within 2 cm of the strand ({})".format(slope, np.round(lane.tip, 3).tolist(), lane.lifted,
+                                                                np.round(off, 3).tolist()))
+
+
+def test_lanes_coarse_strands_apart():
+    # Two strands with vertex rows 4 cm apart, 3.2 cm apart across (strand A of test_lanes_separate_strand and one at
+    # x 7.9 cm): their median edge is 4 cm, but touching never reaches past LEVEL_STEP, so they are two pieces.
+    # Before, touching reached the median edge and joined them (a chain on A ran on down the other, measured
+    # 2026-11-14 in the reviewer's probe).
+    model_rig = rig()
+    y, top = model_rig.by_name[hairing.HEAD].head[1] + 0.15, 1.47
+    a_co, a_tris, _a = strand(((0.0, 0.0), (0.047, 0.17)), y, top, step=0.04)
+    b_co, b_tris, _b = strand(((0.079, 0.12), (0.079, 0.40)), y, top, step=0.04)
+    co, tris = together((a_co, a_tris), (b_co, b_tris))
+    measured = hairlanes.measure(co, tris, model_rig)
+    links = hairlanes._links(measured, np.arange(len(measured.index)))
+    _inside, piece = hairlanes._pieces(measured.drop, -1.0, np.inf, links)
+    on_a = measured.index < len(a_co)
+    apart = set(piece[on_a].tolist()).isdisjoint(piece[~on_a].tolist())
+    check(on_a.any() and (~on_a).any() and apart and links[3] <= hairlanes.LEVEL_STEP,
+          "lanes coarse strands apart: two pieces ({}), touching reach {:.3f} m".format(apart, links[3]))
+
+
+def test_lanes_card_behind():
+    # A strand 6 cm deep that hangs 10 cm, sweeps 12 cm sideways over 6 cm and hangs on to 45 cm, and 3 cm behind it
+    # (never touching) a card from x 10 to 40 cm, 15 to 45 cm down. The card lies within FOLLOW across of the strand's
+    # joints, so it counts in their middles, but the chain follows the strand: its tip at the strand's end. Before, the
+    # hair under a joint was everything joined to all its hair, card included (measured 2026-11-14 in the reviewer's
+    # probe: tip at x 0.24).
+    model_rig = rig()
+    y, top = model_rig.by_name[hairing.HEAD].head[1] + 0.15, 1.47
+    bends = ((0.0, 0.0), (0.0, 0.10), (0.12, 0.16), (0.12, 0.45))
+    co, tris = together(strand(bends, y, top, width=0.06)[:2], card(0.10, 0.40, 0.15, 0.45, y + 0.06, top))
+    _measured, _label, lanes = back_lanes(co, tris, 1, model_rig)
+    describe_lane_plan(lanes)
+    end = model_rig.model(np.array([(0.12, y, top - 0.45)]))[0]
+    gap = float(np.linalg.norm(lanes[0].tip - end)) if len(lanes) == 1 else math.inf
+    check(gap <= hairlanes.CHECK_REACH, "lanes card behind: one lane ({:d}), its tip {:.3f} m from the strand's "
+          "end".format(len(lanes), gap))
+
+
+def test_lanes_touching_cards():
+    # A swept strand in two cards that aren't joined: the upper one hangs 10 cm and starts its sweep, 6 cm sideways to
+    # 13 cm down; the lower one, half a centimetre behind (closer than its edges and LEVEL_STEP), overlaps it from
+    # 12.5 cm down, sweeps on to x 12 cm at 16 cm down and hangs to 45 cm. They touch, so they are one piece and the
+    # chain follows both to the end. With touching left out it ends with the upper card (measured 2026-11-14: tip
+    # 13.7 cm down).
+    model_rig = rig()
+    y, top = model_rig.by_name[hairing.HEAD].head[1] + 0.15, 1.47
+    co, tris = together(strand(((0.0, 0.0), (0.0, 0.10), (0.06, 0.13)), y, top)[:2],
+                        strand(((0.06, 0.125), (0.12, 0.16), (0.12, 0.45)), y + 0.005, top)[:2])
+    _measured, _label, lanes = back_lanes(co, tris, 1, model_rig)
+    describe_lane_plan(lanes)
+    end = model_rig.model(np.array([(0.12, y, top - 0.45)]))[0]
+    gap = float(np.linalg.norm(lanes[0].tip - end)) if len(lanes) == 1 else math.inf
+    check(gap <= hairlanes.CHECK_REACH, "lanes touching cards: one lane ({:d}), its tip {:.3f} m from the lower card's "
+          "end".format(len(lanes), gap))
+
+
+def test_lanes_split_before_sweep():
+    # A bar of hair 20 cm across behind the head, 2 cm high (the first row's band); a strand that leaves its middle,
+    # sweeps 5.5 cm sideways to 6 cm down and hangs to 8 cm, inside the second row's band (10 cm down); and two
+    # strands at the bar's ends hanging to 30 cm (they set the rows). The chain sweeps at its second row onto the
+    # strand, which ends there, so at its fewest bones it splits the hair its first joint follows (within FOLLOW
+    # across of it) in two: the second joint halfway down, the tip on that hair, nothing moved or lifted. Before, the
+    # hair under the first joint was all hair joined to its whole row band, the outer strands too, and the chain ran
+    # down the strand 10 cm across (measured 2026-11-14; so c1401h0128's Detect bangs went from 42 to 70 degrees).
+    model_rig = rig()
+    y, top = model_rig.by_name[hairing.HEAD].head[1] + 0.15, 1.47
+    co, tris = together(card(-0.10, 0.10, 0.0, 0.02, y, top),
+                        strand(((0.0, 0.025), (0.055, 0.06), (0.055, 0.08)), y, top)[:2],
+                        strand(((-0.10, 0.025), (-0.10, 0.30)), y, top)[:2],
+                        strand(((0.10, 0.025), (0.10, 0.30)), y, top)[:2])
+    measured, _label, lanes = back_lanes(co, tris, 1, model_rig)
+    describe_lane_plan(lanes)
+    if len(lanes) != 1:
+        check(False, "lanes split before sweep: one lane ({:d})".format(len(lanes)))
+        return
+    lane = lanes[0]
+    line = lane_line(lane)
+    depth = top - line[:, 2]
+    off = nearest(line, measured.at[lane.members])
+    halfway = 0.5 * (depth[0] + depth[-1])
+    check(len(lane.joints) == 2 and lane.moved == 0 and depth[-1] > depth[1]
+          and abs(depth[1] - halfway) <= hairlanes.LEVEL_BAND / 2.0 and (np.abs(line[:, 0]) < 0.08).all()
+          and (off <= hairlanes.CHECK_REACH).all(),
+          "lanes split before sweep: two joints ({:d}), none moved ({:d}), the tip below the second joint, that joint "
+          "halfway down ({} m down, halfway {:.3f}), off the outer strands (X {}), on the hair ({})".format(
+              len(lane.joints), lane.moved, np.round(depth, 3).tolist(), halfway, np.round(line[:, 0], 3).tolist(),
+              np.round(off, 3).tolist()))
+
+
+def test_lanes_swept_time():
+    # Dense swept hair: 100 layers 1.5 mm apart of a ribbon 2 cm deep (5 vertices across, rows 5 mm apart) that hangs
+    # 10 cm, sweeps 12 cm sideways over 6 cm and hangs on to 45 cm. Its chain follows the sweep to the end, within the
+    # time test_lanes_card_hair_time allows for 3000 cards.
+    model_rig = rig()
+    y, top = model_rig.by_name[hairing.HEAD].head[1] + 0.15, 1.47
+    bends = ((0.0, 0.0), (0.0, 0.10), (0.12, 0.16), (0.12, 0.45))
+    layers = []
+    for k in range(100):
+        depth = np.linspace(-0.01, 0.01, 5) + y + 0.0015 * k
+        layers.append(join([sheet(np.column_stack((np.full(5, a[0]), depth, np.full(5, top - a[1]))),
+                                  np.column_stack((np.full(5, b[0]), depth, np.full(5, top - b[1]))),
+                                  rows=int(round(max(abs(b[1] - a[1]), abs(b[0] - a[0])) / 0.005)))
+                            for a, b in zip(bends, bends[1:])])[:2])
+    co, tris = together(*layers)
+    measured = hairlanes.measure(co, tris, model_rig)
+    label, _short = hairlanes.areas(measured)
+    back = np.flatnonzero(label == hairlanes.BACK)
+    started = time.perf_counter()
+    lanes = hairlanes.plan_area(measured, back, hairlanes.across_back(measured), 1)
+    took = time.perf_counter() - started
+    measured.group = None
+    started = time.perf_counter()
+    hairlanes.plan_area(measured, back, hairlanes.across_back(measured), 1)
+    plain = time.perf_counter() - started
+    # The hair's end, in the middle of its layers.
+    end = model_rig.model(np.array([(0.12, y + 0.0015 * 99 / 2.0, top - 0.45)]))[0]
+    gap = float(np.linalg.norm(lanes[0].tip - end)) if len(lanes) == 1 else math.inf
+    most = 2.0 * CARDS_TIME + 1.0
+    check(gap <= hairlanes.CHECK_REACH and took <= most,
+          "lanes swept time: {:d} vertices, the chain's tip {:.3f} m from the hair's end, {:.2f} s (without the mesh "
+          "{:.2f} s, at most {:.2f} s)".format(len(co), gap, took, plain, most))
+
+
+def test_lanes_flat_ring():
+    # Cards all between two heights 2 cm apart: too short for a chain, nothing built, and no warning on the way.
+    model_rig = rig()
+    axis_y = model_rig.by_name[hairing.HEAD].head[1]
+    cards = []
+    for angle in np.radians(np.arange(130.0, 231.0, 10.0)):
+        at = np.array((0.13 * math.sin(angle), axis_y - 0.13 * math.cos(angle), 0.0))
+        cards.append(hair.strip(at + (0.0, 0.0, 1.42), at + (0.0, 0.0, 1.40), 0.03,
+                                np.array((math.cos(angle), math.sin(angle), 0.0)), rows=2))
+    co, tris, _ranges = join(cards)
+    measured = hairlanes.measure(co, tris, model_rig)
+    label, _short = hairlanes.areas(measured)
+    back = np.flatnonzero(label == hairlanes.BACK)
+    area = float(measured.area[back].sum())
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        lanes = hairlanes.plan_area(measured, back, hairlanes.across_back(measured), 3)
+    check(area >= hairlanes.MIN_AREA and lanes == [] and not caught,
+          "lanes flat ring: {:.4f} m² of back hair 2 cm high gives no lane ({:d}), no warning ({})".format(
+              area, len(lanes), [str(w.message) for w in caught]))
+
+
+def test_lanes_double_sided():
+    # Every triangle doubled back to back: the same lanes.
+    co, tris, _ids = back_sheet()
+    _measured, _label, single = back_lanes(co, tris, 3)
+    _measured, _label, double = back_lanes(co, np.vstack((tris, tris[:, ::-1])), 3)
+    apart = [float(np.abs(a.joints - b.joints).max()) if a.joints.shape == b.joints.shape else math.inf
+             for a, b in zip(single, double)]
+    check(len(single) == len(double) == 3 and max(apart) <= 0.001,
+          "lanes double sided: the same 3 lanes, joints within 1 mm ({})".format([round(a, 5) for a in apart]))
+
+
+def test_lanes_detect_width():
+    # Detect: a lane per Chain Spacing of the area's width, one for a narrow strip and for hair wider than long.
+    co, tris, _ids = back_sheet(half_width=0.15)
+    measured = hairlanes.measure(co, tris, rig())
+    label, _short = hairlanes.areas(measured)
+    count = hairlanes.lane_count(measured, np.flatnonzero(label == hairlanes.BACK), hairlanes.across_back(measured),
+                                 0.08, 4)
+    check(count in (3, 4), "lanes detect: the back sheet gets 3 or 4 lanes ({:d})".format(count))
+    co, tris, _ranges = join([hair.cap(), side_strip(120.0, 0.30, 0.06)])
+    measured = hairlanes.measure(co, tris, rig())
+    label, _short = hairlanes.areas(measured)
+    count = hairlanes.lane_count(measured, np.flatnonzero(label == hairlanes.LEFT), hairlanes.across_side(measured),
+                                 0.08, 2)
+    check(count == 1, "lanes detect: a 6 cm side strip gets 1 lane ({:d})".format(count))
+    co, tris, _ids = bun_hair()
+    measured = hairlanes.measure(co, tris, rig(MIQOTE))
+    label, _short = hairlanes.areas(measured)
+    count = hairlanes.lane_count(measured, np.flatnonzero(label == hairlanes.BACK), hairlanes.across_back(measured),
+                                 0.08, 4)
+    check(count == 1, "lanes detect: a bun, wider than long, gets 1 lane ({:d})".format(count))
+
+
+def rig_counts_hair():
+    """`long_hair` with `back_sheet` and a `side_strip` 60 degrees from the front on each side, 30 cm long and 4 cm
+    wide: (points, triangles)."""
+    co, tris, _part, _names = long_hair()
+    sheet_co, sheet_tris, _ids = back_sheet()
+    strips_co, strips_tris, _ranges = join([side_strip(azimuth, 0.30, 0.04) for azimuth in (120.0, -120.0)])
+    return (np.vstack((co, sheet_co, strips_co)),
+            np.vstack((tris, sheet_tris + len(co), strips_tris + len(co) + len(sheet_co))))
+
+
+def by(chains, kind):
+    """The chains of ``kind`` among ``chains``, by order."""
+    return sorted((chain for chain in chains if chain.kind == kind), key=lambda chain: chain.order)
+
+
+def test_lanes_rig_counts():
+    # The whole rig with counts: as many chains of each area as asked, the left side's on +X, and with Hair Type
+    # Loose no ponytail.
+    co, tris = rig_counts_hair()
+    chains, made, short = hairlanes.plan(co, tris, rig(), counts=counts(back=3, left=2, right=1, bangs=1))
+    describe_columns(chains)
+    sides = by(chains, "side")
+    left = [chain for chain in sides if chain.joints[0][0] > 0.0]
+    right = [chain for chain in sides if chain.joints[0][0] < 0.0]
+    check(not short and len(by(chains, "back")) == 3 and len(left) == 2 and len(right) == 1 and len(sides) == 3,
+          "lanes rig counts: 3 back, 2 side on +X, 1 side on -X ({})".format(kinds_of(chains)))
+    bangs = len(by(chains, "bangs"))
+    check(made == {"back": 3, "ponytail": 0, "left": 2, "right": 1, "bangs": bangs} and bangs <= 1,
+          "lanes rig counts: made counts them ({}; {:d} bangs built)".format(made, bangs))
+    check(chains and all(chain.kind in hairrig.KINDS for chain in chains) and not by(chains, "ponytail"),
+          "lanes rig counts: every kind known, no ponytail ({})".format([chain.kind for chain in chains]))
+
+
+def test_lanes_left_right_apart():
+    # One chain per side: no side chain holds hair of both sides.
+    model_rig = rig()
+    co, tris = rig_counts_hair()
+    chains, _made, _short = hairlanes.plan(co, tris, model_rig, counts=counts(left=1, right=1))
+    area = hairing.vertex_areas(co, tris)
+    x = model_rig.model(co)[:, 0]
+    mixed = []
+    for chain in by(chains, "side"):
+        own, at = area[chain.vertices], x[chain.vertices]
+        mixed.append(float(min(own[at > 0.0].sum(), own[at < 0.0].sum()) / own.sum()))
+    check(len(mixed) == 2 and max(mixed) <= 0.02,
+          "lanes left and right: 2 side chains, each with at most 2 % of its area across X = 0 ({})".format(
+              [round(m, 4) for m in mixed]))
+
+
+def test_lanes_order_and_sheets():
+    # Name order by the first joint's angle, then its X; an area's chains share a sheet, the sheets numbered in that
+    # order; within a sheet the order runs from 0, +X first behind, front to back at the sides.
+    model_rig = rig()
+    co, tris = rig_counts_hair()
+    chains, _made, _short = hairlanes.plan(co, tris, model_rig, counts=counts(back=3, left=2, right=1, bangs=1))
+    describe_columns(chains)
+    keys = [(round(hairrig._angle(model_rig, chain.joints[0]), 6), chain.joints[0][0]) for chain in chains]
+    check(chains and keys == sorted(keys), "lanes order: the chains in name order")
+    areas = {}
+    for chain in chains:
+        side = float(np.sign(chain.joints[0][0])) if chain.kind == "side" else 0.0
+        areas.setdefault((chain.kind, side), []).append(chain)
+    sheets = [{chain.sheet for chain in mine} for mine in areas.values()]
+    check(all(len(mine) == 1 and min(mine) >= 0 for mine in sheets) and len(set.union(*sheets)) == len(areas),
+          "lanes order: each area one sheet of its own ({})".format(kinds_of(chains)))
+    seen = []
+    for chain in chains:
+        if chain.sheet not in seen:
+            seen.append(chain.sheet)
+    check(seen == list(range(len(seen))), "lanes order: the sheets numbered in list order ({})".format(seen))
+    check(all(sorted(chain.order for chain in mine) == list(range(len(mine))) for mine in areas.values()),
+          "lanes order: each sheet's order runs 0 to n - 1 ({})".format(kinds_of(chains)))
+    back = by(chains, "back")
+    check(len(back) == 3 and all(a.joints[0][0] > b.joints[0][0] for a, b in zip(back, back[1:])),
+          "lanes order: behind, +X first ({})".format([round(float(chain.joints[0][0]), 3) for chain in back]))
+    left = sorted(areas.get(("side", 1.0), []), key=lambda chain: chain.order)
+    angles = [hairrig._angle(model_rig, chain.joints[0]) for chain in left]
+    check(len(left) == 2 and angles == sorted(angles),
+          "lanes order: on a side, front first ({})".format([round(a, 1) for a in angles]))
+
+
+def test_lanes_area_without_hair():
+    # The back sheet alone: the sides and bangs asked for build nothing.
+    co, tris, _ids = back_sheet()
+    chains, made, _short = hairlanes.plan(co, tris, rig(), counts=counts(left=2, right=2, bangs=2))
+    check(made["left"] == made["right"] == made["bangs"] == 0 and made["back"] == len(by(chains, "back")) > 0
+          and len(chains) == made["back"],
+          "lanes without hair: no side or bangs chain, the back's built ({}, {})".format(made, kinds_of(chains)))
+
+
+def test_lanes_short_ring():
+    # Short hair: Bang Chains sectors around the whole head, a bangs chain each at most; Hair Type Ponytail ties
+    # nothing.
+    model_rig = rig()
+    co, tris = short_hair()
+    chains, made, short = hairlanes.plan(co, tris, model_rig, counts=counts(bangs=4))
+    describe_columns(chains)
+    print("      first joints' angles {}".format([round(hairrig._angle(model_rig, chain.joints[0]), 1)
+                                                  for chain in chains]))
+    check(short and all(chain.kind == "bangs" for chain in chains)
+          and made["bangs"] == len(chains) == 4 and made["back"] == 0,
+          "lanes short ring: short, 4 bangs chains ({}, {})".format(kinds_of(chains), made))
+    # One sector each, the first straight in front, the next toward +X, then behind, then -X.
+    ring = by(chains, "bangs")
+    turn = [round(hairrig._angle(model_rig, chain.joints[0]), 1) for chain in ring]
+    side = [round(float(model_rig.model(chain.joints[0][None])[0][0]), 3) for chain in ring]
+    check(len(ring) == 4 and [chain.order for chain in ring] == [0, 1, 2, 3]
+          and turn[0] < 45.0 and turn[2] > 135.0 and side[1] > 0.0 > side[3],
+          "lanes short ring: in order the front, +X, behind, -X (angles from the front {}, X {})".format(turn, side))
+    tied, tied_made, tied_short = hairlanes.plan(co, tris, model_rig, ponytail=True, counts=counts(bangs=4))
+    check(tied_short and tied_made == made and len(tied) == len(chains)
+          and all(a.kind == b.kind and np.array_equal(a.joints, b.joints) for a, b in zip(tied, chains)),
+          "lanes short ring: Hair Type Ponytail ties nothing, the same chains ({})".format(kinds_of(tied)))
+
+
+def test_lanes_loose_ties_nothing():
+    # Hair Type Loose: the tube down the back (`long_hair`'s ponytail) is back hair.
+    co, tris, _part, _names = long_hair()
+    chains, made, _short = hairlanes.plan(co, tris, rig(), counts=counts(back=2))
+    describe_columns(chains)
+    check(not by(chains, "ponytail") and len(by(chains, "back")) == 2 and made["back"] == 2 and made["ponytail"] == 0,
+          "lanes loose: no ponytail, 2 back chains ({}, {})".format(kinds_of(chains), made))
+
+
+def test_lanes_ponytail():
+    # Hair Type Ponytail: the tube down the back is the tail, its chains on it; two side by side, not crossing.
+    co, tris, part, names = long_hair()
+    tube = co[part == names.index("ponytail")]
+    for n in (1, 2):
+        chains, made, _short = hairlanes.plan(co, tris, rig(), ponytail=True, counts=counts(ponytail=n))
+        describe_columns(chains)
+        tails = by(chains, "ponytail")
+        off = [float(nearest(np.vstack((chain.joints, chain.tip)), tube).max()) for chain in tails]
+        check(len(tails) == n and made["ponytail"] == n and made["back"] == 0 and max(off, default=math.inf) <= 0.03,
+              "lanes ponytail: {:d} asked, {:d} ponytail chains within 3 cm of the tube ({} m; {})".format(
+                  n, len(tails), [round(o, 4) for o in off], made))
         if n == 2 and len(tails) == 2:
-            a, b = tails
-            check(a.joints[0][0] > 0.0 > b.joints[0][0] and abs(float(a.joints[0][0] + b.joints[0][0])) <= 0.02,
-                  "ponytail counts: 2 either side of straight behind ({:.3f}, {:.3f})".format(
-                      float(a.joints[0][0]), float(b.joints[0][0])))
+            check(not lanes_crossed(*tails) and tails[0].joints[0][0] > tails[1].joints[0][0],
+                  "lanes ponytail: 2 side by side, +X first, not crossing ({})".format(
+                      [round(float(chain.joints[0][0]), 3) for chain in tails]))
 
 
-def test_detect_counts():
-    # Detect: the counts the hair gets without any (here 3 back, 1 per side, 1 bangs); built with them, each area
-    # has as many chains as without. With Hair Type Ponytail, one ponytail chain.
+def test_lanes_budget():
+    # Over the budget the bones get longer: as many chains, the bones within it or 2 per chain.
     model_rig = rig()
-    co, tris, _parts = back_sheet()
-    extra = [side_strip(azimuth, 0.25, 0.03) for azimuth in (130.0, -130.0)]
-    extra.append(bangs_strip())
-    extra_co, extra_tris, _ids = join(extra)
-    co, tris = np.vstack((co, extra_co)), np.vstack((tris, extra_tris + len(co)))
-    auto, made, short = hairrig.plan_layout(co, tris, model_rig)
-    found, found_short = hairrig.detect_counts(co, tris, model_rig)
-    check(not short and not found_short and found == {"back": 3, "left": 1, "right": 1, "bangs": 1},
-          "detect: 3 back, 1 per side, 1 bangs ({}; {})".format(found, kinds_of(auto)))
-    _chains, again, _short = hairrig.plan_layout(co, tris, model_rig, counts=counts(**found))
-    check(again == made, "detect: built with them, as many chains per area as without ({} against {})".format(
-        again, made))
-    tied, _tied_short = hairrig.detect_counts(co, tris, model_rig, ponytail=True)
-    check(tied.get("ponytail") == 1 and "back" not in tied, "detect: Hair Type Ponytail finds 1 ponytail ({})".format(
-        tied))
+    co, tris = card_hair(300)
+    asked = counts(back=4, left=2, right=2, bangs=6)
+    free, _made, _short = hairlanes.plan(co, tris, model_rig, counts=asked)
+    most = sum(len(chain.joints) for chain in free)
+    # A budget halfway between the bones without one and two per chain: it bites, and it can be met.
+    budget = (most + 2 * len(free)) // 2
+    chains, _made, _short = hairlanes.plan(co, tris, model_rig, counts=asked, max_bones=budget)
+    bones = [len(chain.joints) for chain in chains]
+    check(2 * len(free) < budget < most and len(chains) == len(free) and min(bones, default=0) >= 2
+          and sum(bones) <= budget,
+          "lanes budget: {:d} bones without a budget, {:d} allowed: {:d} chains as without it ({:d}), bones {} ({:d}) "
+          "within it".format(most, budget, len(chains), len(free), bones, sum(bones)))
+    # A budget no rig can meet: every chain at two bones, none dropped.
+    chains, _made, _short = hairlanes.plan(co, tris, model_rig, counts=asked, max_bones=len(free))
+    bones = [len(chain.joints) for chain in chains]
+    check(len(chains) == len(free) and all(b == 2 for b in bones),
+          "lanes budget: {:d} allowed: {:d} chains, 2 bones each ({})".format(len(free), len(chains), bones))
 
 
-def test_forward_strand():
-    # Back hair, a side strip in front of the ear and a strand rooted behind the ear that falls forward over the
-    # shoulder onto the chest (40 degrees from the front): the strand is side hair, the side sheet's rear column, and
-    # the back's 3 columns keep to the back hair. As back hair it would join the outer back column and pull that
-    # column's chain off the back.
+def test_lanes_detect():
+    # Detect: within the ranges, 3 or 4 back, 1 a side, only the areas with hair; short hair only bangs.
     model_rig = rig()
-    co, tris, _parts = back_sheet()
-    a, p = math.radians(45.0), math.radians(95.0)
-    top = hair._onto_head(np.array(((math.sin(p) * math.sin(a), math.sin(p) * math.cos(a), math.cos(p)),)), 0.01)[0][0]
-    head = np.asarray(model_rig.by_name[hairing.HEAD].head, dtype=np.float64) + model_rig.offset
-    ahead = math.radians(40.0)
-    bottom = np.array((head[0] + 0.14 * math.sin(ahead), head[1] - 0.14 * math.cos(ahead), top[2] - 0.38))
-    strand = hair.strip(top, bottom, 0.03, np.array((math.cos(a), -math.sin(a), 0.0)))
-    extra_co, extra_tris, (front_ids, strand_ids) = join([side_strip(118.0, 0.30, 0.04), strand])
-    front_ids, strand_ids = front_ids + len(co), strand_ids + len(co)
-    co, tris = np.vstack((co, extra_co)), np.vstack((tris, extra_tris + len(co)))
-    locks = hairrig.find_locks(co, tris, model_rig)
-    mine = [lock for lock in locks if np.isin(lock.vertices, strand_ids).any()]
-    ends = [(round(hairrig._angle(model_rig, lock.root), 1), round(hairrig._angle(model_rig, hairrig.spine(co, lock)[-1]),
-                                                                    1)) for lock in mine]
-    check(len(mine) == 1 and np.isin(mine[0].vertices, strand_ids).all() and ends[0][0] > hairrig.SIDE_ANGLE
-          and ends[0][1] <= hairrig.SIDE_ANGLE,
-          "forward strand: the strand is one lock, rooted behind SIDE_ANGLE and ending in front of it (root and tip "
-          "angles {})".format(ends))
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    describe_columns(chains)
-    held = [chain for chain in chains if np.isin(chain.vertices, strand_ids).any()]
-    side = columns_by_sheet(chains).get(held[0].sheet, []) if len(held) == 1 and held[0].sheet >= 0 else []
-    check(len(held) == 1 and held[0].kind == "side" and np.isin(held[0].vertices, strand_ids).all()
-          and len(side) == 2 and side[1] is held[0] and np.isin(side[0].vertices, front_ids).all(),
-          "forward strand: the strand is side hair, its side sheet's rear column behind the front strip ({})".format(
-              [(chain.kind, chain.sheet, chain.order, int(np.isin(chain.vertices, strand_ids).sum())) for chain in chains]))
-    back = back_columns("forward strand", chains)
-    far = [round(off_hair(chain, co), 3) for chain in back] if back is not None else None
-    check(back is not None and not any(np.isin(chain.vertices, strand_ids).any() for chain in back)
-          and max(far) <= hairrig.SPINE_REACH,
-          "forward strand: the back columns hold none of the strand and keep to their hair ({} m off)".format(far))
-    check(len(chains) == 5, "forward strand: 5 chains, 3 back and 2 side ({:d})".format(len(chains)))
+    co, tris = rig_counts_hair()
+    found, short = hairlanes.detect(co, tris, model_rig)
+    check(not short and all(hairrig.COUNT_RANGES[name][0] <= count <= hairrig.COUNT_RANGES[name][1]
+                            for name, count in found.items())
+          and found.get("back") in (3, 4) and found.get("left") == 1 and found.get("right") == 1
+          and "ponytail" not in found,
+          "lanes detect: 3 or 4 back, 1 a side, no ponytail ({})".format(found))
+    co, tris, _ids = back_sheet()
+    found, _short = hairlanes.detect(co, tris, model_rig)
+    check(set(found) == {"back"}, "lanes detect: the back sheet alone has only back ({})".format(found))
+    co, tris = short_hair()
+    found, short = hairlanes.detect(co, tris, model_rig)
+    check(short and set(found) == {"bangs"}, "lanes detect: short hair, only bangs ({}, {})".format(found, short))
 
 
-def test_light_column():
-    # Two flat strips standing up from the crown: two light locks, one column, and a column's chain isn't light.
+def test_lanes_no_counts():
+    # Without counts every area gets as many chains as Detect gives it.
+    model_rig = rig()
+    co, tris = rig_counts_hair()
+    found, _short = hairlanes.detect(co, tris, model_rig)
+    _chains, made, _short = hairlanes.plan(co, tris, model_rig)
+    check(made == {name: found.get(name, 0) for name in hairrig.AREAS},
+          "lanes no counts: as many chains as Detect gives ({} against {})".format(made, found))
+
+
+def test_lanes_empty():
+    # Nothing hangs, or no mesh: no chains, nothing detected.
+    model_rig = rig()
+    nothing = ([], dict.fromkeys(hairrig.AREAS, 0), False)
+    cap_co, cap_tris, _ranges = join([hair.cap()])
+    for name, (co, tris) in (("a cap alone", (cap_co, cap_tris)), ("no triangles", (cap_co, np.zeros((0, 3), int)))):
+        check(hairlanes.plan(co, tris, model_rig) == nothing and hairlanes.detect(co, tris, model_rig) == ({}, False),
+              "lanes empty: {:s} plans and detects nothing".format(name))
+
+
+def test_lanes_moved_rig():
+    # Hair whose armature has its head elsewhere: the same chains, moved.
+    model_rig = rig()
+    co, tris = rig_counts_hair()
+    offset = np.array((0.3, -0.2, 0.1))
+    asked = counts(back=3, left=2, right=1, bangs=1)
+    chains, _made, _short = hairlanes.plan(co, tris, model_rig, counts=asked)
+    moved, _made, _short = hairlanes.plan(co + offset, tris, model_rig.moved(offset), counts=asked)
+    check(chains and len(moved) == len(chains) and all(
+        a.kind == b.kind and a.joints.shape == b.joints.shape
+        and np.allclose(a.joints, b.joints + offset, rtol=0.0, atol=1e-6)
+        and np.allclose(a.tip, b.tip + offset, rtol=0.0, atol=1e-6) for a, b in zip(moved, chains)),
+        "lanes moved rig: the same chains, moved by the offset ({} vs {})".format(kinds_of(moved), kinds_of(chains)))
+
+
+def test_lanes_card_hair_time():
+    # 3000 cards (66,000 vertices), counts detected: no slower than CARDS_TIME allows.
+    model_rig = rig()
+    co, tris = card_hair(3000)
+    started = time.perf_counter()
+    chains, _made, _short = hairlanes.plan(co, tris, model_rig)
+    took = time.perf_counter() - started
+    print("      plan: {:.3f} s for 3000 cards, {:d} vertices, {:d} chains".format(took, len(co), len(chains)))
+    check(chains and took <= 2.0 * CARDS_TIME + 1.0,
+          "lanes card hair time: {:.2f} s (at most {:.2f} s)".format(took, 2.0 * CARDS_TIME + 1.0))
+
+
+def test_plan_layout_is_lanes():
+    # plan_layout, plan_rig and detect_counts are the lane planner's; the lock planner is gone.
+    model_rig = rig()
+    co, tris = rig_counts_hair()
+    asked = counts(back=3)
+    chains, made, short = hairrig.plan_layout(co, tris, model_rig, counts=asked)
+    lanes, lanes_made, lanes_short = hairlanes.plan(co, tris, model_rig, counts=asked)
+    check(chains and len(chains) == len(lanes) and made == lanes_made and short == lanes_short and all(
+        a.kind == b.kind and a.sheet == b.sheet and a.order == b.order and a.light == b.light
+        and np.array_equal(a.joints, b.joints) and np.array_equal(a.tip, b.tip) for a, b in zip(chains, lanes)),
+        "plan layout: the lane planner's chains, made and short ({}, {})".format(kinds_of(chains), made))
+    first = hairrig.plan_rig(co, tris, model_rig, counts=asked)
+    check(len(first) == len(chains) and all(np.array_equal(a.joints, b.joints) for a, b in zip(first, chains)),
+          "plan layout: plan_rig gives its chains")
+    found = hairrig.detect_counts(co, tris, model_rig)
+    check(found == hairlanes.detect(co, tris, model_rig), "plan layout: detect_counts is Detect's ({})".format(found))
+    check(not hasattr(hairrig, "find_locks"), "plan layout: the lock planner is gone")
+    try:
+        hairrig.plan_layout(co, tris, model_rig, spacing=0.0)
+        refused = None
+    except ValueError as error:
+        refused = str(error)
+    check(refused == "The chain spacing must be above 0", "plan layout: refuses a spacing of 0 ({})".format(refused))
+
+
+def real_back_lanes(name, path):
+    """A real hair (`hair_models.decode`) planned with Back 3 and Hair Type Loose: its 3 back chains of equal bones,
+    rows within 2 cm, none crossing, and every chain's joints within 3 cm of its hair."""
+    if not os.path.isfile(path):
+        print("skip: no {:s} hair at {:s}".format(name, path))
+        return
+    import hair_models
+    with open(path, "rb") as handle:
+        points, tris, _held = hair_models.decode(handle.read())
     model_rig = rig(MIQOTE)
-    crown = hair.top(MIQOTE)
-    co, tris, _ranges = join([hair.cap(race=MIQOTE)] + [
-        hair.strip((x, 0.01, crown + 0.01), (x, 0.03, crown + 0.11), 0.02, (1.0, 0.0, 0.0)) for x in (-0.012, 0.012)])
-    locks = hairrig.find_locks(co, tris, model_rig)
-    check(len(locks) == 2 and all(lock.light for lock in locks), "light column: two light locks ({})".format(
-        [lock.light for lock in locks]))
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    describe_columns(chains)
-    check(len(chains) == 1 and not chains[0].light, "light column: one chain, not light ({})".format(
-        [(chain.kind, chain.light) for chain in chains]))
+    cap = hairing.cap_depth(points, tris, model_rig)
+    started = time.perf_counter()
+    chains, made, _short = hairlanes.plan(points, tris, model_rig, cap=cap, counts=counts(back=3))
+    took = time.perf_counter() - started
+    gaps = [float(gap) for gap in model_rig.scalp_gap(np.array([chain.joints[0] for chain in chains]).reshape(-1, 3),
+                                                      cap)]
+    print("      plan: {:.3f} s for {:d} vertices; {}".format(took, len(points), made))
+    chain_table(chains, gaps)
+    back = by(chains, "back")
+    bones = [len(chain.joints) for chain in back]
+    apart = max((float(np.abs(a.joints[:, 2] - b.joints[:, 2]).max()) for a in back for b in back
+                 if len(a.joints) == len(b.joints)), default=math.inf)
+    check(len(back) == 3 and len(set(bones)) == 1 and apart <= 0.02,
+          "{:s}: 3 back chains ({:d}) of equal bones ({}), rows within 2 cm ({:.4f} m)".format(
+              name.lower(), len(back), bones, apart))
+    check(len(back) == 3 and not any(lanes_crossed(a, b) for a, b in zip(back, back[1:])),
+          "{:s}: no back chains crossed".format(name.lower()))
+    far = [off_hair(chain, points) for chain in chains]
+    check(chains and max(far) <= 0.03, "{:s}: every joint within 3 cm of its hair (up to {:.4f} m)".format(
+        name.lower(), max(far, default=math.nan)))
 
 
-def test_budget():
-    # The sheet's 3 column chains take 14 bones. With room for 10, the bones get longer: still 3 chains, each
-    # with the same hair as unbudgeted.
-    model_rig = rig()
-    co, tris, _parts = one_piece_long_hair()
-    budget = 10
-    free = hairrig.plan_rig(co, tris, model_rig)
-    chains = hairrig.plan_rig(co, tris, model_rig, max_bones=budget)
-    describe_columns(chains)
-    check(len(free) == 3 and sum(len(chain.joints) for chain in free) == 14,
-          "budget: unbudgeted, 3 chains of 14 bones ({})".format([len(chain.joints) for chain in free]))
-    back = back_columns("budget", chains)
-    check(back is not None and len(chains) == 3, "budget: ...and no other chain ({:d})".format(len(chains)))
-    check(chains and sum(len(chain.joints) for chain in chains) <= budget
-          and all(len(chain.joints) >= 2 for chain in chains),
-          "budget: at most {:d} bones, at least 2 per chain ({})".format(budget, [len(chain.joints) for chain in chains]))
-    check(len(chains) == len(free) and all(np.array_equal(np.sort(a.vertices), np.sort(b.vertices))
-                                           for a, b in zip(chains, free)),
-          "budget: each chain keeps its unbudgeted twin's vertices")
-    check(abs(sum(chain.area for chain in chains) - sum(chain.area for chain in free)) <= 1e-9,
-          "budget: the chains keep the hair's area")
-    keys = [(round(chain.angle, 6), chain.joints[0][0]) for chain in chains]
-    check(keys == sorted(keys), "budget: the chains stay in name order")
-    sideways = [max(abs(float(chain.joints[0][0] - end[0])) for end in (chain.joints[-1], chain.tip))
-                for chain in chains]
-    check(chains and all(side <= 2.0 * hairrig.LOCK_WIDTH for side in sideways),
-          "budget: no chain runs across the sheet (first joint to last joint and tip {} m sideways)".format(
-              [round(side, 3) for side in sideways]))
+def test_lanes_maeve():
+    real_back_lanes("Maeve", MAEVE)
 
 
-def test_lone_kind_survives():
-    # A bun on the crown (a light back chain, the only one of its kind) and two ponytails: over the budget the
-    # bones get longer until every chain has 2 (6 bones), then one ponytail merges into the other, and the bun
-    # keeps its chain.
-    model_rig = rig(MIQOTE)
-    crown = hair.top(MIQOTE)
-    co, tris, (_cap, bun_ids, _left, _right) = join(
-        [hair.cap(race=MIQOTE), hair.tube((0.0, 0.0, crown + 0.01), (0.0, 0.0, crown + 0.11), 0.03)]
-        + [hair.tube((sign * 0.08, 0.09, 1.50), (sign * 0.10, 0.14, 1.10), 0.035) for sign in (-1.0, 1.0)])
-    free = hairrig.plan_rig(co, tris, model_rig)
-    describe_chains(free, co, [])
-    shape = sorted((chain.kind, len(chain.joints)) for chain in free)
-    check(shape == [("back", 2), ("ponytail", 5), ("ponytail", 5)]
-          and all(chain.light for chain in free if chain.kind == "back"),
-          "lone kind: unbudgeted, two ponytails of 5 bones and the bun's light back chain of 2 ({})".format(
-              [(chain.kind, len(chain.joints), chain.light) for chain in free]))
-    chains = hairrig.plan_rig(co, tris, model_rig, max_bones=5)
-    describe_chains(chains, co, [])
-    bun = [chain for chain in chains if np.isin(chain.vertices, bun_ids).any()]
-    check(len(chains) == 2 and sum(len(chain.joints) for chain in chains) <= 5 and len(bun) == 1
-          and np.isin(bun[0].vertices, bun_ids).all() and bun[0].light,
-          "lone kind: with room for 5 bones, 2 chains, the bun's light and only the bun ({})".format(
-              [(chain.kind, len(chain.joints), chain.light) for chain in chains]))
+def test_lanes_briar():
+    real_back_lanes("Briar", BRIAR)
 
 
 def card_hair(count, seed=0):
@@ -1100,108 +1488,35 @@ def card_hair(count, seed=0):
     return co, tris
 
 
-def test_card_hair_kinds():
-    # Card hair: 300 cards, each its own loose part kept whole (a single strand), 4 bones each: flat, so a sheet
-    # cut into columns, slices of the hair around the back, not ponytails.
-    model_rig = rig()
-    co, tris = card_hair(300)
-    spaced = hairrig.plan_rig(co, tris, model_rig)
-    describe_chains(spaced, co, [])
-    far = [off_hair(chain, co) for chain in spaced]
-    check(spaced and sum(len(chain.joints) for chain in spaced) <= hairrig.MAX_HAIR_BONES
-          and max(far) <= hairrig.SPINE_REACH,
-          "card hair: spaced out, within the budget and on the hair ({:d} chains, up to {:.4f} m off; {})".format(
-              len(spaced), max(far, default=math.nan), [chain.kind for chain in spaced]))
-    # Their kinds: side hair toward the ears, back hair behind, no bangs. A card is flat, never a ponytail
-    # (PONYTAIL_ROUND).
-    card = len(card_hair(1)[0])
-    kinds = [(chain.kind, round(chain.angle, 1), len(chain.vertices)) for chain in spaced]
-    print("      spaced kinds (kind, angle, vertices; {:d} per card):".format(card), kinds)
-    check(spaced and all((kind == "side") == (angle <= hairrig.SIDE_ANGLE) for kind, angle, _count in kinds)
-          and all(kind in ("side", "back") for kind, _angle, _count in kinds),
-          "card hair: spaced out, side hair to the side and back hair behind ({})".format(kinds))
-    behind = [chain for chain in spaced if chain.angle > hairrig.SIDE_ANGLE]
-    check(behind and all(chain.kind == "back" for chain in behind),
-          "card hair: every chain behind the head is back hair ({})".format([chain.kind for chain in behind]))
-    # At the slider's minimum spacing, narrower columns: every chain still on the hair.
-    dense = hairrig.plan_rig(co, tris, model_rig, spacing=0.02)
-    far = [off_hair(chain, co) for chain in dense]
-    check(dense and sum(len(chain.joints) for chain in dense) <= hairrig.MAX_HAIR_BONES
-          and max(far) <= hairrig.SPINE_REACH,
-          "card hair: at spacing 0.02 within the budget and on the hair ({:d} chains, up to {:.4f} m off)".format(
-              len(dense), max(far, default=math.nan)))
-    # A ponytail in two layers, a tube in a tube (two loose parts, each kept whole, their roots twins): merged
-    # unbudgeted, it is still one ponytail.
-    co, tris, _ranges = join([hair.cap(), hair.tube((0.0, 0.105, 1.53), (0.0, 0.16, 1.11), 0.035),
-                              hair.tube((0.0, 0.105, 1.53), (0.0, 0.16, 1.11), 0.028)])
-    free = hairrig.plan_rig(co, tris, model_rig)
-    chains = hairrig.plan_rig(co, tris, model_rig, max_bones=5)
-    describe_chains(chains, co, [])
-    check(len(free) == 1 and free[0].kind == "ponytail" and free[0].whole and len(chains) == 1
-          and chains[0].kind == "ponytail" and chains[0].whole,
-          "card hair: a ponytail in two layers merged stays one ponytail ({}, {})".format(
-              [chain.kind for chain in free], [chain.kind for chain in chains]))
-
-
-def test_card_hair_time():
-    # Card hair of 3000 cards (66,000 vertices): the cards merge one at a time into a few column locks, each merge
-    # measuring only the locks it merges, not the whole hair.
-    model_rig = rig()
-    co, tris = card_hair(3000)
-    started = time.perf_counter()
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    took = time.perf_counter() - started
-    print("      plan_rig: {:.3f} s for 3000 cards, {:d} vertices".format(took, len(co)))
-    check(chains and sum(len(chain.joints) for chain in chains) <= hairrig.MAX_HAIR_BONES,
-          "card hair time: the cards fit the budget ({:d} chains)".format(len(chains)))
-    check(took <= 2.0 * CARDS_TIME + 1.0, "card hair time: at most twice as long as before the columns, plus a "
-          "second ({:.2f} s, {:.3f} s before)".format(took, CARDS_TIME))
-
-
-def test_moved_hair():
-    model_rig = rig()
-    co, tris, _part, _names = long_hair()
-    offset = np.array((0.3, 0.1, 0.05))
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    moved = hairrig.plan_rig(co + offset, tris, model_rig.moved(offset))
-    check(chains and len(moved) == len(chains) and all(
-        a.kind == b.kind and len(a.joints) == len(b.joints)
-        and np.allclose(a.joints, b.joints + offset, rtol=0.0, atol=1e-6)
-        and np.allclose(a.tip, b.tip + offset, rtol=0.0, atol=1e-6) for a, b in zip(moved, chains)),
-        "moved hair: the same kinds and bone counts, the joints moved by the offset ({} vs {})".format(
-            [(chain.kind, len(chain.joints)) for chain in moved],
-            [(chain.kind, len(chain.joints)) for chain in chains]))
-
-
 # -----------------------------------------------------------------------------
-# What hangs (by the scalp) and where locks start
+# What hangs (by the scalp) and where chains start
 
-def root_gaps(chains, co, tris, model_rig):
-    """How far each chain's first joint is from the scalp, beyond the hair's cap depth."""
+def chain_starts(chains, co, tris, model_rig):
+    """Where each chain starts: (its first joint's distance from the scalp beyond the hair's cap depth, how far in Z
+    its first joint lies from where its hair may start), and whether that is at the scalp. Its hair may start at the
+    lower of its own hair's top and the scalp's lower edge in its hair's direction (the area-weighted median of
+    `hairlanes.Hair.edge` over its vertices, the finite ones): hanging hair's chains start no higher than that edge
+    (the design's section 2, BELOW_EDGE), and hair that never comes within ROOT_REACH of the scalp starts at its top.
+    A chain starts at the scalp when its first joint lies within ROOT_REACH of the scalp or within 3 cm in Z of
+    that start."""
     cap = hairing.cap_depth(co, tris, model_rig)
-    return [float(model_rig.scalp_gap(chain.joints[:1], cap)[0]) for chain in chains]
+    measured = hairlanes.measure(co, tris, model_rig, cap)
+    starts = []
+    for chain in chains:
+        gap = float(model_rig.scalp_gap(chain.joints[:1], cap)[0])
+        on = np.isin(measured.index, chain.vertices)
+        start = float(measured.at[on, 2].max())
+        edge, weight = measured.edge[on], measured.area[on] + 1e-12
+        known = np.isfinite(edge)
+        if known.any():
+            start = min(start, float(hairlanes._quantiles(edge[known], weight[known], 0.5)))
+        down = abs(float(model_rig.model(chain.joints[:1])[0][2]) - start)
+        starts.append((gap, down, gap <= hairrig.ROOT_REACH or down <= 0.03))
+    return starts
 
 
-def root_gaps_by_kind(locks, co, tris, model_rig):
-    """The root gaps (from the scalp, beyond the hair's cap depth) of the locks (of `find_locks`): (natural, others),
-    natural being those rooted next to held hair (exempt from ROOT_REACH), the others rooted where they come
-    closest to the scalp (within ROOT_REACH)."""
-    cap = hairing.cap_depth(co, tris, model_rig)
-    weld, count = fitting.weld_groups(co, fitting.WELD_DISTANCE)
-    held = np.ones(count, dtype=bool)
-    held[weld] = ~hairrig._hanging(model_rig.scalp(co), model_rig.head_distance(co), cap)
-    t = weld[np.asarray(tris, dtype=np.int64)]
-    edges = np.vstack((t[:, [0, 1]], t[:, [1, 2]], t[:, [2, 0]]))
-    next_to_held = np.zeros(count, dtype=bool)
-    next_to_held[edges[held[edges[:, 1]], 0]] = True
-    next_to_held[edges[held[edges[:, 0]], 1]] = True
-    natural, others = [], []
-    for lock in locks:
-        own = ~lock.joined
-        roots = weld[lock.vertices[own][lock.distance[own] <= 1e-9]]
-        gap = float(model_rig.scalp_gap(lock.root[None], cap)[0])
-        (natural if (next_to_held[roots] & ~held[roots]).any() else others).append(gap)
-    return natural, others
+def describe_starts(starts):
+    return [(round(gap, 4), round(down, 4)) for gap, down, _ok in starts]
 
 
 def flat_fringe():
@@ -1238,6 +1553,14 @@ def neck_parts(loose=False, bottom=NECK_BOTTOM, rows=30):
     return parts
 
 
+def fringe_and_neck():
+    """`neck_hair` (no loose layer) with `flat_fringe`'s fringe in front, its own loose part: hair that isn't short,
+    so its fringe hangs by its drop. Returns (points, triangles, {"cap", "sheet", "fringe": indices})."""
+    fringe = hair.patch(np.arange(35.0, 116.0, 5.0), np.arange(165.0, 196.0, 7.5), 0.012, MIQOTE)
+    co, tris, ranges = join(neck_parts() + [fringe])
+    return co, tris, dict(zip(("cap", "sheet", "fringe"), ranges))
+
+
 def bun_hair():
     """The scalp cap on c0801 and a bun: a tube 3 cm wide standing 10 cm up from the crown, its own loose
     part. Returns (points, triangles, {"cap": indices, "bun": indices})."""
@@ -1247,106 +1570,95 @@ def bun_hair():
     return co, tris, {"cap": cap_ids, "bun": bun_ids}
 
 
-def test_flat_fringe():
-    model_rig = rig(MIQOTE)
-    co, tris, parts = flat_fringe()
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    describe_chains(chains, co, hairrig.find_locks(co, tris, model_rig))
-    gaps = root_gaps(chains, co, tris, model_rig)
-    fringe = [(chain, gap) for chain, gap in zip(chains, gaps) if np.isin(chain.vertices, parts["fringe"]).all()]
-    check(any(chain.kind == "bangs" for chain, _gap in fringe),
-          "flat fringe: a fringe lying 1.2 cm off the forehead gets a bangs chain ({})".format(
-              [chain.kind for chain in chains]))
-    check(fringe and all(gap <= hairrig.ROOT_REACH for _chain, gap in fringe),
-          "flat fringe: ...rooted at the hairline ({} m from the scalp)".format([round(gap, 4) for _c, gap in fringe]))
-    check(len(fringe) == len(chains) and all(not chain.light for chain in chains),
-          "flat fringe: no other chain, none light ({})".format([(chain.kind, chain.light) for chain in chains]))
+def off_hair(chain, co):
+    """How far a chain's joints and tip lie from its hair at most (meters)."""
+    own = co[chain.vertices]
+    return max(float(np.min(np.linalg.norm(own - point, axis=1))) for point in np.vstack((chain.joints, chain.tip)))
 
 
-def test_neck_layer():
+def test_lanes_flat_fringe():
+    # A fringe lying 1.2 cm off the forehead, with the neck sheet behind it, gets a bangs chain made of it, rooted at
+    # the hairline (`chain_starts`). Alone on the cap the fringe is short hair, whose levels are the distance from
+    # the scalp: its middle line runs 2.99 cm, under MIN_CHAIN_LENGTH, so it gets no chain (the planner's rule, not
+    # a fault). That is 0.1 mm under the limit, so the case is only checked to be short hair and to plan without
+    # raising, not to build nothing.
     model_rig = rig(MIQOTE)
-    co, tris, parts = neck_hair()
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    describe_chains(chains, co, hairrig.find_locks(co, tris, model_rig))
-    gaps = root_gaps(chains, co, tris, model_rig)
-    back = [(chain, gap) for chain, gap in zip(chains, gaps) if chain.kind == "back"]
-    check(len(back) >= 1 and len(back) == len(chains) and all(gap <= hairrig.ROOT_REACH for _chain, gap in back),
-          "neck layer: back chains start at the scalp ({})".format(
-              [(chain.kind, round(gap, 4)) for chain, gap in zip(chains, gaps)]))
+    alone, made, short = hairlanes.plan(*flat_fringe()[:2], model_rig)
+    check(short and sum(made.values()) == made["bangs"] == len(alone),
+          "lanes flat fringe: the fringe alone is short hair, nothing but bangs planned ({})".format(made))
+    co, tris, parts = fringe_and_neck()
+    chains, made, _short = hairlanes.plan(co, tris, model_rig)
+    describe_columns(chains)
+    bangs = [chain for chain in chains if chain.kind == "bangs"]
+    check(made["bangs"] == len(bangs) >= 1 and all(np.isin(chain.vertices, parts["fringe"]).all() for chain in bangs),
+          "lanes flat fringe: the fringe gets a bangs chain made of it ({}, {})".format(kinds_of(chains), made))
+    starts = chain_starts(bangs, co, tris, model_rig)
+    check(bangs and all(ok for _gap, _down, ok in starts),
+          "lanes flat fringe: ...rooted at the hairline (from the scalp, from its start: {} m)".format(
+              describe_starts(starts)))
+
+
+def test_lanes_neck_layer():
+    # A sheet down the neck from the nape: its back chains start at the scalp (`chain_starts`) at the nape hairline,
+    # not low on the neck.
+    model_rig = rig(MIQOTE)
+    co, tris, _parts = neck_hair()
+    chains, made, _short = hairlanes.plan(co, tris, model_rig)
+    describe_columns(chains)
+    starts = chain_starts(chains, co, tris, model_rig)
+    check(chains and made["back"] == len(chains) and all(ok for _gap, _down, ok in starts),
+          "lanes neck layer: back chains start at the scalp ({}, {} m)".format(made, describe_starts(starts)))
     heights = [float(chain.joints[0][2]) for chain in chains]
-    check(chains and min(heights) >= 1.36, "neck layer: ...at the nape hairline, not low on the neck (z {})".format(
+    check(chains and min(heights) >= 1.36, "lanes neck layer: ...at the nape hairline, not low on the neck (z {})".format(
         [round(z, 3) for z in heights]))
 
 
-def test_neck_only_layer():
+def test_lanes_neck_only_layer():
+    # The neck sheet with its lower half doubled 5 mm inside it, a loose layer lying wholly on the neck: no chain
+    # starts on it. As many chains as without the layer, each starting at the scalp at the nape hairline.
     model_rig = rig(MIQOTE)
     co, tris, parts = neck_hair(loose=True)
-    layer = parts["layer"]
+    cap = hairing.cap_depth(co, tris, model_rig)
     print("      the loose layer is {:.3f} m from the scalp at its closest".format(
-        float(model_rig.scalp_gap(co[layer], hairing.cap_depth(co, tris, model_rig)).min())))
-    locks = hairrig.find_locks(co, tris, model_rig)
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    describe_chains(chains, co, locks)
-    without = hairrig.plan_rig(*neck_hair()[:2], model_rig)
-    check(chains and len(chains) == len(without) and all(
-        np.allclose(a.joints[0], b.joints[0]) for a, b in zip(chains, without)),
-        "neck only layer: no chain of its own, the chains start where they do without it ({:d}, {:d})".format(
-            len(chains), len(without)))
-    holding = [lock for lock in locks if np.isin(lock.vertices, layer).any()]
-    joined = all(lock.joined[np.isin(lock.vertices, layer)].all() for lock in holding)
-    kinds = [None if hairrig.plan_chain(co, lock) is None else hairrig.plan_chain(co, lock).kind for lock in holding]
-    held = sum(int(np.isin(lock.vertices, layer).sum()) for lock in holding)
-    check(holding and held == len(layer) and joined and all(kind == "back" for kind in kinds),
-          "neck only layer: joins a back chain's lock ({:d} of {:d} vertices, joined {!s}, {})".format(
-              held, len(layer), joined, kinds))
+        float(model_rig.scalp_gap(co[parts["layer"]], cap).min())))
+    chains, _made, _short = hairlanes.plan(co, tris, model_rig)
+    describe_columns(chains)
+    without, _made, _short = hairlanes.plan(*neck_hair()[:2], model_rig)
+    starts = chain_starts(chains, co, tris, model_rig)
+    heights = [float(chain.joints[0][2]) for chain in chains]
+    check(chains and len(chains) == len(without) and all(ok for _gap, _down, ok in starts) and min(heights) >= 1.36,
+          "lanes neck only layer: no chain of its own ({:d}, {:d} without), every chain at the scalp ({} m) at the "
+          "nape hairline (z {})".format(len(chains), len(without), describe_starts(starts),
+                                        [round(z, 3) for z in heights]))
+    check(len(chains) == len(without) and all(np.allclose(a.joints[0], b.joints[0]) for a, b in zip(chains, without)),
+          "lanes neck only layer: the chains start where they do without it ({})".format(
+              [np.round(a.joints[0] - b.joints[0], 4).tolist() for a, b in zip(chains, without)]))
+    held = np.isin(parts["layer"], np.concatenate([chain.vertices for chain in chains if chain.kind == "back"]
+                                                  or [np.zeros(0, dtype=np.int64)]))
+    check(bool(held.all()), "lanes neck only layer: the layer's hair is in the back chains ({:d} of {:d} vertices)".format(
+        int(held.sum()), len(held)))
 
 
-def test_cap_rim():
+def test_lanes_cap_rim():
+    # A cap alone, and a cap whose rim behind the head reaches just below the nape hairline (it hangs, but too little
+    # for a chain): no chain on the neck.
     model_rig = rig(MIQOTE)
     co, tris, _ranges = join([hair.cap(race=MIQOTE)])
-    check(not hairrig.find_locks(co, tris, model_rig) and not hairrig.plan_rig(co, tris, model_rig),
-          "cap rim: a cap alone has no lock and no chain")
-    # The cap's rim behind the head reaching just below the nape hairline: it hangs, but too little for a chain.
+    check(not hairlanes.plan(co, tris, model_rig)[0], "lanes cap rim: a cap alone has no chain")
     cap, faces, ring, azimuth = back_ring(24, MIQOTE)
     tops = cap[ring[np.abs(azimuth[ring]) <= 90.0 + 1e-6]]
     co, tris, (_cap_ids, rim_ids) = join([(cap, faces), hair.down_neck(tops, 1.41, 7, 0.01, MIQOTE)])
     rim = rim_ids[-len(tops):]
     share = model_rig.scalp(co[rim])
-    print("      the rim's lowest row: z {:.3f}, scalp share {:.2f} to {:.2f}".format(
-        float(co[rim, 2].mean()), float(share.min()), float(share.max())))
-    locks = hairrig.find_locks(co, tris, model_rig)
-    describe(locks, co, model_rig)
-    with_chain = [lock for lock in locks if hairrig.plan_chain(co, lock) is not None]
-    check(share.min() < hairing.SCALP_HALF and not hairrig.plan_rig(co, tris, model_rig)
-          and not any(np.isin(lock.vertices, rim).any() for lock in with_chain),
-          "cap rim: a rim reaching below the hairline gets no chain ({:d} locks)".format(len(locks)))
+    chains, _made, _short = hairlanes.plan(co, tris, model_rig)
+    check(share.min() < hairing.SCALP_HALF and not chains,
+          "lanes cap rim: a rim reaching below the hairline (scalp share {:.2f} to {:.2f}) gets no chain ({})".format(
+              float(share.min()), float(share.max()), kinds_of(chains)))
 
 
-def test_bun():
-    model_rig = rig(MIQOTE)
-    co, tris, parts = bun_hair()
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    describe_chains(chains, co, hairrig.find_locks(co, tris, model_rig))
-    gaps = root_gaps(chains, co, tris, model_rig)
-    check(len(chains) == 1 and chains[0].light and np.isin(chains[0].vertices, parts["bun"]).all(),
-          "bun: the bun gets one light chain ({}, {} m from the scalp)".format(
-              [(chain.kind, chain.light) for chain in chains], [round(gap, 4) for gap in gaps]))
-    # Rooted just behind the head's axis and leaning forward over it, the bun's tip lies in front of SIDE_ANGLE: it
-    # stands up, so it stays back hair.
-    head = np.asarray(model_rig.by_name[hairing.HEAD].head, dtype=np.float64) + model_rig.offset
-    crown = hair.top(MIQOTE, 0.0, head[1] + 0.035)
-    co, tris, _ranges = join([hair.cap(race=MIQOTE), hair.tube((0.0, head[1] + 0.035, crown + 0.01),
-                                                               (0.0, head[1] - 0.03, crown + 0.11), 0.02,
-                                                               bend=(0.0, 0.0, 0.0))])
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    ends = [(round(chain.angle, 1), round(hairrig._angle(model_rig, chain.tip), 1)) for chain in chains]
-    check(chains and all(chain.kind == "back" for chain in chains)
-          and any(root > hairrig.SIDE_ANGLE and tip <= hairrig.SIDE_ANGLE for root, tip in ends),
-          "bun: leaning forward over the head's axis, rooted behind SIDE_ANGLE and its tip in front, it stays back "
-          "hair ({}; root and tip angles {})".format([chain.kind for chain in chains], ends))
-
-
-def test_roots_near_scalp():
+def test_lanes_roots_near_scalp():
+    # Long hair, long hair in one piece, card hair and five strands: every chain starts at the scalp (`chain_starts`:
+    # within ROOT_REACH of it, or where its hair may start), none on the neck or face.
     model_rig = rig()
     co, tris, _part, _names = long_hair()
     one_co, one_tris, _parts = one_piece_long_hair()
@@ -1355,106 +1667,11 @@ def test_roots_near_scalp():
                     for x in (-0.12, -0.06, 0.0, 0.06, 0.12)])[:2]
     for name, points, triangles in (("long hair", co, tris), ("one piece", one_co, one_tris),
                                     ("card hair", card_co, card_tris), ("strands", *strands)):
-        chains = hairrig.plan_rig(points, triangles, model_rig)
-        natural, others = root_gaps_by_kind(hairrig.find_locks(points, triangles, model_rig), points, triangles,
-                                            model_rig)
-        check(chains and all(gap <= hairrig.ROOT_REACH for gap in others),
-              "roots near the scalp: {:s}: locks not rooted next to held hair within ROOT_REACH ({}; rooted next "
-              "to held hair: {:d}, up to {:.4f} m)".format(name, [round(gap, 4) for gap in others], len(natural),
-                                                           max(natural, default=math.nan)))
-
-
-def ring_strip(azimuths, bottom, outward=0.0):
-    """A strip hanging down the neck (`hair.down_neck`) from the c0801 cap's lowest ring at ``azimuths``
-    (degrees, the ring's vertices nearest them) to ``bottom``, moved ``outward`` (metres) away from the neck's
-    axis: (vertices, quads)."""
-    cap, _faces, ring, azimuth = back_ring(24, MIQOTE)
-    tops = cap[[ring[np.argmin(np.abs(azimuth[ring] - a))] for a in azimuths]]
-    verts, quads = hair.down_neck(tops, bottom, 20, 0.01, MIQOTE)
-    out = verts[:, :2] - rig(MIQOTE).by_name[hairing.NECK].head[:2]
-    verts[:, :2] += outward * out / np.linalg.norm(out, axis=1)[:, None]
-    return verts, quads
-
-
-def off_hair(chain, co):
-    """How far a chain's joints and tip lie from its hair at most (metres)."""
-    own = co[chain.vertices]
-    return max(float(np.min(np.linalg.norm(own - point, axis=1))) for point in np.vstack((chain.joints, chain.tip)))
-
-
-def test_twins_merge():
-    # The neck sheet (two back locks), a strip down the side doubled 0.3 mm apart (twin layers, each its own
-    # loose part) and a shorter strip on the other side: the twins merge, one chain holds both layers (and no
-    # other chain either of them), and the short strip joins a column rather than keeping a chain of its own.
-    # (The sheet is 9 cm wide: cut by where its hair hangs, its edge and the short strip may make a column.)
-    model_rig = rig(MIQOTE)
-    parts = neck_parts() + [ring_strip((75.0, 90.0), 1.15), ring_strip((75.0, 90.0), 1.15, 0.0003),
-                            ring_strip((-75.0, -90.0), 1.30)]
-    co, tris, (_cap, _sheet, twin_ids, other_ids, short_ids) = join(parts)
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    describe_columns(chains)
-    both = [chain for chain in chains if np.isin(chain.vertices, twin_ids).any()
-            and np.isin(chain.vertices, other_ids).any()]
-    twins = [chain for chain in chains if np.isin(chain.vertices, twin_ids).any()
-             or np.isin(chain.vertices, other_ids).any()]
-    alone = [chain for chain in chains if np.isin(chain.vertices, short_ids).all()]
-    check(len(both) == 1 and len(twins) == 1 and not alone,
-          "twins: the twin layers in one chain, the short strip in no chain of its own ({:d} chains)".format(
-              len(chains)))
-    # A card doubled for its back faces, alone on the cap: one chain, not two.
-    co, tris, _ranges = join(neck_parts()[:1] + [ring_strip((75.0, 90.0), 1.15),
-                                                 ring_strip((75.0, 90.0), 1.15, 0.0003)])
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    check(len(chains) == 1, "twins: a doubled card is one chain ({:d})".format(len(chains)))
-
-
-def test_merge_stays_on_hair():
-    # Three round tubes behind the head, separate pieces: a narrow one straight down, one rooted 3 cm from it
-    # swinging out to the side, and one rooted 5 cm from it on the other side hanging alongside it. A round
-    # tube's root follows it out to the side, so the swinging one lies farther by root (8.7 cm, 7 mm beyond the
-    # spacing) than the one alongside (5.5 cm): spaced out, the narrow tube merges with that one. (No merge here
-    # is refused; test_hollow_ponytail's second half has one.)
-    model_rig = rig()
-    co, tris, (narrow, swing, beside) = join([
-        hair.tube((0.0, 0.08, 1.53), (0.0, 0.10, 1.33), 0.035 * 0.86),
-        hair.tube((-0.03, 0.08, 1.53), (-0.22, 0.10, 1.33), 0.035),
-        hair.tube((0.05, 0.08, 1.53), (0.05, 0.10, 1.33), 0.035)])
-    locks = hairrig.find_locks(co, tris, model_rig)
-    check(len(locks) == 3 and all(lock.whole and hairrig._round(co, lock) for lock in locks),
-          "on the hair: three round locks ({})".format([(lock.whole, hairrig._round(co, lock)) for lock in locks]))
-    free = hairrig.plan_rig(co, tris, model_rig, spacing=0.01)
-    describe_chains(free, co, locks)
-    mine = {name: [chain for chain in free if np.isin(chain.vertices, ids).all()]
-            for name, ids in (("narrow", narrow), ("swing", swing), ("beside", beside))}
-    ready = len(free) == 3 and all(len(v) == 1 for v in mine.values())
-    gaps = {name: float(np.linalg.norm(mine[name][0].joints[0] - mine["narrow"][0].joints[0])) if ready else math.nan
-            for name in ("swing", "beside")}
-    check(ready and all(chain.kind == "back" and chain.sheet == -1 for chain in free)
-          and min(free, key=lambda chain: chain.area) is mine["narrow"][0]
-          and sorted(len(chain.joints) for chain in free) == [2, 2, 3],
-          "on the hair: at spacing 0.01 three back pieces, the narrow the smallest, 3, 2 and 2 bones ({}, {}, "
-          "{} m by root)".format([chain.kind for chain in free], [len(chain.joints) for chain in free],
-                                 {name: round(gap, 4) for name, gap in gaps.items()}))
-    # With room for 5 bones the bones get longer until every chain has 2 (6 bones), then the narrow tube, the
-    # smallest, merges with its nearest by root, the one alongside.
-    chains = hairrig.plan_rig(co, tris, model_rig, spacing=0.01, max_bones=5)
-    describe_chains(chains, co, locks)
-    merged = [chain for chain in chains if np.isin(chain.vertices, narrow).any()]
-    far = [off_hair(chain, co) for chain in chains]
-    check(len(chains) == 2 and sum(len(chain.joints) for chain in chains) <= 5 and len(merged) == 1
-          and np.isin(merged[0].vertices, beside).any() and not np.isin(merged[0].vertices, swing).any()
-          and max(far) <= hairrig.SPINE_REACH,
-          "on the hair: with room for 5 bones the narrow tube merges with the one alongside, the swinging one stays "
-          "apart, every chain on the hair ({}, {} m)".format([len(chain.joints) for chain in chains],
-                                                             [round(f, 4) for f in far]))
-    spaced = hairrig.plan_rig(co, tris, model_rig)
-    describe_chains(spaced, co, locks)
-    merged = [chain for chain in spaced if np.isin(chain.vertices, narrow).any()]
-    far = [off_hair(chain, co) for chain in spaced]
-    check(len(spaced) == 2 and len(merged) == 1 and np.isin(merged[0].vertices, beside).any()
-          and not np.isin(merged[0].vertices, swing).any() and max(far) <= hairrig.SPINE_REACH,
-          "on the hair: spaced out, the narrow tube merges with the one alongside, the swinging one stays apart, "
-          "every chain on the hair ({:d} chains, {} m)".format(len(spaced), [round(f, 4) for f in far]))
+        chains, _made, _short = hairlanes.plan(points, triangles, model_rig)
+        starts = chain_starts(chains, points, triangles, model_rig)
+        check(chains and all(ok for _gap, _down, ok in starts),
+              "lanes roots near the scalp: {:s}: every chain starts at the scalp (from the scalp, from its start: {} m; "
+              "{})".format(name, describe_starts(starts), kinds_of(chains)))
 
 
 def hollow_tail(count=12):
@@ -1470,100 +1687,6 @@ def hollow_tail(count=12):
     return join(strips)
 
 
-def hollow_tubes(count=6):
-    """A hollow ponytail of ``count`` round tubes (`hair.tube`, 0.035), each its own loose part, in a cone behind
-    the head: their tops on a 4.5 cm ring, their bottoms 41 cm lower on an 8 cm ring. (points, triangles, each
-    tube's indices)."""
-    tubes = []
-    for k in range(count):
-        a = 2.0 * math.pi * k / count
-        ring = np.array((math.cos(a), math.sin(a), 0.0))
-        tubes.append(hair.tube(np.array((0.0, 0.10, 1.53)) + 0.045 * ring, np.array((0.0, 0.17, 1.12)) + 0.080 * ring,
-                               0.035))
-    return join(tubes)
-
-
-def test_hollow_ponytail():
-    # Merged from all its strips, the tail's chain runs down its hollow middle, up to 5 cm from the nearest
-    # strip: farther than SPINE_REACH, but the strips enclose it. One chain, at the default spacing too.
-    model_rig = rig()
-    co, tris, ranges = hollow_tail()
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    describe_chains(chains, co, [])
-    check(len(chains) == 1 and all(np.isin(strip, chains[0].vertices).any() for strip in ranges)
-          and off_hair(chains[0], co) > hairrig.SPINE_REACH,
-          "hollow ponytail: one chain down the middle of all its strips ({:d} chains, {} m off the hair)".format(
-              len(chains), [round(off_hair(chain, co), 4) for chain in chains]))
-    # Round tubes are separate pieces, merged by the spacing only where the merge stays on the hair: the tubes
-    # enclose their middle.
-    co, tris, ranges = hollow_tubes()
-    chains = hairrig.plan_rig(co, tris, model_rig)
-    describe_chains(chains, co, [])
-    check(len(chains) == 1 and all(np.isin(tube, chains[0].vertices).any() for tube in ranges),
-          "hollow ponytail: six round tubes in a ring make one chain down their middle ({:d} chains, {} m off the "
-          "hair)".format(len(chains), [round(off_hair(chain, co), 4) for chain in chains]))
-    old = hairrig.ENCLOSED_GAP
-    try:
-        hairrig.ENCLOSED_GAP = 0.0
-        apart = hairrig.plan_rig(co, tris, model_rig)
-    finally:
-        hairrig.ENCLOSED_GAP = old
-    check(len(apart) >= 2, "hollow ponytail: ...where only SPINE_REACH would keep it in {:d} chains".format(len(apart)))
-
-
-def test_maeve_chains():
-    """The real test hair: a chain for the fringe, every chain rooted at the scalp, none on the neck or face."""
-    if not os.path.isfile(MAEVE):
-        print("skip: no Maeve hair at " + MAEVE)
-        return
-    import hair_models
-    with open(MAEVE, "rb") as handle:
-        points, tris, _held = hair_models.decode(handle.read())
-    maeve = rig(MIQOTE)
-    cap = hairing.cap_depth(points, tris, maeve)
-    started = time.perf_counter()
-    chains = hairrig.plan_rig(points, tris, maeve, cap=cap)
-    took = time.perf_counter() - started
-    top = float(maeve.head_field.surface[:, 2].max())
-    gaps = [float(gap) for gap in maeve.scalp_gap(np.array([chain.joints[0] for chain in chains]).reshape(-1, 3), cap)]
-    print("      plan_rig: {:.3f} s for {:d} vertices; cap depth {:.4f} m, head top z {:.4f}".format(
-        took, len(points), cap, top))
-    chain_table(chains, gaps)
-    fringe = [chain for chain in chains if chain.angle <= hairrig.BANGS_ANGLE
-              and top - 0.20 <= chain.joints[0][2] <= top - 0.08]
-    check(fringe, "maeve: the fringe gets a chain, rooted in front on the forehead ({:d})".format(len(fringe)))
-    natural, others = root_gaps_by_kind(hairrig.find_locks(points, tris, maeve, cap=cap), points, tris, maeve)
-    check(chains and all(gap <= hairrig.ROOT_REACH for gap in others),
-          "maeve: every lock not rooted next to held hair within ROOT_REACH of the scalp ({:d}, up to {:.4f} m; "
-          "{:d} rooted next to held hair, up to {:.4f} m)".format(len(others), max(others, default=math.nan),
-                                                                  len(natural), max(natural, default=math.nan)))
-    lowest = min(float(chain.joints[0][2]) for chain in chains) if chains else math.nan
-    check(chains and lowest >= 1.36, "maeve: no chain starts below z 1.36 ({:.3f})".format(lowest))
-    # Spaced out (CHAIN_SPACING) and on the hair: no chain runs through the hair from one lock to another.
-    far = [off_hair(chain, points) for chain in chains]
-    check(chains and max(far) <= hairrig.SPINE_REACH,
-          "maeve: every chain's joints and tip within SPINE_REACH of its hair (up to {:.4f} m)".format(
-              max(far, default=math.nan)))
-    check(any(chain.kind == "bangs" for chain in chains), "maeve: a bangs chain ({})".format(
-        [chain.kind for chain in chains]))
-    print("      {:d} chains, {:d} bones".format(len(chains), sum(len(chain.joints) for chain in chains)))
-    # The back is one sheet cut into 3 columns, the middle one straight down behind, and its flat centre cards
-    # are back hair, not a ponytail swinging on its own.
-    back = back_columns("maeve", chains)
-    check(back is not None and not any_crossed(back) and drift(back[1]) <= hairrig.CHAIN_SPACING / 2,
-          "maeve: none crossed, the middle chain hangs straight down ({})".format(
-              "drift {:.3f}, X {:.3f} to {:.3f}".format(drift(back[1]), float(back[1].joints[0][0]),
-                                                       float(back[1].tip[0])) if back is not None else None))
-    sides = [len(mine) for mine in columns_by_sheet(chains).values() if mine[0].kind == "side"]
-    check(all(count <= 2 for count in sides), "maeve: at most 2 chains per side sheet ({})".format(sides))
-    check(not any(chain.kind == "ponytail" for chain in chains), "maeve: no ponytail")
-    check(not any(chain.light for chain in chains if chain.sheet >= 0), "maeve: no column chain is light")
-    # A lock rooted by the ear that falls back over the shoulder is back hair: as side hair its own chain would
-    # swing a piece of the back.
-    tips = [round(hairrig._angle(maeve, chain.tip), 1) for chain in chains if chain.kind == "side"]
-    check(all(angle <= hairrig.SIDE_ANGLE for angle in tips), "maeve: every side chain ends to the side ({})".format(tips))
-
-
 def chain_table(chains, gaps):
     """Print ``chains`` as a table, with ``gaps`` (each first joint's distance from the scalp)."""
     print("      chain  kind      light  sheet  order  bones  root x   root y   root z   gap      angle  length")
@@ -1573,31 +1696,6 @@ def chain_table(chains, gaps):
               "{:.3f}".format(number + 1, chain.kind, chain.light, chain.sheet, chain.order, len(chain.joints),
                               *chain.joints[0], gap, chain.angle,
                               float(np.linalg.norm(np.diff(line, axis=0), axis=1).sum())))
-
-
-def test_briar_chains():
-    """Another real hair: its back one sheet of 3 columns, at most 2 chains per side, within the budget."""
-    if not os.path.isfile(BRIAR):
-        print("skip: no Briar hair at " + BRIAR)
-        return
-    import hair_models
-    with open(BRIAR, "rb") as handle:
-        points, tris, _held = hair_models.decode(handle.read())
-    briar = rig(MIQOTE)
-    cap = hairing.cap_depth(points, tris, briar)
-    started = time.perf_counter()
-    chains = hairrig.plan_rig(points, tris, briar, cap=cap)
-    took = time.perf_counter() - started
-    gaps = [float(gap) for gap in briar.scalp_gap(np.array([chain.joints[0] for chain in chains]).reshape(-1, 3), cap)]
-    print("      plan_rig: {:.3f} s for {:d} vertices; cap depth {:.4f} m".format(took, len(points), cap))
-    chain_table(chains, gaps)
-    bones = sum(len(chain.joints) for chain in chains)
-    print("      {:d} chains, {:d} bones".format(len(chains), bones))
-    back = back_columns("briar", chains)
-    check(back is not None and not any_crossed(back), "briar: none of the back chains crossed")
-    sides = [len(mine) for mine in columns_by_sheet(chains).values() if mine[0].kind == "side"]
-    check(all(count <= 2 for count in sides), "briar: at most 2 chains per side sheet ({})".format(sides))
-    check(bones <= hairrig.MAX_HAIR_BONES, "briar: the bones fit the budget ({:d})".format(bones))
 
 
 def test_maeve_weights():
@@ -1657,7 +1755,7 @@ def rig_scene(fixture=None):
     """The long hair (`hair.build`) deformed by a new armature with c0201's j_kao, j_kubi and j_sebo_c (made by
     `hairing.ensure_bones`), and its chains built on the armature with the hair's cap depth, as Hair Weights
     builds them: (hair object, armature, plans, bone names, points, triangles, part index of each point, part
-    names). With ``fixture`` (a c0801 fixture: `bun_hair`, `flat_fringe` or `neck_hair`), that hair instead,
+    names). With ``fixture`` (a c0801 fixture: `bun_hair`, `fringe_and_neck` or `neck_hair`), that hair instead,
     on c0801's bones."""
     hair.clear_scene()
     race = hair.RACE if fixture is None else MIQOTE
@@ -2068,8 +2166,10 @@ def test_state_keeps_columns():
     describe_columns(plans)
     planned = {hairrig.bone_name(c, 0): (plan.sheet, plan.order) for c, plan in enumerate(plans)}
     columns = {name: column for name, column in planned.items() if column[0] >= 0}
-    check(columns and any(plan.kind == "ponytail" and (plan.sheet, plan.order) == (-1, -1) for plan in plans),
-          "columns: the long hair has column chains and a ponytail without a sheet ({})".format(planned))
+    # The lane planner puts every chain in its area's sheet (`hairlanes.plan`); only a chain the user adds has none
+    # (below). The lock planner gave the long hair's tube a ponytail chain without a sheet.
+    check(columns and columns == planned and len({sheet for sheet, _order in columns.values()}) >= 2,
+          "columns: every chain of the long hair is in its area's sheet, two areas or more ({})".format(planned))
     check(state_columns(armature) == planned, "columns: each chain keeps its plan's sheet and order ({})".format(
         state_columns(armature)))
     check(json_columns(armature) == columns and json_matches_state(armature),
@@ -2098,7 +2198,7 @@ def test_state_keeps_columns():
           and json_matches_state(armature),
           "columns: a chain the user adds has no sheet, the others keep theirs ({})".format(state_columns(armature)))
     # One column chain's bones deleted: the others keep their sheets and orders, a gap in the orders included.
-    # The long hair's side locks are a sheet each: put them in one sheet, orders 0 and 1, and delete order 0.
+    # The long hair's areas are a sheet each: put their chains in one sheet, orders 0 and on, and delete order 0.
     state = armature.magic_fit_hair_rig
     for order, name in enumerate(sorted(columns)):
         chain = next(chain for chain in state.chains if chain.bones.split(",")[0] == name)
@@ -2231,7 +2331,9 @@ def test_chain_along():
 
 
 def test_ramp_from_first_joint():
-    _obj, armature, plans, _bones, co, tris, part, names = rig_scene(flat_fringe)
+    # The fringe with the neck sheet behind it: alone on the cap the fringe is short hair and gets no chain
+    # (test_lanes_flat_fringe), so there would be no ramp.
+    _obj, armature, plans, _bones, co, tris, part, names = rig_scene(fringe_and_neck)
     custom = hairrig.custom_rig(armature, MIQOTE)
     # The rule itself, without holding layers together (which smooths the ramp over about LAYER_SMOOTH).
     bone_names, weights = hairing.hair_weights(co, tris, custom, layer_range=0.0)
@@ -2259,7 +2361,9 @@ def test_ramp_from_first_joint():
 
 
 def test_cap_stays():
-    for fixture in (flat_fringe, neck_hair, bun_hair):
+    # The fringe with the neck sheet behind it: the lone fringe gets no chain (test_lanes_flat_fringe), and with no
+    # chain the cap would stay trivially.
+    for fixture in (fringe_and_neck, neck_hair, bun_hair):
         _obj, armature, _plans, _bones, co, tris, part, names = rig_scene(fixture)
         custom = hairrig.custom_rig(armature, MIQOTE)
         # The rule itself: holding layers together gives the cap under the bun's foot some of the bun's weights.
@@ -2313,7 +2417,8 @@ def test_ramp_follows_edited_bone():
     before = hairrig.custom_rig(armature, MIQOTE)
     old_names, old = hairing.hair_weights(co, tris, before, neck_weight=0.0, layer_range=0.0)
     old_along, first = chain_along(before, co, 1)
-    # The vertices chain 01 takes (the sheet's other chain takes some of those near it).
+    # The vertices chain 01 takes (the neck sheet has one back chain now; with more, the others take some of those
+    # near it).
     chains = hairing.chains_of(before.hair_bones())
     ones = hairing.chain_shares(before.model(co), before, chains)[:, [chain.root for chain in chains].index(
         hairrig.bone_name(0, 0))] >= 0.95
@@ -2327,10 +2432,13 @@ def test_ramp_follows_edited_bone():
     after = hairrig.custom_rig(armature, MIQOTE)
     new_names, new = hairing.hair_weights(co, tris, after, neck_weight=0.0, layer_range=0.0)
     new_along, new_first = chain_along(after, co, 1)
-    # Past the old first joint (half hanging or more), above the new one's ramp.
-    between = ones & (old_along > 0.0) & (new_along < -0.5 * hairing.RAMP_SHARE * new_first)
-    # Chain 01's own weight there: the moved joint also moves chain 01's share, so some of that hair goes to
-    # the other chain, whose ramp didn't move.
+    # Past the old first joint (half hanging or more), above the new one's ramp, and hanging: the chain starts at the
+    # scalp's lower edge, and the nape hair just under its first joint that is still over the scalp (scalp share
+    # SCALP_HALF or more) is the head's, not the chain's.
+    hanging_hair = before.scalp(co) < hairing.SCALP_HALF
+    between = ones & hanging_hair & (old_along > 0.0) & (new_along < -0.5 * hairing.RAMP_SHARE * new_first)
+    # Chain 01's own weight there: with more chains on the sheet, the moved joint also moves chain 01's share, so
+    # some of that hair goes to another chain, whose ramp didn't move.
     one_old, one_new = own_weight(old_names, old, 1), own_weight(new_names, new, 1)
     print("      first bone {:.3f} m; {:d} vertices between the old and the new joint".format(float(first[0]),
                                                                                        int(between.sum())))
@@ -2482,18 +2590,25 @@ def test_delete_chain_unsynced():
 def main():
     magic_fit.register()
     try:
-        for test in (test_long_hair_locks, test_one_piece_long_hair, test_separate_strands, test_crumbs,
-                     test_parted_locks, test_long_hair_chains, test_bangs_chain, test_pivot_at_root, test_even_joints,
-                     test_wavy_lock_straight, test_kinds, test_columns, test_u_bottom, test_mirrored_sheet,
-                     test_lopsided_locks, test_back_width, test_swept_sheet, test_ponytail_on_sheet, test_ponytail_hair_type, test_side_columns, test_back_counts,
-                     test_side_counts, test_side_counts_take_round_locks, test_bang_counts, test_short_hair_ring, test_loose_counts_tie_nothing, test_ponytail_counts, test_detect_counts,
-                     test_forward_strand,
-                     test_light_column,
-                     test_budget, test_lone_kind_survives, test_card_hair_kinds, test_card_hair_time,
-                     test_moved_hair,
-                     test_flat_fringe, test_neck_layer, test_neck_only_layer, test_cap_rim, test_bun,
-                     test_roots_near_scalp, test_twins_merge, test_merge_stays_on_hair, test_hollow_ponytail,
-                     test_maeve_chains, test_briar_chains,
+        for test in (test_lanes_areas_by_where_it_hangs, test_lanes_forward_card_is_side, test_lanes_one_piece_is_split,
+                     test_lanes_long_front_lock_is_side, test_lanes_middle_part, test_lanes_short,
+                     test_lanes_ponytail_areas,
+                     test_lanes_nothing_hangs, test_lanes_count_and_order, test_lanes_never_cross,
+                     test_lanes_rows_shared, test_lanes_mirrored, test_lanes_u_bottom, test_lanes_fan_and_narrow,
+                     test_lanes_clumps, test_lanes_start_at_scalp_edge, test_lanes_bun, test_lanes_check_keeps_rows,
+                     test_lanes_short_followed_hair, test_lanes_joints_on_one_spot, test_lanes_bone_length,
+                     test_lanes_sweeping_hair, test_lanes_separate_strand,
+                     test_lanes_sweep_to_end, test_lanes_coarse_strands_apart, test_lanes_card_behind,
+                     test_lanes_touching_cards, test_lanes_split_before_sweep,
+                     test_lanes_swept_time, test_lanes_flat_ring,
+                     test_lanes_double_sided,
+                     test_lanes_detect_width,
+                     test_lanes_rig_counts, test_lanes_left_right_apart, test_lanes_order_and_sheets,
+                     test_lanes_area_without_hair, test_lanes_short_ring, test_lanes_loose_ties_nothing,
+                     test_lanes_ponytail, test_lanes_budget, test_lanes_detect, test_lanes_no_counts, test_lanes_empty,
+                     test_lanes_moved_rig, test_lanes_card_hair_time, test_plan_layout_is_lanes, test_lanes_maeve,
+                     test_lanes_briar, test_lanes_flat_fringe, test_lanes_neck_layer, test_lanes_neck_only_layer,
+                     test_lanes_cap_rim, test_lanes_roots_near_scalp,
                      test_maeve_weights, test_armature_rig, test_weights_follow_locks,
                      test_edited_rig_is_kept, test_branch_starts_chain, test_chain_collection, test_bones_hash,
                      test_kind_change_writes_json,

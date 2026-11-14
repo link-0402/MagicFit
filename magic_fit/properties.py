@@ -599,8 +599,8 @@ class MagicFitSettings(bpy.types.PropertyGroup):
     hair_bang_chains: IntProperty(
         name="Bang Chains",
         description=(
-            "How many chains the bangs get, side by side across the front. On short hair (nothing longer than "
-            "20 cm), the chains all around the head. Used when the chains are built"
+            "How many chains the bangs get, side by side across the front. On short hair (hardly any of it hangs "
+            "below the chin), the chains all around the head. Used when the chains are built"
         ),
         default=2,
         min=hairrig.COUNT_RANGES["bangs"][0],
@@ -609,9 +609,7 @@ class MagicFitSettings(bpy.types.PropertyGroup):
     hair_chain_spacing: FloatProperty(
         name="Chain Spacing",
         description=(
-            "How wide Detect cuts the hair into columns around the head, one chain each (at most 3 behind and 2 "
-            "per side), and how close separate pieces of hair (a ponytail or braid of its own) merge into one chain "
-            "when the chains are built"
+            "How wide a chain's share of the hair is when Detect counts the chains an area gets"
         ),
         subtype='DISTANCE',
         default=hairrig.CHAIN_SPACING,
@@ -958,8 +956,7 @@ def _hair_rig_active_changed(_self, _context):
 class HairRigChain(bpy.types.PropertyGroup):
     """A chain of the hair's own skeleton (Object.magic_fit_hair_rig): its kind and bones, root to tip,
     whether it is light (`hairrig.Lock`; not shown and not in xiv_hair_rig, it only changes the weights), and a
-    column chain's sheet and order (`hairrig.ChainPlan`; not shown, written to xiv_hair_rig so the exporter can
-    tie neighboring columns)."""
+    planned chain's sheet and order (`hairrig.ChainPlan`; not shown, written to xiv_hair_rig)."""
     kind: EnumProperty(
         name="Kind",
         description="How the game swings this chain",
@@ -980,16 +977,16 @@ class HairRigChain(bpy.types.PropertyGroup):
     sheet: IntProperty(
         name="Sheet",
         description=(
-            "The sheet of hair whose column the chain follows (from 0; -1: a separate piece). Not shown; written "
-            "to xiv_hair_rig so the exporter can tie neighboring columns"
+            "The area of hair the chain was planned in (from 0; -1: a chain the user added). Not shown; written "
+            "to xiv_hair_rig"
         ),
         default=-1,
     )
     order: IntProperty(
         name="Order",
         description=(
-            "The chain's place among its sheet's columns (from 0; -1: a separate piece). Not shown; written to "
-            "xiv_hair_rig so the exporter can tie neighboring columns"
+            "The chain's place among its sheet's chains (from 0; -1: a chain the user added). Not shown; written to "
+            "xiv_hair_rig"
         ),
         default=-1,
     )

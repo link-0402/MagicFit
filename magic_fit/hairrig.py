@@ -1,109 +1,39 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Hair rig: a hair skeleton built for the hair itself, one chain of bones per lock of hair.
+"""Hair rig: a hair skeleton built for the hair itself, chains of bones down the hair.
 
 The game's hair skeletons are made for the game's hairstyles; new hair often hangs where none of them
-has a chain. Own Skeleton builds the chains from the mesh. It first splits the hanging hair into locks:
+has a chain. Own Skeleton builds the chains from the mesh.
 
 - What hangs, by the head's scalp map (`hairing.HairRig.scalp`) and the hair's cap depth (`hairing.cap_depth`,
   how far its cap lies off the head): vertices over the face (a scalp share below SCALP_HALF), however close
   to the skin, and vertices over the scalp standing off the cap (more than STAND_MARGIN beyond the cap
-  depth). The hair lying on the cap stays with the head.
-- The hanging vertices fall into regions, the connected pieces of the mesh (welded) they make. A region's
-  roots are its vertices next to the held hair, where the hair leaves the scalp: on the hairline for hair
-  over the face, on the cap for hair standing off it. A region that hangs entirely (a strand off the head)
-  has its roots where it comes closest to the scalp (`hairing.HairRig.scalp_gap`).
-- Every vertex is measured along the mesh from the nearest root (a Dijkstra from all of them at once): how
-  far down the hair it is, and which root it hangs from.
-- Where a vertex is around the head is its arc: its angle around the head's vertical axis (through the
-  head bone, as `hairing.chain_terms` measures it), from the region's mean angle, times the mean distance
-  of the roots from the axis. A vertex has two: its own, and its root's (where its hair left the scalp).
-- A loose part that mostly hangs and leaves the head across no more than WHOLE_WIDTH (a ponytail, a braid,
-  a strand) stays one lock. Anything else is cut into locks about LOCK_WIDTH wide, counting both how wide
-  its roots are and, at HANG_DIRECTION_WEIGHT, how wide it hangs: hair leaving the head in one piece and
-  parting as it falls makes two locks. The cut is a k-means on those two arcs, by area, so the cuts run
-  down the hair as hair parts.
-- Locks smaller than MIN_LOCK_AREA (crumbs: a card corner that barely hangs) join the nearest lock (by
-  root) of at least that size, whichever loose part it is, keeping that lock's root; when there is none
-  they are dropped, and their hair goes to the nearest chain. Crumbs never join each other. No chain starts
-  on the neck or face: a lock without roots next to held hair (rooted where it comes closest to the scalp)
-  whose root (the area-weighted mean of its roots) lies farther than ROOT_REACH from the scalp beyond the cap
-  depth (an inner layer lying wholly on the neck) joins the same way. A lock rooted next to held hair leaves
-  the scalp or the cap there and keeps its chain. Every lock is then measured again from its roots.
-- A lock is light when most of its roots (by area) are over the scalp: it stands off the cap (a bun) rather
-  than leaving the scalp at the hairline. Its chain is light too; two locks merged are light when both are.
-
-Then it plans a chain of bones down each lock:
-
-- The lock's spine is its middle line down the hair: its root, then the centroid of its vertices in each
-  SPINE_STEP band of distance from the root, smoothed over SPINE_SMOOTHING samples (on a coarse mesh a band
-  mixes neighbouring rows, and the centroids zig-zag). A spine shorter than MIN_CHAIN_LENGTH gets no chain.
-- The chain has a bone per BONE_SPACING of spine (2 to 5; longer over the budget), its joints spread evenly
-  from the root along the spine's arc (`_arc`): from the spine's start to its end, bending one way only,
-  fitted to the spine. The last bone ends at the spine's end. Wavy hair swings its spine from side to side,
-  and joints on the spine itself zig-zag from crest to crest; the game's own chains bend 23 degrees at most
-  between bones and never cross the line from their root to their tip.
-- Its kind (bangs, side, back or ponytail) comes from where the lock leaves the head and how long it is; only
-  a round lock (PONYTAIL_ROUND) is a ponytail, a flat card lying on back hair is back hair. Where the hair ends
-  moves it between side and back: side hair falling back over the shoulder (its tip behind SIDE_ANGLE) is back
-  hair, and back hair hanging forward over the shoulder (its tip in front of SIDE_ANGLE) is side hair.
-- Then the locks split in two. A lock kept whole and round (PONYTAIL_ROUND: a ponytail, a braid, a tube) is a
-  separate piece; every other lock is part of a sheet of hair. Twin layers always merge, in both: of two
-  locks whose roots lie within TWIN_REACH of each other (a mesh doubled for its back faces), the smaller
-  into the larger.
-- Separate pieces of one kind whose roots lie closer than the chain spacing (CHAIN_SPACING, the Chain
-  Spacing setting) merge: the smallest such piece into the nearest of its kind (by root).
-- A piece's merge (other than of twins) stays on the hair: it is refused when the merged lock's chain has a
-  joint or its tip farther than SPINE_REACH from the lock's own hair (two pieces far apart, its spine running
-  through the space between them) and not enclosed by it there (ENCLOSED_GAP: the middle of a hollow
-  ponytail), and the next nearest is tried. A piece with no partner that keeps it on the hair stays as it
-  is; over the budget the next smallest piece merges instead, and only when no piece has a merge that stays
-  on the hair does the smallest merge into the nearest after all.
-- The sheets: the sheet locks of one kind make a sheet, side hair one on each side of the head. Each sheet
-  is cut into columns the chain spacing wide around the head, by its locks' roots (`_columns`): the back
-  into at most BACK_COLUMNS, the middle one straight behind, each side into at most SIDE_COLUMNS from the
-  front, bangs from straight in front. A column with less hair than MIN_COLUMN_AREA joins its neighbor. A
-  column's locks merge into one, its largest first, and the column gets one chain of the sheet's kind,
-  never light: the chains follow the columns down the hair, whatever the cards in them. The back's hair goes
-  into its columns vertex by vertex, each by where it hangs around the head (`_vertex_columns`), whatever lock
-  it is in: the shape of the hair decides, not how its strands run. Locks don't line up with the columns, and
-  a lock that went whole into the column of its root pulled that column's chain along: on symmetric hair the
-  middle chain followed a lock rooted on a column's edge 2 cm to one side. A column's hair past a gap down
-  it (COLUMN_GAP) goes back to its lock's column, so the chain doesn't cross the gap off the hair.
-- With chain counts set (`ChainCounts`, the Back, Ponytail, Side and Bang Chains settings), the user decides
-  instead of the chain spacing: each sheet's hair goes into its columns vertex by vertex (`_count_labels`), as
-  many as its count, equal arcs across the sheet's width around the head (between the COUNT_QUANTILES of its
-  area), with no MIN_COLUMN_AREA; a column only goes when it holds no chain. Side hair on the character's left
-  (+X) has the left count. A round lock is no separate piece then: it goes into its area's sheet, so the count
-  holds; with Hair Type Loose a ponytail is back hair. With Hair Type Ponytail and more than one ponytail chain,
-  the tied tail is cut into columns side by side the same way. Short hair (`_short`: no lock longer than BANGS_LENGTH, separate pieces
-  too) is one bangs sheet around the whole head, cut into the bang count's equal sectors, the first centered
-  straight in front; its separate pieces (a bun) keep their chains. Without counts (`detect_counts`, Detect) the columns are the chain spacing wide.
-- The budget: while the rig takes more than MAX_HAIR_BONES bones and some chain has more than CHAIN_BONES[0],
-  the bones get longer (BONE_SPACING grows by BONE_GROWTH) and every chain is planned again: the columns keep
-  their chains. Only a rig still over then merges its pieces, until it fits or one is left: the smallest piece
-  that shares its kind with another into the nearest of that kind; only when no two share a kind does the
-  smallest merge into the nearest of any kind. Columns never merge: a rig whose columns alone take more than
-  MAX_HAIR_BONES bones at CHAIN_BONES[0] each stays over.
-- A merged lock hangs from the roots of both (its root is their mean) and is planned again. It is kept
-  whole only when both locks were and one's roots lie within the other's, no wider than WHOLE_WIDTH: layers
-  of one ponytail. Strands or cards merged side by side make back hair.
+  depth) (`_hanging`, `hangs`). The hair lying on the cap stays with the head.
+- The chains are planned by `hairlanes` from the shape of the hanging hair, area by area (back, left and right
+  side, bangs; the tail with Hair Type Ponytail): each area cut into lanes side by side, as many as its chain count
+  (`ChainCounts`), a chain down each (`plan_layout`, `plan_rig`). Detect proposes the counts (`detect_counts`).
 
 The user can also add a chain along hair they select (`plan_selection`, Add Chain): the selected vertices make one
-lock, rooted in each loose part where they come closest to the scalp and measured along the whole mesh from there,
-and its joints lie on the lock's own middle line rather than the arc.
+lock (`Lock`), rooted in each loose part where they come closest to the scalp and measured along the whole mesh from
+there. Its spine is its middle line down the hair: its root, then the centroid of its vertices in each SPINE_STEP
+band of distance from the root, smoothed over SPINE_SMOOTHING samples; a spine shorter than MIN_CHAIN_LENGTH gets no
+chain. The chain has a bone per BONE_SPACING of spine (CHAIN_BONES), or as many as the user asks, its joints spread
+evenly along the lock's own middle line. Its kind (bangs, side, back or ponytail, `chain_kind`) comes from where the
+lock leaves the head and how long it is; only a round lock (PONYTAIL_ROUND) is a ponytail, and where the hair ends
+moves it between side and back (SIDE_ANGLE). It is light when most of its roots (by area) are over the scalp: it
+stands off the cap (a bun) rather than leaving the scalp at the hairline.
 
 The chains become bones on the hair's armature (`build_armature_rig`), j_ex_hair_01_a and on, hanging from
 j_kao. They are ordinary Blender bones, head on a joint and tail on the next, so they draw along the hair
 and the user can move, delete or add some in Edit Mode; `sync_rig` reads them back as they are and names
 new ones; the rig state keeps a hash of the bones (`bones_hash`) to tell whether the user edited them since,
-for the weights the hair's cap depth and which chains are light, and for the exporter each column chain's sheet
-and order (kept by chain number, like the kinds).
+for the weights the hair's cap depth and which chains are light, and each planned chain's sheet and order (kept
+by chain number, like the kinds).
 Each bone's Z axis points away from the head's axis, and its bone colour is its chain's kind's
 (`hairview.color_bones`). Every hair bone, the user's new ones too, is in the armature's CHAIN_COLLECTION bone
 collection, and only they are (`collect_hair_bones`); Show Chains solos it. The armature carries the rig as RIG_PROPERTY, written from
 `Object.magic_fit_hair_rig` after every change, for exporters (Instant Edit) to make the hair skeleton; its
-version 2 lists each column chain's sheet and order, so the exporter can tie neighboring columns. A
+version 2 lists each planned chain's sheet (its area) and order (Instant Edit's exporter reads neither). A
 hair bone points along its X axis in the game and along its Y axis in Blender: ALONG_X turns one into the
 other, here (`custom_rig`) and in the exporter. A chain the user adds along a selection (`add_chain`) takes the
 next free number and hangs from j_kao; deleting one from the list (`delete_chain`) hands what hangs from it to its
@@ -125,34 +55,23 @@ from mathutils.kdtree import KDTree
 from . import fitting, hairing
 from .hairing import HEAD, SCALP_HALF, STAND_MARGIN, HairError, components, unique_triangles, vertex_areas
 
-# A lock without roots next to held hair whose root lies farther than this (metres) from the scalp, beyond the
-# hair's cap depth (`hairing.HairRig.scalp_gap`), gets no chain: its hair joins the nearest lock rooted at the
-# scalp.
+# Add Chain roots the selection in each of its loose parts that comes within this (metres, beyond the hair's cap
+# depth, `hairing.HairRig.scalp_gap`) as near the scalp as the nearest one does (`plan_selection`).
 ROOT_REACH = 0.03
-# The lock width aimed at (metres): a region is cut into max(1, round(span / LOCK_WIDTH)) locks, where
-# span = max(root span, HANG_DIRECTION_WEIGHT * own span).
+# The width of a lock of hair (metres): chains built again keep the kinds of the chains within half of it
+# (KIND_REACH).
 LOCK_WIDTH = 0.05
-# A region whose loose part hangs for at least half its area, with a root span up to this (metres), stays
-# one lock: a ponytail, braid or single strand.
+# A selection whose roots span no more than this (metres) around the head is kept whole: a ponytail, braid or
+# single strand (`plan_selection`, PONYTAIL_LENGTH).
 WHOLE_WIDTH = 0.10
-# Weight of where a vertex hangs (its own arc) next to where it left the scalp (its root's arc) when
-# counting and cutting locks.
-HANG_DIRECTION_WEIGHT = 0.5
-# Smaller locks (m²) join the nearest lock (by root) of at least this size rooted at the scalp (ROOT_REACH),
-# across loose parts if need be; with none, they are dropped (their hair goes to the nearest chain). They
-# never join each other.
-MIN_LOCK_AREA = 0.0004
-# A region that hangs entirely has its roots where it is within this (metres) of its closest point to the
-# scalp.
+# Hair within this (metres) of its closest point to the scalp is rooted there (`_closest_to_scalp`).
 ROOT_BAND = 0.01
-# Lloyd steps of the k-means that cuts a region into locks.
-CUT_STEPS = 10
 # Spine samples along the geodesic distance from the root (metres): one per band this wide.
 SPINE_STEP = 0.01
 # Samples in the centred moving average that smooths the spine (the first and last stay as they are): on a
 # coarse mesh one band holds the back of one ring and the front of the next, and the samples zig-zag.
 SPINE_SMOOTHING = 5
-# A shorter spine (metres) gets no chain; its hair goes to the nearest chain.
+# A shorter chain (metres) isn't built: a selection's spine (`plan_chain`), a lane's chain (`hairlanes`).
 MIN_CHAIN_LENGTH = 0.03
 # Points of the arc a chain's joints are spread along (`_arc`).
 ARC_SAMPLES = 65
@@ -160,54 +79,22 @@ ARC_SAMPLES = 65
 BONE_SPACING = 0.10
 # The fewest and most bones in a chain.
 CHAIN_BONES = (2, 5)
-# The budget of the whole rig: over it the bones get longer (BONE_GROWTH), then separate pieces merge (see
-# plan_rig).
+# The budget of the whole rig: over it the bones get longer (BONE_GROWTH, `hairlanes.plan`).
 MAX_HAIR_BONES = 48
-# Two locks whose roots lie within this (metres) of each other are twin layers (a mesh doubled for its back
-# faces): they always merge, the smaller into the larger.
-TWIN_REACH = 0.005
-# The width of the columns a sheet of hair is cut into around the head (metres), one chain each (`_columns`), and
-# how close separate pieces of one kind merge, budget or not: the chains follow the hair's layout, not every card
-# (plan_rig's ``spacing``, the Chain Spacing setting).
+# How wide a chain's share of the hair is (metres) when Detect counts the chains an area gets (`hairlanes.detect`;
+# plan_layout's ``spacing``, the Chain Spacing setting).
 CHAIN_SPACING = 0.08
-# A column of a sheet with less hair than this (m²) joins its nearer neighbor (`_columns`); a sheet's only column
-# stays. Measured at CHAIN_SPACING: only Briar's front right side column (0.0025 m²) falls under it; Maeve's front
-# bangs column (0.0056 m²) keeps its chain, and every other column holds 0.0129 m² or more.
-MIN_COLUMN_AREA = 0.005
-# The most columns of back hair: the middle one centered straight behind and one to either side, whatever the
-# hair's width. Wider columns instead jump from 3 back chains to 1 on symmetric hair.
-BACK_COLUMNS = 3
-# A back column's hair past a gap this long (metres of distance from the roots) with none of its hair in it goes
-# back to the column holding most of its lock (`_vertex_columns`): a long lock's edge dipping into the column
-# lower down would pull its chain across the gap, off the hair.
-COLUMN_GAP = 0.05
-# The most columns on each side: the frontmost with hair and one for everything behind it.
-SIDE_COLUMNS = 2
 # The chains per area the user sets (the Back, Ponytail, Side and Bang Chains settings; plan_layout's ``counts``):
-# ``back`` columns of back hair, ``ponytail`` chains of the tail Hair Type Ponytail ties, ``left`` and ``right``
-# columns of side hair on the character's left (+X) and right, ``bangs`` columns of bangs (of the whole hair
-# around the head on short hair, `_short`).
+# ``back`` chains side by side across the back hair, ``ponytail`` across the tail Hair Type Ponytail ties, ``left``
+# and ``right`` across the side hair on the character's left (+X) and right, ``bangs`` across the bangs (around the
+# whole head on short hair, `hairlanes.areas`).
 ChainCounts = namedtuple("ChainCounts", "back ponytail left right bangs")
 # The fewest and most chains of each area (`ChainCounts`'s fields).
 COUNT_RANGES = {"back": (1, 4), "ponytail": (1, 3), "left": (1, 2), "right": (1, 2), "bangs": (1, 6)}
-# With counts, a sheet's columns are equal arcs between these area-weighted quantiles of where its hair hangs
-# around the head (`_count_labels`): a stray strand doesn't widen them, and hair outside goes to the outer columns.
-COUNT_QUANTILES = (0.02, 0.98)
 # A rig over its budget (MAX_HAIR_BONES) keeps its chains and lengthens their bones: BONE_SPACING grows by this
 # and every chain is planned again, until the rig fits or every chain has CHAIN_BONES[0] bones (user ruling: scale
 # the bones up rather than drop back chains).
 BONE_GROWTH = 1.25
-# A merge is refused when the merged lock's chain has a joint or its tip farther than this (metres) from the
-# lock's own hair: its spine would run through the space between the two locks...
-SPINE_REACH = 0.03
-# ...unless the hair encloses it there: seen along the chain, the lock's own vertices within WHOLE_WIDTH of the
-# joint leave no gap around it wider than this (degrees). The middle of a hollow ponytail of strands, some rooted
-# at the crown and some at the tie, lies 3.2 cm from its nearest strand with gaps of at most 16 degrees; a spine
-# between a left and a right fringe has gaps of 149 degrees and more.
-ENCLOSED_GAP = 90.0
-# Two whole locks merged are still whole (WHOLE_WIDTH) only when one's roots lie within the other's around the
-# head, give or take this (radians): layers of one ponytail. Strands or cards side by side make back hair.
-WITHIN_SLACK = 1e-6
 # The kinds of chain, by where the lock leaves the head and how long it is (see chain_kind).
 KINDS = ("bangs", "side", "back", "ponytail")
 # Bangs: a root this close to straight in front (degrees around the head's axis, 0 in front)...
@@ -226,9 +113,9 @@ PONYTAIL_LENGTH = 0.30
 PONYTAIL_ROUND = 0.01
 # The custom property on the armature object that holds the rig for exporters, as JSON: {"race": "c0801",
 # "version": 2, "chains": [{"kind": "back", "bones": ["j_ex_hair_01_a", ...], "sheet": 0, "order": 1}]}, each
-# chain's bones root to tip. Only a column chain has "sheet" (from 0, shared by one sheet of hair's columns) and
-# "order" (its place among that sheet's chains, from 0, by column around the head; a chain the user deleted leaves
-# a gap); a separate piece has neither. Version 1 had no "version" and no columns.
+# chain's bones root to tip. Only a planned chain has "sheet" (from 0, shared by one area's chains, `hairlanes.plan`)
+# and "order" (its place among that sheet's chains, from 0, across the area; a chain the user deleted leaves a gap); a
+# chain the user added has neither. Version 1 had no "version", no sheets and no orders.
 RIG_PROPERTY = "xiv_hair_rig"
 RIG_VERSION = 2
 # The hair's own bones are named BONE_PREFIX, the chain's number (01 on) and the bone's letter (a from the
@@ -259,7 +146,7 @@ class Lock:
     from ``root``), ``area`` (m²), ``root`` ((3,), world space: the area-weighted mean of its own roots, not
     those of crumbs that joined it), ``whole`` (a loose part kept whole, see WHOLE_WIDTH), ``angle`` (of the
     root around the head's vertical axis, degrees: 0 straight in front, 180 straight behind) and ``joined``
-    (bool per vertex: it came from a crumb that joined the lock, see MIN_LOCK_AREA). The chain's spine
+    (bool per vertex: it came from a crumb that joined the lock; `plan_selection` joins none). The chain's spine
     skips the ``joined`` vertices; they only take its weights. ``areas`` (m² per vertex, a welded vertex's
     area shared among its points) weighs the spine; None weighs every vertex alike. ``measured`` (bool per
     vertex) marks the vertices whose distance was measured along the lock from its roots, the others being
@@ -318,29 +205,6 @@ def _closest_to_scalp(nodes, gap):
     return nodes[gap[nodes] <= gap[nodes].min() + ROOT_BAND]
 
 
-def _cut(features, weights, seed, k):
-    """Labels (0..k-1) of an area-weighted k-means of ``features`` ((n, 2)), starting from k equal bins of
-    column ``seed``, then CUT_STEPS Lloyd steps."""
-    column = features[:, seed]
-    low, high = float(column.min()), float(column.max())
-    labels = np.clip(((column - low) / max(high - low, 1e-12) * k).astype(np.int64), 0, k - 1)
-    centers = np.zeros((k, 2))
-    for c in range(k):
-        mine = labels == c
-        if mine.any():
-            centers[c] = np.average(features[mine], axis=0, weights=weights[mine])
-        else:
-            centers[c] = np.average(features, axis=0, weights=weights)
-            centers[c, seed] = low + (c + 0.5) * (high - low) / k
-    for _ in range(CUT_STEPS):
-        labels = np.argmin(((features[:, None, :] - centers[None]) ** 2).sum(2), axis=1)
-        for c in range(k):
-            mine = labels == c
-            if mine.any():
-                centers[c] = np.average(features[mine], axis=0, weights=weights[mine])
-    return np.argmin(((features[:, None, :] - centers[None]) ** 2).sum(2), axis=1)
-
-
 def _welded(points, tris, weld):
     """The mesh of ``points`` and ``tris`` with welded vertices made one: (weld, count, rest, triangles,
     edges), where ``rest`` ((count, 3)) is where each welded vertex is; None when there is no mesh. ``weld``
@@ -384,148 +248,6 @@ def hangs(points, rig, *, cap=None):
     return bool(_hanging(rig.scalp(points), rig.head_distance(points), cap).any())
 
 
-def find_locks(points, tris, rig, *, cap=None, weld=None):
-    """The locks of hair ``points`` (world space, rest pose, (n, 3)) with triangles ``tris`` hanging from
-    ``rig`` (`hairing.HairRig`), sorted by angle and then by the root's X. ``cap`` is how far the hair's cap
-    lies off the head (`hairing.cap_depth`, measured from these points when None). ``weld`` (vertex ->
-    welded group) joins vertices sharing a position; by default they are found here."""
-    points = np.asarray(points, dtype=np.float64)
-    mesh = _welded(points, tris, weld)
-    if mesh is None:
-        return []
-    weld, count, rest, t, edges = mesh
-    model = rig.model(rest)
-    lengths = np.linalg.norm(model[edges[:, 0]] - model[edges[:, 1]], axis=1)
-    area = vertex_areas(model, t)
-    weight = area + 1e-12
-    # A welded vertex's area shared among the points on it.
-    point_area = (area / np.maximum(np.bincount(weld, minlength=count), 1))[weld]
-    head = rig.head_distance(rest)
-    share = rig.scalp(rest)
-    if cap is None:
-        cap = hairing.cap_depth(points, tris, rig, share=share[weld])
-    used = np.bincount(t.ravel(), minlength=count) > 0
-    hanging = used & _hanging(share, head, cap)
-    if not hanging.any():
-        return []
-    # How far the hanging hair is from the scalp, for roots where none is next to held hair.
-    gap = np.full(count, np.inf)
-    gap[hanging] = rig.scalp_gap(rest[hanging])
-
-    # Around the head's vertical axis: 0 straight in front (-Y), positive toward +X.
-    axis_y = rig.by_name[HEAD].head[1]
-    theta = np.arctan2(model[:, 0], -(model[:, 1] - axis_y))
-    radius = np.hypot(model[:, 0], model[:, 1] - axis_y)
-
-    part = components(count, edges)
-    part_area = np.bincount(part, area)
-    part_hanging = np.bincount(part, area * hanging)
-    # Roots: hanging vertices next to the scalp.
-    across = hanging[edges[:, 0]] != hanging[edges[:, 1]]
-    is_root = np.zeros(count, dtype=bool)
-    is_root[np.where(hanging[edges[across, 0]], edges[across, 0], edges[across, 1])] = True
-    inside = hanging[edges[:, 0]] & hanging[edges[:, 1]]
-    region = components(count, edges[inside])
-    hanging_nodes = np.flatnonzero(hanging)
-    order = np.argsort(region[hanging_nodes], kind='stable')
-    hanging_nodes = hanging_nodes[order]
-    starts = np.flatnonzero(np.diff(region[hanging_nodes], prepend=-1))
-
-    regions = np.split(hanging_nodes, starts[1:])
-    region_roots = []
-    for nodes in regions:
-        roots = nodes[is_root[nodes]]
-        region_roots.append(roots if len(roots) else _closest_to_scalp(nodes, gap))
-    # The regions don't touch, so one Dijkstra over all of them measures each from its own roots.
-    region_distance, source = _dijkstra(count, edges[inside], lengths[inside], np.concatenate(region_roots))
-
-    drafts = []   # (nodes, roots, whole)
-    arc = np.zeros(count)
-    for nodes, roots in zip(regions, region_roots):
-        mean = math.atan2(float((weight[nodes] * np.sin(theta[nodes])).sum()),
-                          float((weight[nodes] * np.cos(theta[nodes])).sum()))
-        scale = float(np.average(radius[roots], weights=weight[roots]))
-        arc[nodes] = ((theta[nodes] - mean + math.pi) % (2.0 * math.pi) - math.pi) * scale
-        own = arc[nodes]
-        # A region is connected and holds its roots, so the Dijkstra reached every vertex of it (a source of
-        # -1 would read the last vertex's arc).
-        assert (source[nodes] >= 0).all(), "a hanging region's vertex not reached from its roots"
-        root_arc = arc[source[nodes]]
-        root_span = float(np.ptp(arc[roots]))
-        own_span = float(np.ptp(own))
-        p = part[nodes[0]]
-        if part_hanging[p] >= 0.5 * part_area[p] and root_span <= WHOLE_WIDTH:
-            drafts.append((nodes, roots, True))
-            continue
-        span = max(root_span, HANG_DIRECTION_WEIGHT * own_span)
-        k = max(1, int(round(span / LOCK_WIDTH)))
-        if k == 1:
-            drafts.append((nodes, roots, False))
-            continue
-        features = np.column_stack((root_arc, HANG_DIRECTION_WEIGHT * own))
-        labels = _cut(features, weight[nodes], 0 if root_span >= HANG_DIRECTION_WEIGHT * own_span else 1, k)
-        for c in range(k):
-            mine = nodes[labels == c]
-            if not len(mine):
-                continue
-            own_roots = mine[np.isin(mine, roots)]
-            drafts.append((mine, own_roots if len(own_roots) else _closest_to_scalp(mine, gap), False))
-
-    # Small locks (crumbs) join the nearest lock (by root) of at least MIN_LOCK_AREA, across loose parts if
-    # need be, without moving its root; with none to join they are dropped. Crumbs never join each other. So
-    # does a lock without roots next to held hair (rooted where it comes closest to the scalp) whose root lies
-    # farther than ROOT_REACH from the scalp: a layer lying wholly on the neck. No chain starts on the neck or
-    # face.
-    owner = np.full(count, -1, dtype=np.int64)
-    for index, (nodes, _roots, _whole) in enumerate(drafts):
-        owner[nodes] = index
-    sizes = np.array([area[nodes].sum() for nodes, _roots, _whole in drafts])
-    roots_at = np.array([np.average(rest[roots], axis=0, weights=weight[roots]) for _nodes, roots, _whole in drafts])
-    natural = np.array([bool(is_root[roots].any()) for _nodes, roots, _whole in drafts])
-    alive = (sizes >= MIN_LOCK_AREA) & (natural | (rig.scalp_gap(roots_at, cap) <= ROOT_REACH))
-    target = np.where(alive, np.arange(len(drafts)), -1)
-    if alive.any():
-        for small in np.flatnonzero(~alive):
-            apart = np.linalg.norm(roots_at - roots_at[small], axis=1)
-            into = int(np.argmin(np.where(alive, apart, np.inf)))
-            target[small] = into
-            sizes[into] += sizes[small]
-    joined = (owner >= 0) & ~alive[np.maximum(owner, 0)]
-    owner = np.where(owner >= 0, target[np.maximum(owner, 0)], -1)
-
-    # Every lock measured again from its own roots, along itself; a piece its roots don't reach that way (a
-    # cut runs around it) keeps its distance from the region's roots. A joined crumb, often on another loose
-    # part, is as far from the lock's root as it is in a straight line.
-    is_lock_root = np.zeros(count, dtype=bool)
-    for index in np.flatnonzero(alive):
-        is_lock_root[drafts[index][1]] = True
-    within = (owner[edges[:, 0]] == owner[edges[:, 1]]) & (owner[edges[:, 0]] >= 0) & ~joined[edges[:, 0]] \
-        & ~joined[edges[:, 1]]
-    distance, _source = _dijkstra(count, edges[within], lengths[within], np.flatnonzero(is_lock_root))
-    measured = np.isfinite(distance)
-    distance = np.where(measured, distance, region_distance)
-    point_owner = owner[weld]
-    by_owner = np.argsort(point_owner, kind='stable')
-    bounds = np.searchsorted(point_owner[by_owner], np.arange(len(drafts) + 1))
-    locks = []
-    for index in np.flatnonzero(alive):
-        vertices = by_owner[bounds[index]:bounds[index + 1]]
-        root = roots_at[index]
-        crumb = joined[weld[vertices]]
-        lock_distance = distance[weld[vertices]]
-        lock_distance[crumb] = np.linalg.norm(rest[weld[vertices[crumb]]] - root, axis=1)
-        angle = _angle(rig, root)
-        _nodes, roots, whole = drafts[index]
-        # Light: most of its roots (by area) over the scalp, standing off the cap.
-        light = bool(weight[roots][share[roots] >= SCALP_HALF].sum() > 0.5 * weight[roots].sum())
-        locks.append(Lock(vertices, lock_distance, float(sizes[index]), root, whole, angle, crumb,
-                          point_area[vertices], measured[weld[vertices]] & ~crumb, light))
-    # Mirrored locks have the same angle but for float noise, which mustn't decide their order (chain names
-    # come from it): the lower root X first.
-    locks.sort(key=lambda lock: (round(lock.angle, 6), lock.root[0]))
-    return locks
-
-
 # -----------------------------------------------------------------------------
 # Chains
 
@@ -535,16 +257,17 @@ class ChainPlan:
     the lock's end, where the last bone ends), and the lock's ``area`` (m²), ``whole``, ``angle`` (degrees),
     ``vertices`` (indices of the points) and ``light`` (see `Lock`). The joints lie on the spine's arc (`_arc`);
     ``middle`` ((n, 3), the joints when None) is where they would lie on the spine itself, down the middle of
-    the lock's hair: merges stay on the hair by it (`_on_hair`). A column's chain (see plan_rig) has the
-    ``sheet`` it is in (from 0, the sheets numbered in the order of their first chain) and its ``order`` among
-    that sheet's chains (from 0, by column); a separate piece's has -1 for both. ``length`` is the spine's
-    (metres)."""
+    the lock's hair. A chain of `hairlanes.plan` has the ``sheet`` it is in (from 0, one per area, the sheets
+    numbered in the order of their first chain) and its ``order`` among that sheet's chains (from 0, across the
+    area); a chain the user selects (`plan_selection`) has -1 for both. ``length`` is the spine's (metres). A chain
+    of `hairlanes` counts in ``moved`` how many of its joints and tip its check moved onto its hair, and in
+    ``lifted`` how many of those off their row; 0 for both here."""
 
     __slots__ = ("kind", "joints", "tip", "area", "whole", "angle", "vertices", "light", "middle", "sheet", "order",
-                 "length")
+                 "length", "moved", "lifted")
 
     def __init__(self, kind, joints, tip, area, whole, angle, vertices, light=False, middle=None, sheet=-1,
-                 order=-1, length=0.0):
+                 order=-1, length=0.0, moved=0, lifted=0):
         self.kind = kind
         self.joints = joints
         self.tip = tip
@@ -557,6 +280,8 @@ class ChainPlan:
         self.sheet = sheet
         self.order = order
         self.length = length
+        self.moved = moved
+        self.lifted = lifted
 
 
 def chain_kind(angle, length, whole):
@@ -659,17 +384,17 @@ def plan_chain(points, lock, rig=None, bone_length=BONE_SPACING):
     (`_arc`): the first on the root, the next ones one bone length further each, the last one bone length short
     of the lock's end (the tip). With ``rig`` (`hairing.HairRig`), side hair whose tip lies behind SIDE_ANGLE is back
     hair: it falls back over the shoulder, and as side hair it would keep a chain of its own there. Back hair hanging
-    down to a tip in front of SIDE_ANGLE is side hair: it falls forward over the shoulder, and in a back column it
-    would pull that column's chain off the back. Back hair standing up (its tip above its root: a bun on the crown,
-    near the head's axis, where a 1 cm lean turns the angle round) stays back hair."""
+    down to a tip in front of SIDE_ANGLE is side hair: it falls forward over the shoulder. Back hair standing up (its
+    tip above its root: a bun on the crown, near the head's axis, where a 1 cm lean turns the angle round) stays back
+    hair."""
     line = spine(points, lock)
     seg = np.linalg.norm(np.diff(line, axis=0), axis=1)
     length = float(seg.sum())
     if length < MIN_CHAIN_LENGTH:
         return None
     count = int(np.clip(math.ceil(length / bone_length), *CHAIN_BONES))
-    # Only a round lock can be a ponytail (PONYTAIL_ROUND); a flat card stays whole for merging all the same.
-    # Roundness is measured only where it decides (chain_kind's last test): plan_rig plans every merge tried.
+    # Only a round lock can be a ponytail (PONYTAIL_ROUND). Roundness is measured only where it decides (chain_kind's
+    # last test).
     kind = chain_kind(lock.angle, length, lock.whole and lock.angle > SIDE_ANGLE and length >= PONYTAIL_LENGTH
                       and _round(points, lock))
     if kind == "side" and rig is not None and _angle(rig, line[-1]) > SIDE_ANGLE:
@@ -689,7 +414,7 @@ def plan_selection(points, tris, rig, selected, *, cap=None, bones=0, weld=None)
     the selection's tip are roots. Distances run along the whole welded mesh from them, so a sparse selection (one
     vertex row) still runs root to tip; the other parts (pieces lower down the lock) are measured on from the nearest
     measured selected hair. Its kind is planned like any lock's (`plan_chain`),
-    whole when its roots span no more than WHOLE_WIDTH, light by find_locks' rule. ``bones`` joints (0: by its
+    whole when its roots span no more than WHOLE_WIDTH, light as `Lock` has it. ``bones`` joints (0: by its
     length, as `plan_chain` counts them) lie on the selection's own middle line (`spine`), waves included, not on
     the arc: the user picked the hair it follows (user ruling 2026-11-13). ``cap`` is the hair's cap depth
     (`hairing.cap_depth`, measured from these points when None)."""
@@ -751,7 +476,7 @@ def plan_selection(points, tris, rig, selected, *, cap=None, bones=0, weld=None)
         pending.pop(k)
         distance, _source = _dijkstra(count, edges, lengths, roots)
     root = np.average(rest[roots], axis=0, weights=weight[roots])
-    # The roots' span around the head's vertical axis, as find_locks measures a region's.
+    # The roots' span around the head's vertical axis.
     axis_y = rig.by_name[HEAD].head[1]
     theta = np.arctan2(model[roots, 0], -(model[roots, 1] - axis_y))
     radius = np.hypot(model[roots, 0], model[roots, 1] - axis_y)
@@ -769,485 +494,7 @@ def plan_selection(points, tris, rig, selected, *, cap=None, bones=0, weld=None)
     return plan
 
 
-def _roots(lock):
-    """Positions in ``lock.vertices`` of its roots: its own vertices at distance 0 (the nearest one if
-    none is)."""
-    own = np.flatnonzero(~lock.joined)
-    roots = own[lock.distance[own] <= 0.0]
-    return roots if len(roots) else own[[int(np.argmin(lock.distance[own]))]]
-
-
-def _graph(mesh):
-    """The edges of ``mesh`` (`_welded`) by node: (ptr, to, edge), node v's neighbours being to[ptr[v]:ptr[v + 1]]
-    along the mesh's edges edge[ptr[v]:ptr[v + 1]]."""
-    _weld, count, _rest, _tris, edges = mesh
-    a = np.concatenate((edges[:, 0], edges[:, 1]))
-    order = np.argsort(a, kind='stable')
-    to = np.concatenate((edges[:, 1], edges[:, 0]))[order]
-    edge = np.concatenate((np.arange(len(edges)), np.arange(len(edges))))[order]
-    return np.searchsorted(a[order], np.arange(count + 1)), to, edge
-
-
-def _edges_from(graph, nodes, inside):
-    """The numbers of the edges (`_graph`) from ``nodes`` (unique) to nodes where ``inside`` (bool per node)
-    is set, in no order; an edge between two of ``nodes`` comes twice."""
-    ptr, to, edge = graph
-    starts = ptr[nodes]
-    counts = ptr[nodes + 1] - starts
-    at = np.repeat(starts - np.cumsum(counts) + counts, counts) + np.arange(int(counts.sum()))
-    return edge[at[inside[to[at]]]]
-
-
-def _root_arcs(rig, at, weights):
-    """The angles (radians) of world points ``at`` around the head's vertical axis in ``rig``'s model space,
-    about their ``weights``-weighted circular mean, and their weighted mean distance from the axis (metres):
-    an angle times that distance is an arc, as find_locks measures root spans."""
-    model = rig.model(at)
-    axis_y = rig.by_name[HEAD].head[1]
-    theta = np.arctan2(model[:, 0], -(model[:, 1] - axis_y))
-    mean = math.atan2(float((weights * np.sin(theta)).sum()), float((weights * np.cos(theta)).sum()))
-    radius = np.hypot(model[:, 0], model[:, 1] - axis_y)
-    return (theta - mean + math.pi) % (2.0 * math.pi) - math.pi, float(np.average(radius, weights=weights))
-
-
-def _polar(rig, at):
-    """The angles (radians) of world points ``at`` around the head's vertical axis in ``rig``'s model space, 0
-    straight in front (-Y), positive toward +X, +-pi behind, and their distances from that axis (metres)."""
-    model = rig.model(at)
-    axis_y = rig.by_name[HEAD].head[1]
-    return np.arctan2(model[:, 0], -(model[:, 1] - axis_y)), np.hypot(model[:, 0], model[:, 1] - axis_y)
-
-
-def _columns(kind, theta, areas, radius, width):
-    """The locks of a sheet of ``kind`` (the back sheet's vertices, `_vertex_columns`) cut into columns ``width``
-    wide (metres) by their roots' (the vertices' own) angles ``theta``
-    (`_polar`) times the sheet's ``radius``: lists of indices into ``theta`` and ``areas`` (m²), one per column by
-    column number. Back columns are centered straight behind, at most BACK_COLUMNS; bangs columns straight in
-    front; side columns start at the front, at most SIDE_COLUMNS, the last taking everything behind it. A column
-    under MIN_COLUMN_AREA joins the nearest other (by number; a tie goes to the larger, then the lower)."""
-    theta = np.asarray(theta, dtype=np.float64)
-    areas = np.asarray(areas, dtype=np.float64)
-    if kind == "back":
-        column = _back_numbers(theta, radius, width)
-    elif kind == "side":
-        column = np.floor(np.abs(theta) * radius / width)
-    else:
-        column = np.rint(theta * radius / width)
-    column = column.astype(np.int64)
-    while True:
-        numbers, at = np.unique(column, return_inverse=True)
-        area = np.bincount(at, areas, minlength=len(numbers))
-        small = np.flatnonzero(area < MIN_COLUMN_AREA)
-        if len(numbers) < 2 or not len(small):
-            break
-        joins = small[int(np.argmin(area[small]))]
-        into = min((k for k in range(len(numbers)) if k != joins),
-                   key=lambda k: (abs(int(numbers[k] - numbers[joins])), -area[k], numbers[k]))
-        column[at == joins] = numbers[into]
-    numbers = np.unique(column)
-    if kind == "side" and len(numbers) > SIDE_COLUMNS:
-        column[column > numbers[SIDE_COLUMNS - 1]] = numbers[SIDE_COLUMNS - 1]
-        numbers = numbers[:SIDE_COLUMNS]
-    return [np.flatnonzero(column == number).tolist() for number in numbers]
-
-
-def _back_numbers(theta, radius, width):
-    """The back column numbers of angles ``theta`` (`_columns`): 0 straight behind, at most BACK_COLUMNS // 2 to
-    either side, negative toward +X."""
-    # theta - pi, wrapped to [-pi, pi).
-    half = BACK_COLUMNS // 2
-    return np.clip(np.rint((np.asarray(theta) % (2.0 * math.pi) - math.pi) * radius / width), -half, half)
-
-
-def _behind(theta, far, radius):
-    """How far angles ``theta`` (`_polar`) lie from straight behind (radians, negative toward +X), each as an arc at
-    its own distance ``far`` from the head's axis (no less than ``radius``) over ``radius``: hair hanging farther
-    behind the head spans a smaller angle, and by the angle alone a middle column would widen down the back."""
-    return (np.asarray(theta) % (2.0 * math.pi) - math.pi) * np.maximum(far, radius) / radius
-
-
-def _quantiles(values, weights, shares):
-    """The ``weights``-weighted quantiles ``shares`` of ``values``, each value at the middle of its weight: mirrored
-    values with mirrored weights have mirrored quantiles."""
-    order = np.argsort(values, kind='stable')
-    values, weights = np.asarray(values, dtype=np.float64)[order], np.asarray(weights, dtype=np.float64)[order]
-    return np.interp(shares, (np.cumsum(weights) - 0.5 * weights) / weights.sum(), values)
-
-
-def _count_labels(cut, theta, far, radius, weights, count):
-    """The columns (0 to ``count`` - 1) of a sheet's vertices at angles ``theta`` and distances ``far`` from the
-    head's axis (`_polar`), of areas ``weights``, the sheet's roots ``radius`` from the axis, cut into ``count``
-    columns. ``cut`` "ring" (short hair, `_short`): equal sectors around the whole head, the first centered straight
-    in front, then on toward +X. Otherwise equal arcs between the sheet's COUNT_QUANTILES: "back" and "ponytail"
-    across the back (`_behind`), +X first; "side" from the front back; "bangs" across the front, -X first."""
-    if cut == "ring":
-        return np.rint(np.asarray(theta) / (2.0 * math.pi / count)).astype(np.int64) % count
-    if cut in ("back", "ponytail"):
-        value = _behind(theta, far, radius)
-    elif cut == "side":
-        value = np.abs(theta)
-    else:
-        value = np.asarray(theta, dtype=np.float64)
-    low, high = _quantiles(value, weights, COUNT_QUANTILES)
-    step = (high - low) / count
-    if step <= 0.0:
-        return np.zeros(len(value), dtype=np.int64)
-    return np.clip(np.floor((value - low) / step), 0, count - 1).astype(np.int64)
-
-
-def _vertex_columns(points, rig, locks, radius, width, cut="back", count=None):
-    """With ``count`` (a chain count, `ChainCounts`), the sheet's ``locks`` cut into ``count`` columns by where its
-    hair hangs, each own vertex by `_count_labels` (``cut``, the sheet's ``radius``), no column joining another; a
-    lock's crumbs go with it, into the column holding most of its own hair. Without, the back sheet's ``locks`` cut
-    into columns ``width`` wide around the head by where its hair hangs: each
-    of their own (not joined) vertices, whatever lock or strand it is in, by its own angle around the head's
-    vertical axis (`_polar`) times its distance from that axis (no less than ``radius``, the sheet's root radius),
-    into the back columns of `_columns` (the middle one straight behind,
-    the rest to either side, the small-column rule over the vertices' areas). A lock's crumbs (``joined``) go
-    with it, into the column holding most of its own hair, and count there. A column's own hair past a gap of
-    COLUMN_GAP in its distances from the roots goes to the other column holding most of its lock, when one holds
-    any. One `Lock` per column, the +X side (the character's left)
-    first, as `_columns` numbers them; columns without hair of their own are left out. A column's lock keeps each
-    vertex's distance from its own lock's roots, as `_merge` does for locks that don't touch; its root is the
-    area-weighted mean of the column's roots (vertices at distance 0), or of its own hair nearest its locks'
-    roots (within ROOT_BAND) when it holds none. Never whole, never light."""
-    if not locks:
-        return []
-    every = np.concatenate([lock.vertices for lock in locks])
-    joined_all = np.concatenate([np.asarray(lock.joined, dtype=bool) for lock in locks])
-    distance_all = np.concatenate([np.asarray(lock.distance, dtype=np.float64) for lock in locks])
-    area_all = np.concatenate([np.full(len(lock.vertices), lock.area / max(len(lock.vertices), 1))
-                               if lock.areas is None else np.asarray(lock.areas, dtype=np.float64) for lock in locks])
-    measured_all = None
-    if all(lock.measured is not None for lock in locks):
-        measured_all = np.concatenate([np.asarray(lock.measured, dtype=bool) for lock in locks])
-    own = np.flatnonzero(~joined_all)
-    theta, far = _polar(rig, points[every[own]])
-    owner = np.repeat(np.arange(len(locks)), [len(lock.vertices) for lock in locks])
-    crumbs = np.flatnonzero(joined_all)
-    label = np.zeros(len(every), dtype=np.int64)
-    if count is not None:
-        columns = count
-        label[own] = _count_labels(cut, theta, far, radius, area_all[own], count)
-        # Crumbs follow their lock, as find_locks joined them: into the column holding most of its own hair.
-        held = np.zeros((len(locks), count))
-        np.add.at(held, (owner[own], label[own]), area_all[own])
-        label[crumbs] = np.argmax(held[owner[crumbs]], axis=1)
-    else:
-        # Each vertex's arc at its own distance from the axis (`_behind`).
-        theta = math.pi + np.clip(_behind(theta, far, radius), -math.pi + 1e-9, math.pi - 1e-9)
-        # Crumbs follow their lock, as find_locks joined them: into the column holding most of its own hair,
-        # where the small-column rule counts them, one item per lock in the middle of that column.
-        half = BACK_COLUMNS // 2
-        held = np.zeros((len(locks), 2 * half + 1))
-        np.add.at(held, (owner[own], _back_numbers(theta, radius, width).astype(np.int64) + half), area_all[own])
-        crumb_locks = np.unique(owner[crumbs])
-        crumb_theta = math.pi + (np.argmax(held[crumb_locks], axis=1) - half) * width / radius
-        crumb_area = np.bincount(owner[crumbs], area_all[crumbs], minlength=len(locks))[crumb_locks]
-        groups = _columns("back", np.concatenate((theta, crumb_theta)), np.concatenate((area_all[own], crumb_area)),
-                          radius, width)
-        columns = len(groups)
-        for c, group in enumerate(groups):
-            group = np.asarray(group, dtype=np.int64)
-            label[own[group[group < len(own)]]] = c
-            label[crumbs[np.isin(owner[crumbs], crumb_locks[group[group >= len(own)] - len(own)])]] = c
-    # A column's own hair past a gap (COLUMN_GAP) goes back to the other column holding most of its lock.
-    held = np.zeros((len(locks), columns))
-    np.add.at(held, (owner[own], label[own]), area_all[own])
-    for c in range(columns):
-        mine = own[label[own] == c]
-        if not len(mine):
-            continue
-        reach = np.sort(distance_all[mine])
-        gaps = np.flatnonzero(np.diff(reach) > COLUMN_GAP)
-        if not len(gaps):
-            continue
-        beyond = mine[distance_all[mine] > reach[gaps[0]]]
-        others = held[owner[beyond]].copy()
-        others[:, c] = -1.0
-        elsewhere = others.max(axis=1) > 0.0
-        label[beyond[elsewhere]] = np.argmax(others[elsewhere], axis=1)
-    result = []
-    for c in range(columns):
-        column = np.flatnonzero(label == c)
-        column = column[np.argsort(every[column], kind='stable')]
-        vertices, joined, distance, area = every[column], joined_all[column], distance_all[column], area_all[column]
-        if joined.all():
-            continue
-        measured = None if measured_all is None else measured_all[column]
-        roots = ~joined & (distance <= 0.0)
-        if not roots.any():
-            roots = ~joined & (distance <= float(distance[~joined].min()) + ROOT_BAND)
-        root = np.average(points[vertices[roots]], axis=0, weights=area[roots] + 1e-12)
-        result.append(Lock(vertices, distance, float(area.sum()), root, False, _angle(rig, root), joined,
-                           area if all(lock.areas is not None for lock in locks) else None, measured, False))
-    return result
-
-
-def _merge(target, small, mesh, points, rig, graph=None):
-    """The lock ``small`` merged into ``target`` (`Lock`s) on ``mesh`` (`_welded`, with its `_graph`, found
-    here when None): both locks' vertices and area, ``whole`` when both are and one's roots lie within the
-    other's (WITHIN_SLACK), spanning at most WHOLE_WIDTH around the head (`_root_arcs`). The roots of both
-    are the merged lock's roots: its root is their area-weighted mean, and its distances are measured again
-    from them along the hair of both, so the small lock's own vertices are measured from its own roots when
-    it is another loose part. Vertices of the target those roots don't reach keep their distance, as
-    find_locks measured it; those of the small lock join like a crumb. Crumbs are measured in a straight line
-    from the new root. The merged lock is light when both are.
-
-    When the two locks share no edge (separate loose parts), each one's distances from its own roots stand
-    as they are; otherwise they are measured again on the merged lock's own part of the mesh, not the whole
-    mesh. Both give the same distances: a merge runs in time with the size of the locks, not of the hair."""
-    weld, count, rest, _tris, edges = mesh
-    if graph is None:
-        graph = _graph(mesh)
-    vertices = np.concatenate((target.vertices, small.vertices))
-    order = np.argsort(vertices, kind='stable')
-    vertices = vertices[order]
-    joined = np.concatenate((target.joined, small.joined))[order]
-    distance = np.concatenate((target.distance, small.distance)).astype(np.float64)[order]
-    from_small = (np.arange(len(order)) >= len(target.vertices))[order]
-    areas = None
-    if target.areas is not None and small.areas is not None:
-        areas = np.concatenate((target.areas, small.areas))[order]
-    roots = np.argsort(order)[np.concatenate((_roots(target), len(target.vertices) + _roots(small)))]
-    weight = (np.ones(len(vertices)) if areas is None else areas)[roots] + 1e-12
-    root = np.average(points[vertices[roots]], axis=0, weights=weight)
-    nodes = weld[vertices]
-    own = ~joined
-    target_free = np.zeros(count, dtype=bool)
-    target_free[weld[target.vertices[~target.joined]]] = True
-    small_free = np.unique(weld[small.vertices[~small.joined]])
-    if target.measured is not None and small.measured is not None \
-            and not len(_edges_from(graph, small_free, target_free)):
-        # Nothing joins the two: measured from the roots of both, each keeps its distances from its own.
-        reached = np.concatenate((target.measured, small.measured))[order] & own
-    else:
-        free_nodes = np.unique(nodes[own])
-        free = target_free
-        free[small_free] = True
-        sub = np.unique(_edges_from(graph, free_nodes, free))
-        lengths = np.linalg.norm(rest[edges[sub, 0]] - rest[edges[sub, 1]], axis=1)
-        local, _source = _dijkstra(len(free_nodes), np.searchsorted(free_nodes, edges[sub]).reshape(-1, 2), lengths,
-                                   np.searchsorted(free_nodes, np.unique(nodes[roots])))
-        measured = np.full(len(vertices), math.inf)
-        measured[own] = local[np.searchsorted(free_nodes, nodes[own])]
-        reached = own & np.isfinite(measured)
-        distance[reached] = measured[reached]
-    joined = joined | (from_small & ~reached)
-    distance[joined] = np.linalg.norm(points[vertices[joined]] - root, axis=1)
-    # Whole when both are, their roots span at most WHOLE_WIDTH together, and one's roots lie within the
-    # other's (around the head): layers of one ponytail, not strands or cards side by side.
-    whole = bool(target.whole and small.whole)
-    if whole:
-        arcs, scale = _root_arcs(rig, points[vertices[roots]], weight)
-        mine = ~from_small[roots]
-        span = float(np.ptp(arcs))
-        whole = span * scale <= WHOLE_WIDTH and span <= max(float(np.ptp(arcs[mine])), float(np.ptp(arcs[~mine]))) \
-            + WITHIN_SLACK
-    return Lock(vertices, distance, target.area + small.area, root, whole, _angle(rig, root), joined, areas, reached,
-                target.light and small.light)
-
-
-def _enclosed(own, point, direction):
-    """Whether hair ``own`` ((n, 3)) surrounds ``point`` seen along ``direction`` (unit): its vertices within
-    WHOLE_WIDTH of the point leave no gap around it wider than ENCLOSED_GAP."""
-    offset = own - point
-    offset = offset[np.einsum('ij,ij->i', offset, offset) <= WHOLE_WIDTH * WHOLE_WIDTH]
-    if len(offset) < 3:
-        return False
-    u = np.cross(direction, (1.0, 0.0, 0.0) if abs(direction[0]) < 0.9 else (0.0, 1.0, 0.0))
-    u /= np.linalg.norm(u)
-    v = np.cross(direction, u)
-    around = np.sort(np.arctan2(offset @ v, offset @ u))
-    gaps = np.diff(np.concatenate((around, [around[0] + 2.0 * math.pi])))
-    return bool(math.degrees(float(gaps.max())) <= ENCLOSED_GAP)
-
-
-def _on_hair(points, lock, chain):
-    """Whether ``chain`` (`ChainPlan`, or None) runs down ``lock``'s own hair: each of its joints on the spine
-    (``middle``) and its tip within SPINE_REACH of the lock's own (not joined) vertices, or enclosed by them
-    (`_enclosed`, seen along the chain there: a hollow ponytail's middle)."""
-    own = points[lock.vertices[~lock.joined]]
-    if chain is None or not len(own):
-        return False
-    line = np.vstack((chain.middle, chain.tip))
-    gap = np.min(((own[None, :, :] - line[:, None, :]) ** 2).sum(axis=2), axis=1)
-    for k in np.flatnonzero(gap > SPINE_REACH * SPINE_REACH).tolist():
-        direction = line[min(k + 1, len(line) - 1)] - line[max(k - 1, 0)]
-        length = float(np.linalg.norm(direction))
-        if length <= 0.0 or not _enclosed(own, line[k], direction / length):
-            return False
-    return True
-
-
-def _merge_pieces(points, mesh, graph, rig, planned, spacing, max_bones, bone_length=BONE_SPACING):
-    """The (`Lock`, `ChainPlan`) pairs ``planned`` (on ``mesh``, `_welded`, with its `_graph` ``graph``, which
-    may be None for fewer than two pairs) after merging, the ones left in their order in ``planned``. Locks
-    merge (both hang from both roots, see `_merge`) and the merged lock is planned again (`plan_chain`, a bone
-    per ``bone_length``): twin layers (roots within TWIN_REACH) always, the smaller into the larger; then,
-    while any two of one kind have roots closer than ``spacing`` (metres), the smallest of them into the
-    nearest (by root) of its kind. While the chains then take more than ``max_bones`` bones, the smallest lock
-    that shares its kind with another merges into the nearest (by root) of that kind; when no two share a
-    kind, the smallest into the nearest of any kind. A merge other than of twins whose chain leaves the hair
-    (`_on_hair`) is refused and the next nearest tried; when none is left, the lock stays as it is. Over the
-    budget the next smallest lock is tried then, and only when no lock has a merge that stays on the hair does
-    the smallest merge into its nearest after all. With ``spacing`` 0 and ``max_bones`` infinite only twins
-    merge."""
-    planned = list(planned)
-    # The locks stay in their places in ``planned``, the merged ones marked gone (not ``alive``), so the
-    # smallest and the nearest are the first ones in the same order as among the locks left.
-    alive = np.ones(len(planned), dtype=bool)
-    areas = np.array([lock.area for lock, _chain in planned], dtype=np.float64)
-    roots = np.array([lock.root for lock, _chain in planned], dtype=np.float64).reshape(-1, 3)
-    kinds = np.array([KINDS.index(chain.kind) for _lock, chain in planned], dtype=np.int64)
-    left = len(planned)
-    bones = sum(len(chain.joints) for _lock, chain in planned)
-    # Each lock's nearest other lock (by root), to find twins, and its nearest of its own kind, for the
-    # spacing, kept up to date as locks merge.
-    near = np.full(len(planned), math.inf)
-    near_to = np.zeros(len(planned), dtype=np.int64)
-    kin = np.full(len(planned), math.inf)
-    kin_to = np.zeros(len(planned), dtype=np.int64)
-    rows = np.arange(len(planned))
-    for start in range(0, len(planned) if left > 1 else 0, 512):
-        gap = np.linalg.norm(roots[start:start + 512, None, :] - roots[None, :, :], axis=2)
-        at = rows[:len(gap)]
-        gap[at, start + at] = math.inf
-        near_to[start:start + 512] = np.argmin(gap, axis=1)
-        near[start:start + 512] = gap[at, near_to[start:start + 512]]
-        gap[kinds[start:start + 512, None] != kinds[None, :]] = math.inf
-        kin_to[start:start + 512] = np.argmin(gap, axis=1)
-        kin[start:start + 512] = gap[at, kin_to[start:start + 512]]
-    # Locks no merge within the spacing keeps on the hair: they stay, until a merge brings another lock near.
-    settled = np.zeros(len(planned), dtype=bool)
-    # How many locks merged into each.
-    version = np.zeros(len(planned), dtype=np.int64)
-
-    def gaps(k):
-        """The distances of the locks left from lock ``k``'s root (infinite to itself and the merged ones)."""
-        gap = np.linalg.norm(roots - roots[k], axis=1)
-        gap[k] = math.inf
-        gap[~alive] = math.inf
-        return gap
-
-    def find_near(k):
-        gap = gaps(k)
-        near_to[k] = int(np.argmin(gap))
-        near[k] = gap[near_to[k]]
-        same = np.where(kinds == kinds[k], gap, math.inf)
-        kin_to[k] = int(np.argmin(same))
-        kin[k] = same[kin_to[k]]
-        return gap
-
-    def try_merge(small, into):
-        merged = _merge(planned[into][0], planned[small][0], mesh, points, rig, graph)
-        return merged, plan_chain(points, merged, rig, bone_length)
-
-    def join(small, into, merged, chain):
-        """Lock ``small`` merged into ``into`` as ``merged``, planned as ``chain``."""
-        nonlocal left, bones
-        bones -= len(planned[into][1].joints) + len(planned[small][1].joints)
-        planned[into] = (merged, chain)
-        version[into] += 1
-        alive[small] = False
-        left -= 1
-        if chain is None:
-            alive[into] = False
-            left -= 1
-        else:
-            bones += len(chain.joints)
-            areas[into] = merged.area
-            roots[into] = merged.root
-            kinds[into] = KINDS.index(chain.kind)
-        # The nearest locks again: of those whose nearest was one of the two, of the merged lock, and of the
-        # others where the merged lock's new root is nearer.
-        stale = alive & ((near_to == small) | (near_to == into) | (kin_to == small) | (kin_to == into))
-        stale[into] = False
-        for k in np.flatnonzero(stale):
-            find_near(k)
-        if alive[into]:
-            gap = find_near(into)
-            closer = alive & (gap < near)
-            near[closer] = gap[closer]
-            near_to[closer] = into
-            closer = alive & (kinds == kinds[into]) & (gap < kin)
-            kin[closer] = gap[closer]
-            kin_to[closer] = into
-            # The merged lock is new: it, and the locks of its kind within the spacing, look for partners again.
-            settled[into] = False
-            settled[alive & (kinds == kinds[into]) & (gap < spacing)] = False
-
-    def merge_twins():
-        """Merges the smallest twin into its twin, the larger; False when there are none."""
-        twins = alive & (near <= TWIN_REACH)
-        if not twins.any():
-            return False
-        # The smallest twin's nearest is a twin too.
-        small = int(np.argmin(np.where(twins, areas, math.inf)))
-        into = int(near_to[small])
-        join(small, into, *try_merge(small, into))
-        return True
-
-    while left > 1:
-        if merge_twins():
-            continue
-        ready = alive & ~settled & (kin < spacing)
-        if not ready.any():
-            break
-        small = int(np.argmin(np.where(ready, areas, math.inf)))
-        gap = gaps(small)
-        gap[kinds != kinds[small]] = math.inf
-        settled[small] = True
-        for into in np.argsort(gap, kind='stable')[:int((gap < spacing).sum())]:
-            merged, chain = try_merge(small, int(into))
-            if _on_hair(points, merged, chain):
-                join(small, int(into), merged, chain)
-                break
-    # Merges over the budget found to leave the hair, as (small, its version, into, its version): a lock's
-    # version counts the merges into it, so a pair is tried again only once one of the two changed.
-    refused = set()
-    while left > 1 and bones > max_bones:
-        if merge_twins():
-            continue
-        shared = alive & (np.bincount(kinds[alive], minlength=len(KINDS))[kinds] >= 2)
-        eligible = np.flatnonzero(shared if shared.any() else alive)
-        # The smallest lock first; when none of its merges keeps it on the hair, the next smallest.
-        order = eligible[np.argsort(areas[eligible], kind='stable')]
-        done = False
-        for small in order.tolist():
-            gap = gaps(small)
-            if shared.any():
-                gap[kinds != kinds[small]] = math.inf
-            for into in np.argsort(gap, kind='stable')[:int(np.isfinite(gap).sum())].tolist():
-                key = (small, int(version[small]), into, int(version[into]))
-                if key in refused:
-                    continue
-                merged, chain = try_merge(small, into)
-                if _on_hair(points, merged, chain):
-                    join(small, into, merged, chain)
-                    done = True
-                    break
-                refused.add(key)
-            if done:
-                break
-        if not done:
-            # No lock has a merge that keeps it on the hair: the budget wins, the smallest into its nearest.
-            small = int(order[0])
-            gap = gaps(small)
-            if shared.any():
-                gap[kinds != kinds[small]] = math.inf
-            into = int(np.argmin(gap))
-            join(small, into, *try_merge(small, into))
-    return [pair for pair, keep in zip(planned, alive) if keep]
-
-
 AREAS = ("back", "ponytail", "left", "right", "bangs")
-
-
-def _short(planned):
-    """Whether the hair of ``planned`` ((`Lock`, `ChainPlan`) pairs) is short: it has locks, none of them longer than
-    BANGS_LENGTH. A separate piece counts too: hair with a long ponytail isn't short, a bun on short hair is."""
-    return bool(planned) and max(chain.length for _lock, chain in planned) <= BANGS_LENGTH
 
 
 def plan_rig(points, tris, rig, **options):
@@ -1257,177 +504,29 @@ def plan_rig(points, tris, rig, **options):
 
 def plan_layout(points, tris, rig, *, cap=None, weld=None, max_bones=MAX_HAIR_BONES, spacing=CHAIN_SPACING,
                 ponytail=False, counts=None):
-    """(chains, areas, short): the chains of a hair skeleton (below), how many column chains each area has
-    ({name in AREAS: count}; ``ponytail`` also counts the tied tail, separate pieces count nowhere) and whether
-    the hair is short (`_short`, measured with or without ``counts``).
-
-    With ``counts`` (`ChainCounts`) the user's counts cut the sheets and the tied tail into columns (see the module's
-    notes); short hair is then one bangs sheet around the head and isn't tied into a ponytail. Without, as follows.
-    The chains of a hair skeleton for hair ``points`` (world space, rest pose) with triangles ``tris``
-    hanging from ``rig`` (`hairing.HairRig`), its cap ``cap`` off the head (see `find_locks`), in name order
-    (by angle, then by the root's X). With ``ponytail`` (Hair Type Ponytail), every lock whose chain is back hair
-    or a ponytail first merges into one (the largest first) with one chain of kind ponytail, a separate piece
-    that keeps its kind over the budget; the game then swings the whole tail as one and doesn't hold it to the
-    back. The rest go on as follows. The locks (`find_locks`) whose spine is long enough split into separate
-    pieces (kept whole and round, `_round`) and sheet locks. The pieces merge (`_merge_pieces`: twins, then
-    within ``spacing`` metres) and get a chain each. The sheet locks merge their twins and make a sheet per
-    kind, side hair one per side of the head; each sheet is cut into columns ``spacing`` metres wide around
-    the head (`_columns`, at the sheet's area-weighted mean root radius, the two sides' shared), and each
-    column's locks merge into one (the largest first) with one chain of the sheet's kind, not light; the back
-    sheet's hair goes into its columns vertex by vertex instead, by where it hangs (`_vertex_columns`). Over
-    ``max_bones`` bones, the bones get longer: BONE_SPACING grows by BONE_GROWTH and every chain is planned
-    again, until the rig fits or every chain has CHAIN_BONES[0] bones. Only a rig still over then merges its
-    pieces (`_merge_pieces`), until it fits or one piece is left: the columns never merge, so a rig whose
-    columns alone take more than ``max_bones`` bones at CHAIN_BONES[0] each stays over."""
+    """(chains, made, short): the chains (`ChainPlan`, world space) of a hair skeleton for hair ``points`` (world
+    space, rest pose) with triangles ``tris`` hanging from ``rig`` (`hairing.HairRig`), its cap ``cap`` off the head
+    (`hairing.cap_depth`, measured from these points when None), how many each area got ({name in AREAS: count}) and
+    whether the hair is short, as `hairlanes.plan` plans them: each area cut into as many lanes side by side as
+    ``counts`` (`ChainCounts`) gives it, without counts as many as Detect proposes at ``spacing`` (metres, above 0);
+    ``ponytail`` is Hair Type Ponytail, ``max_bones`` the budget."""
     if spacing <= 0.0:
         raise ValueError("The chain spacing must be above 0")
-    points = np.asarray(points, dtype=np.float64)
-    mesh = _welded(points, tris, weld)
-    made = dict.fromkeys(AREAS, 0)
-    if mesh is None:
-        return [], made, False
-    locks = find_locks(points, tris, rig, cap=cap, weld=mesh[0])
-    planned = [(lock, plan_chain(points, lock, rig)) for lock in locks]
-    planned = [(lock, chain) for lock, chain in planned if chain is not None]
-    graph = _graph(mesh) if len(planned) > 1 else None
-    short = _short(planned)
-    ring = counts is not None and short
-
-    def tail_chain(lock, bone_length):
-        """The tied tail's chain: a ponytail."""
-        chain = plan_chain(points, lock, rig, bone_length)
-        if chain is not None:
-            chain.kind = "ponytail"
-        return chain
-
-    tails = []   # Hair Type Ponytail: (lock, chain) of the one tail tied from all the hair behind the head
-    tied = None   # ...or its lock, to cut into more than one ponytail chain (``counts``)
-    if ponytail and not ring:
-        behind = sorted((pair for pair in planned if pair[1].kind in ("back", "ponytail")),
-                        key=lambda pair: -pair[0].area)
-        if behind:
-            lock = behind[0][0]
-            for other, _chain in behind[1:]:
-                lock = _merge(lock, other, mesh, points, rig, graph)
-            chain = tail_chain(lock, BONE_SPACING)
-            if chain is not None:
-                if counts is not None and counts.ponytail > 1:
-                    tied = lock
-                else:
-                    tails = [(lock, chain)]
-                planned = [pair for pair in planned if pair[1].kind not in ("back", "ponytail")]
-    # With counts the user's count decides an area's chains: a round lock goes into its area's sheet, a ponytail
-    # (Hair Type Loose: Hair Type Ponytail tied it above) into the back's. Short hair's pieces (a bun) keep theirs.
-    separate = [lock.whole and _round(points, lock) and (counts is None or ring) for lock, _chain in planned]
-    pieces = [pair for pair, piece in zip(planned, separate) if piece]
-    sheet_locks = _merge_pieces(points, mesh, graph, rig, [pair for pair, piece in zip(planned, separate)
-                                                           if not piece], 0.0, math.inf)
-    pieces = _merge_pieces(points, mesh, graph, rig, pieces, spacing, math.inf)
-
-    def column_chain(lock, kind, bone_length):
-        """A column's chain: of the sheet's ``kind``, never light."""
-        chain = plan_chain(points, lock, rig, bone_length)
-        if chain is not None:
-            chain.kind = kind
-            chain.light = False
-        return chain
-
-    # The sheets, by kind and, for side hair, by side: (kind, on the -X side) -> indices into sheet_locks.
-    columns = []   # (lock, chain, sheet, column number)
-    if tied is not None:
-        # The tied tail cut into its ponytail chains side by side, as the back.
-        _theta, radius = _polar(rig, tied.root.reshape(1, 3))
-        for c, lock in enumerate(_vertex_columns(points, rig, [tied], float(radius[0]), spacing, "ponytail",
-                                                 counts.ponytail)):
-            chain = column_chain(lock, "ponytail", BONE_SPACING)
-            if chain is not None:
-                columns.append((lock, chain, ("ponytail", False), c))
-    if sheet_locks:
-        theta, radius = _polar(rig, np.array([lock.root for lock, _chain in sheet_locks]).reshape(-1, 3))
-        areas = np.array([lock.area for lock, _chain in sheet_locks], dtype=np.float64)
-        # Short hair with counts: one bangs sheet around the whole head.
-        # With counts a ponytail left untied (Hair Type Loose) is back hair.
-        kinds = ["bangs" if ring else "back" if counts is not None and chain.kind == "ponytail" else chain.kind
-                 for _lock, chain in sheet_locks]
-        sheets = {}
-        for k, kind in enumerate(kinds):
-            sheets.setdefault((kind, kind == "side" and bool(theta[k] < 0.0)), []).append(k)
-        for sheet, members in sheets.items():
-            kind = sheet[0]
-            # The two side sheets share one radius: mirrored hair is cut alike.
-            same = [k for k, other in enumerate(kinds) if other == kind]
-            scale = float(np.average(radius[same], weights=areas[same]))
-            members = np.array(members)
-            if counts is not None:
-                # The user's count of chains, the sheet's hair into its columns vertex by vertex.
-                count = counts.bangs if kind == "bangs" else counts.back if kind == "back" else \
-                    counts.right if sheet[1] else counts.left
-                for c, lock in enumerate(_vertex_columns(points, rig, [sheet_locks[k][0] for k in members], scale,
-                                                         spacing, "ring" if ring else kind, count)):
-                    chain = column_chain(lock, kind, BONE_SPACING)
-                    if chain is not None:
-                        columns.append((lock, chain, sheet, c))
-                continue
-            if kind == "back":
-                # The back's hair goes into its columns vertex by vertex, by where it hangs, not lock by lock.
-                for c, lock in enumerate(_vertex_columns(points, rig, [sheet_locks[k][0] for k in members], scale,
-                                                         spacing)):
-                    chain = column_chain(lock, kind, BONE_SPACING)
-                    if chain is not None:
-                        columns.append((lock, chain, sheet, c))
-                continue
-            for c, column in enumerate(_columns(kind, theta[members], areas[members], scale, spacing)):
-                # The largest lock first, the rest by decreasing area (stable: on a tie the earlier one).
-                into = sorted(members[column].tolist(), key=lambda k: -areas[k])
-                lock = sheet_locks[into[0]][0]
-                for k in into[1:]:
-                    lock = _merge(lock, sheet_locks[k][0], mesh, points, rig, graph)
-                chain = column_chain(lock, kind, BONE_SPACING)
-                if chain is not None:
-                    columns.append((lock, chain, sheet, c))
-
-    # Over the budget, the bones get longer and every chain is planned again; only a rig still over then merges
-    # its pieces. The spine doesn't depend on the bone length: no chain planned again becomes None.
-    bone_length = BONE_SPACING
-    chains = [chain for _lock, chain in pieces + tails] + [chain for _lock, chain, _sheet, _c in columns]
-    while sum(len(chain.joints) for chain in chains) > max_bones \
-            and any(len(chain.joints) > CHAIN_BONES[0] for chain in chains):
-        bone_length *= BONE_GROWTH
-        pieces = [(lock, plan_chain(points, lock, rig, bone_length)) for lock, _chain in pieces]
-        tails = [(lock, tail_chain(lock, bone_length)) for lock, _chain in tails]
-        columns = [(lock, column_chain(lock, sheet[0], bone_length), sheet, c) for lock, _chain, sheet, c in columns]
-        chains = [chain for _lock, chain in pieces + tails] + [chain for _lock, chain, _sheet, _c in columns]
-    # The columns and the tied tail never merge.
-    kept_bones = sum(len(chain.joints) for _lock, chain, _sheet, _c in columns) \
-        + sum(len(chain.joints) for _lock, chain in tails)
-    if sum(len(chain.joints) for chain in chains) > max_bones:
-        pieces = _merge_pieces(points, mesh, graph, rig, pieces, 0.0, max_bones - kept_bones, bone_length)
-    every = [(lock, chain, None, -1) for lock, chain in pieces + tails] + columns
-    # A merged lock's root moved: back in name order, as find_locks sorts.
-    every.sort(key=lambda item: (round(item[0].angle, 6), item[0].root[0]))
-    numbers = {}
-    for _lock, chain, sheet, _c in every:
-        if sheet is not None:
-            chain.sheet = numbers.setdefault(sheet, len(numbers))
-    for sheet in numbers:
-        mine = sorted((c, chain) for _lock, chain, other, c in every if other == sheet)
-        for order, (_c, chain) in enumerate(mine):
-            chain.order = order
-    made["ponytail"] += len(tails)
-    for _lock, _chain, sheet, _c in columns:
-        made[("right" if sheet[1] else "left") if sheet[0] == "side" else sheet[0]] += 1
-    return [chain for _lock, chain, _sheet, _c in every], made, short
+    # hairlanes imports this module.
+    from . import hairlanes
+    return hairlanes.plan(points, tris, rig, cap=cap, weld=weld, max_bones=max_bones, spacing=spacing,
+                          ponytail=ponytail, counts=counts)
 
 
 def detect_counts(points, tris, rig, *, cap=None, weld=None, spacing=CHAIN_SPACING, ponytail=False):
-    """The chain counts the hair gets without any (`plan_layout`, columns ``spacing`` wide; ``ponytail``: Hair Type
-    Ponytail), for Detect: ({name in AREAS: count, clamped to COUNT_RANGES}, short). An area without column chains
-    is left out. Short hair (`_short`) has one count, its chains around the whole head: "bangs"."""
-    _chains, made, short = plan_layout(points, tris, rig, cap=cap, weld=weld, spacing=spacing, ponytail=ponytail)
-    if short:
-        made = {"bangs": sum(made.values())}
-    return {area: min(max(count, COUNT_RANGES[area][0]), COUNT_RANGES[area][1])
-            for area, count in made.items() if count}, short
+    """The chain counts Detect proposes (`hairlanes.detect`, a chain per ``spacing`` metres, above 0, of each area's
+    width; ``ponytail``: Hair Type Ponytail): ({name in AREAS: count, clamped to COUNT_RANGES}, short). An area
+    without a chain to run is left out. Short hair has one count, its chains around the whole head: "bangs"."""
+    if spacing <= 0.0:
+        raise ValueError("The chain spacing must be above 0")
+    # hairlanes imports this module.
+    from . import hairlanes
+    return hairlanes.detect(points, tris, rig, cap=cap, weld=weld, spacing=spacing, ponytail=ponytail)
 
 
 # -----------------------------------------------------------------------------
@@ -1719,7 +818,7 @@ def _known_light(armature_object):
 
 
 def _known_columns(armature_object):
-    """{chain number: (sheet, order)} of the column chains (sheet 0 and on) in the rig state (numbered like
+    """{chain number: (sheet, order)} of the planned chains (sheet 0 and on) in the rig state (numbered like
     `_known_kinds`)."""
     columns = {}
     for index, chain in enumerate(armature_object.magic_fit_hair_rig.chains):
@@ -1794,7 +893,7 @@ def sync_rig(context, armature_object, race):
         names = [rename.get(name, name) for name in old]
         number = _parse(names[0])[0]
         # A new chain may take the number of one the user deleted: it doesn't take that one's kind, light or
-        # column.
+        # sheet.
         kind = kinds.get(number) if number not in fresh else None
         if kind is None:
             length = sum(float(np.linalg.norm(ends[name][1] - ends[name][0])) for name in old)

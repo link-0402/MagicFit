@@ -2420,8 +2420,9 @@ def hair_count_areas(settings, short):
 
 
 def chain_count_notes(settings, made, short):
-    """What the build reports of the chain counts: short hair's chains around the head, and each area with fewer
-    column chains than its count asks (``made``, `hairrig.plan_layout`) but some."""
+    """What the build reports of the chain counts: short hair's chains around the head, each area with fewer
+    chains than its count asks (``made``, `hairrig.plan_layout`) but some, and on hair that isn't short each area
+    asked for that got none."""
     notes = []
     if short:
         notes.append("Short hair: {:s} all around the head (Bang Chains)".format(hairrig.counted(made["bangs"], "chain")))
@@ -2430,6 +2431,8 @@ def chain_count_notes(settings, made, short):
         if 0 < made[area] < asked:
             notes.append("Built {:d} of {:d} {:s} chains: too little hair there for more".format(
                 made[area], asked, AREA_LABELS[area]))
+        elif asked and not made[area] and not short:
+            notes.append("No hair found for {:s} Chains: none built".format(AREA_LABELS[area]))
     return notes
 
 
@@ -2726,8 +2729,8 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
 
 
 class MAGIC_FIT_OT_detect_hair_chains(bpy.types.Operator):
-    """Set the chain counts to the ones Magic Fit finds on the hair (columns Chain Spacing wide around the head,
-    at most 3 behind and 2 per side). Areas without hair keep their counts"""
+    """Set the chain counts to the ones Magic Fit finds on the hair (a chain per Chain Spacing of each area's width,
+    within each count's range). Areas without hair keep their counts"""
     bl_idname = "magic_fit.detect_hair_chains"
     bl_label = "Detect"
     bl_options = {'REGISTER', 'UNDO'}
