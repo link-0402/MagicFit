@@ -397,7 +397,8 @@ class MagicFitSettings(bpy.types.PropertyGroup):
         name="Skin Weight",
         description=(
             "How much body weight to keep where the cloth touches the body, so it still follows the thighs and "
-            "butt when they're scaled (Customize+). 0: hang it all from the skirt bones, like the game's skirts"
+            "butt when they're scaled (Customize+). 0 keeps none there, but the top of the skirt still blends from "
+            "the body over Blend Length; set Blend Length to its lowest to hang it all from the skirt bones"
         ),
         subtype='FACTOR',
         default=1.0,
