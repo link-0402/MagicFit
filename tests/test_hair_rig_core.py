@@ -844,6 +844,24 @@ def test_side_counts():
               "degrees)".format(front, behind))
 
 
+def test_side_counts_take_round_locks():
+    # A round side strand (a separate piece without counts) goes into its side's columns with counts: Left Side
+    # Chains 2 gives the +X side two chains, not two and the strand's own (Maeve h0108 got three).
+    model_rig = rig()
+    p, a = math.radians(95.0), math.radians(120.0)
+    top = hair._onto_head(np.array(((math.sin(p) * math.sin(a), math.sin(p) * math.cos(a), math.cos(p)),)), 0.015,
+                          hair.RACE)[0][0]
+    strand = hair.tube(top, top + np.array((0.03, -0.02, -0.30)), 0.025, bend=(0.0, 0.0, 0.0))
+    co, tris, _ranges = join([side_strip(azimuth, 0.30, 0.04) for azimuth in (135.0, 100.0)] + [strand])
+    free, _made, _short = hairrig.plan_layout(co, tris, model_rig)
+    check(any(chain.kind == "side" and chain.sheet < 0 for chain in free),
+          "round side strand: a separate side piece without counts ({})".format(kinds_of(free)))
+    chains, made, _short = hairrig.plan_layout(co, tris, model_rig, counts=counts(left=2))
+    sides = [chain for chain in chains if chain.kind == "side"]
+    check(len(sides) == 2 and all(chain.sheet >= 0 for chain in sides) and made["left"] == 2,
+          "round side strand: Left 2 gives two side columns, the strand in them ({}, {})".format(kinds_of(chains), made))
+
+
 def bangs_strip(x=0.0, width=0.04):
     """`bangs_hair`'s strip, moved ``x`` along X and ``width`` wide: (vertices, quads)."""
     return hair.strip((x, -0.10, 1.625), (x, -0.19, 1.54), width, (1.0, 0.0, 0.0))
@@ -2452,7 +2470,7 @@ def main():
                      test_parted_locks, test_long_hair_chains, test_bangs_chain, test_pivot_at_root, test_even_joints,
                      test_wavy_lock_straight, test_kinds, test_columns, test_u_bottom, test_mirrored_sheet,
                      test_lopsided_locks, test_back_width, test_swept_sheet, test_ponytail_on_sheet, test_ponytail_hair_type, test_side_columns, test_back_counts,
-                     test_side_counts, test_bang_counts, test_short_hair_ring, test_ponytail_counts, test_detect_counts,
+                     test_side_counts, test_side_counts_take_round_locks, test_bang_counts, test_short_hair_ring, test_ponytail_counts, test_detect_counts,
                      test_forward_strand,
                      test_light_column,
                      test_budget, test_lone_kind_survives, test_card_hair_kinds, test_card_hair_time,
