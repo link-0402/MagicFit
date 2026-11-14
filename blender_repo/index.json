@@ -7,7 +7,7 @@
       "id": "magic_fit",
       "name": "Magic Fit",
       "tagline": "Transfer weights, fit, resize, line up and repair meshes",
-      "version": "1.1.5",
+      "version": "1.1.6",
       "type": "add-on",
       "maintainer": "Luci_xiv",
       "license": [
@@ -29,8 +29,8 @@
         "3.13"
       ],
       "archive_url": "./MagicFit.zip",
-      "archive_size": 33322105,
-      "archive_hash": "sha256:37032ed93adee9a06544d3504d5fafd329b13c16d231c02fa136d786ec4773b4"
+      "archive_size": 33407883,
+      "archive_hash": "sha256:8dabb7fbbfb906a9e07586dec334846e20d958e4090417b304795503723b741e"
     }
   ]
 }
