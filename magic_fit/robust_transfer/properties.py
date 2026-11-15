@@ -42,6 +42,15 @@ class WeightTransferObjectSettings(bpy.types.PropertyGroup):
         ),
         default=False,
     )
+    soft_rigid: BoolProperty(
+        name="Soft",
+        description=(
+            "With Rigid: pieces larger than 8 cm, like a chain strap, bend gently along the body instead of moving "
+            "as one block. Each point takes the average weights of the piece within 8 cm of it, so it stays "
+            "roughly in place and keeps its shape when the body grows under it"
+        ),
+        default=False,
+    )
 
 
 def update_enforce_four_bone_limit(self, _context):

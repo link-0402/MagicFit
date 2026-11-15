@@ -109,7 +109,11 @@ class VIEW3D_PT_weight_transfer_sidebar(tabs.TabPanel, bpy.types.Panel):
             row.active = bool(object_settings.inpaint_group)
             row.prop(object_settings, "inpaint_threshold", text="Threshold")
             # Rigid belongs to each mesh, and counts with Apply to All Selected too.
-            col.prop(object_settings, "rigid")
+            row = col.row(align=True)
+            row.prop(object_settings, "rigid")
+            soft = row.row(align=True)
+            soft.active = object_settings.rigid
+            soft.prop(object_settings, "soft_rigid", toggle=True)
         if settings.apply_to_selected:
             meshes = transfer_targets(context, settings, body_settings.target)
             rigid = sum(1 for mesh in meshes if mesh.magic_fit_transfer.rigid)

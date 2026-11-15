@@ -26,6 +26,11 @@ RIGID_THRESHOLD = 0.5 / 255.0
 # Loose parts of a Rigid mesh whose triangles cross or come this close are one piece, like the split segments of a
 # ring or a buckle's frame and prong. Pieces apart from each other, like the rings on two straps, move on their own.
 RIGID_GAP = 0.0003
+# Soft Rigid: a piece larger than SOFT_REACH (bounding box diagonal) gives each vertex the average of the piece's
+# weights within SOFT_REACH of it (fading out, smoothstep), so a long chain strap bends gently along the body instead
+# of moving as one block. Smaller pieces take one average, as Rigid does. 8 cm: the breast bones' heads lie 7 cm
+# apart, so a chain between the breasts takes both alike and isn't crushed when they grow.
+SOFT_REACH = 0.08
 # The other meshes of a transfer hold onto the Rigid ones: their vertices within HOLD_DISTANCE of a rigid piece
 # take its weights, and that change fades out along the mesh over HOLD_BLEND times the piece's size (its bounding
 # box's diagonal), so a strap looped around a ring stays on it instead of following the body under it.
@@ -835,6 +840,44 @@ def rigid_weights(values, areas, movable, limit=None):
     return average / total if total > WEIGHT_TOLERANCE else None
 
 
+def soft_rigid_weights(points, values, areas, movable, limit=None, reach=SOFT_REACH):
+    """`rigid_weights` for each of ``points`` (rows of ``values`` and ``areas``) over the others within ``reach``,
+    fading out by smoothstep: a vertices x movable groups array, or None when there's nothing to average. The
+    points are pooled in cells of an eighth of ``reach`` first, which keeps a long strap cheap."""
+    points = np.asarray(points, dtype=np.float64)
+    values = np.asarray(values, dtype=np.float64)[:, movable]
+    areas = np.asarray(areas, dtype=np.float64)
+    if areas.sum() <= 0.0:
+        areas = np.ones(len(points))
+    _cells, cell = np.unique(np.floor(points / (reach / 8.0)).astype(np.int64), axis=0, return_inverse=True)
+    cell = cell.reshape(-1)
+    mass = np.bincount(cell, weights=areas)
+    centre = np.column_stack([np.bincount(cell, weights=areas * points[:, k]) for k in range(3)])
+    centre /= np.maximum(mass, 1e-30)[:, None]
+    pooled = np.zeros((len(mass), values.shape[1]))
+    np.add.at(pooled, cell, areas[:, None] * values)
+    near = cKDTree(points).sparse_distance_matrix(cKDTree(centre), reach, output_type='ndarray')
+    fade = np.clip(near['v'] / reach, 0.0, 1.0)
+    strength = 1.0 - fade * fade * (3.0 - 2.0 * fade)
+    average = np.zeros_like(values)
+    np.add.at(average, near['i'], strength[:, None] * pooled[near['j']])
+    totals = average.sum(axis=1, keepdims=True)
+    average[average < RIGID_THRESHOLD * totals] = 0.0
+    if limit is not None:
+        average = weighttransfer.limit_groups_smoothly(average, int(limit))
+    totals = average.sum(axis=1, keepdims=True)
+    if not (totals > WEIGHT_TOLERANCE).any():
+        return None
+    empty = totals[:, 0] <= WEIGHT_TOLERANCE
+    if empty.any():
+        # Points whose surroundings hold no weight take the piece's one average.
+        whole = rigid_weights(values, areas, np.ones(values.shape[1], dtype=bool), limit)
+        if whole is None:
+            return None
+        average[empty], totals[empty] = whole, 1.0
+    return average / totals
+
+
 def rigid_pieces(vertices, triangles, gap=RIGID_GAP):
     """A piece number per vertex: the loose parts of the mesh (``vertices``, ``triangles``), joined where their
     triangles cross or a vertex of one comes within ``gap`` of the other, so they move together."""
@@ -870,7 +913,9 @@ def make_target_rigid(target, settings, transferred_deform_names, others=()):
     transfer staged for their vertices touching it. Any other piece moves as the body under it: the average of
     what the transfer staged for its own vertices. Averages are weighted by the vertices' share of the surface in
     the rest shape, after masks, seam sync and normalizing. They add up to 1, or to what locked groups leave;
-    locked groups keep their weights. Returns False when there's nothing to average."""
+    locked groups keep their weights. With Soft (``soft_rigid``), a piece larger than SOFT_REACH instead gives each
+    vertex the average of its own weights around it (`soft_rigid_weights`). Returns False when there's nothing to
+    average."""
     obj = target['obj']
     written = target['write_vertices']
     names = list(dict.fromkeys(list(transferred_deform_names) + target_deform_names(target)
@@ -889,19 +934,25 @@ def make_target_rigid(target, settings, transferred_deform_names, others=()):
     areas = vertex_areas(rest_vertices, rest_triangles)
     pieces = rigid_pieces(rest_vertices, rest_triangles)
     target['rigid_pieces'] = pieces
-    held = _holding_weights(rest_vertices, rest_triangles, pieces, others, names, piece_sizes(rest_vertices, pieces))
+    sizes = piece_sizes(rest_vertices, pieces)
+    held = _holding_weights(rest_vertices, rest_triangles, pieces, others, names, sizes)
+    soft = obj.magic_fit_transfer.soft_rigid
     made = False
     for piece in np.unique(pieces[written]):
         rows = np.flatnonzero(written & (pieces == piece))
         locked_values = values[rows][:, locked]
         locked_count = int((locked_values > 0).sum(axis=1).max()) if locked.any() else 0
         limit = max(1, settings.num_limit_groups - locked_count) if settings.enforce_four_bone_limit else None
-        source, source_areas = held.get(int(piece), (values[rows], areas[rows]))
-        shares = rigid_weights(source, source_areas, movable, limit)
+        if soft and sizes[piece] > SOFT_REACH:
+            # Soft Rigid: each vertex the average of the piece around it. The meshes touching it hold onto it.
+            shares = soft_rigid_weights(rest_vertices[rows], values[rows], areas[rows], movable, limit)
+        else:
+            source, source_areas = held.get(int(piece), (values[rows], areas[rows]))
+            shares = rigid_weights(source, source_areas, movable, limit)
         if shares is None:
             continue
         budget = np.clip(1.0 - locked_values.sum(axis=1), 0.0, 1.0)
-        values[np.ix_(rows, np.flatnonzero(movable))] = budget[:, None] * shares[None, :]
+        values[np.ix_(rows, np.flatnonzero(movable))] = budget[:, None] * np.atleast_2d(shares)
         made = True
     if not made:
         return False

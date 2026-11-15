@@ -1990,6 +1990,34 @@ class BlenderTests(TransferScene, unittest.TestCase):
             np.testing.assert_allclose(rigid[rows[0]], expected / expected.sum(), atol=1e-5)
         self.assertGreater(np.abs(rigid[0] - rigid[-1]).max(), 0.5)  # not one average for both
 
+    def test_soft_rigid_bends_long_pieces_and_keeps_small_ones_whole(self):
+        # A 40 cm strap along bones A to F and a 4 cm ring beside it, in one Rigid mesh.
+        self.rigid_scene()
+        strap, strap_f = flat_grid(np.linspace(0.05, 0.45, 41), np.linspace(0.05, 0.07, 2), 0.001)
+        ring, ring_f = flat_grid(np.linspace(0.25, 0.29, 5), np.linspace(0.12, 0.16, 5), 0.001)
+        target = self.mesh('Strap', np.vstack((strap, ring)), np.vstack((strap_f, ring_f + len(strap))))
+        target.magic_fit_transfer.rigid = True
+        self.select(target)
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        rigid = self.read(target, self.RIGID_BONES)
+        for group in list(target.vertex_groups):
+            target.vertex_groups.remove(group)
+        target.magic_fit_transfer.soft_rigid = True
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+        soft = self.read(target, self.RIGID_BONES)
+        strap_rows, ring_rows = np.arange(len(strap)), np.arange(len(strap), len(strap) + len(ring))
+        # The ring is smaller than SOFT_REACH: one set of weights, as with Rigid.
+        np.testing.assert_allclose(soft[ring_rows], rigid[ring_rows], atol=1e-6)
+        # Rigid moves the whole strap as one; Soft follows the body along it, the ends far apart.
+        self.assertLess(np.ptp(rigid[strap_rows], axis=0).max(), 1e-6)
+        np.testing.assert_allclose(soft.sum(axis=1), 1.0, atol=1e-5)
+        left, right = soft[strap_rows][strap[:, 0] < 0.06], soft[strap_rows][strap[:, 0] > 0.44]
+        self.assertGreater(left[:, :3].sum(axis=1).min(), 0.95)
+        self.assertGreater(right[:, 3:].sum(axis=1).min(), 0.95)
+        # No steps along the strap: neighbours a centimeter apart differ no more than the body's own 0.1.
+        order = np.argsort(strap[:, 0], kind='stable')[::2]
+        self.assertLess(np.abs(np.diff(soft[strap_rows][order], axis=0)).max(), 0.1)
+
     def test_meshes_hold_onto_rigid_pieces(self):
         # A strap with a ring lying on its end: transferred together, the strap takes the ring's weights where it
         # touches it, keeps its own beyond the blend, and blends in between.
