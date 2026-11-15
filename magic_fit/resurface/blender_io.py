@@ -534,6 +534,63 @@ def apply_result(obj, r, keep_original=True):
 # ==========================================================================================
 # smooth normals
 # ==========================================================================================
+EXPORT_VERTEX_LIMIT = 65535      # vertices per mesh in an MDL
+
+
+def export_vertex_estimate(obj):
+    """About how many vertices the game model gets from this mesh: the MDL exporter writes one vertex
+    per distinct (vertex, normal, tangent, UVs, colors) of its corners, like Instant Edit's exporter."""
+    me = obj.data
+    nl = len(me.loops)
+    if nl == 0:
+        return 0
+    lv = np.empty(nl, np.int64)
+    me.loops.foreach_get("vertex_index", lv)
+    cols = [lv[:, None].astype(np.float64)]
+    cn = np.empty(nl * 3, np.float32)
+    me.corner_normals.foreach_get("vector", cn)
+    cols.append(cn.reshape(-1, 3))
+    if me.uv_layers:
+        try:
+            me.calc_tangents(uvmap=me.uv_layers[0].name)
+            t = np.empty(nl * 3, np.float32)
+            me.loops.foreach_get("tangent", t)
+            sign = np.empty(nl, np.float32)
+            me.loops.foreach_get("bitangent_sign", sign)
+            cols += [t.reshape(-1, 3), sign[:, None]]
+        except RuntimeError:
+            pass                 # n-gons: no tangents, the exporter refuses them anyway
+        finally:
+            me.free_tangents()
+        for layer in me.uv_layers:
+            a = np.empty(nl * 2, np.float32)
+            layer.data.foreach_get("uv", a)
+            cols.append(a.reshape(-1, 2))
+    for ca in me.color_attributes:
+        a = np.empty(len(ca.data) * 4, np.float32)
+        ca.data.foreach_get("color", a)
+        a = a.reshape(-1, 4)
+        cols.append(a if ca.domain == "CORNER" else a[lv])
+    key = np.round(np.hstack(cols).astype(np.float64) * 1e4)
+    return len(np.unique(key, axis=0))
+
+
+def normals_broken(d, max_angle_deg=60.0, max_fraction=0.05):
+    """Whether an object's source normals need Smooth Normals (Smooth Normals: Auto): it has custom
+    normals, and more than `max_fraction` of its corners point farther than `max_angle_deg` from
+    their face (flipped corners included).  Without custom normals Blender shades from the faces.
+    Clean game meshes reach about 2% (small piercings, tied knots), so the limit is 5%."""
+    if not d.has_custom_normals or len(d.tri_loops) == 0:
+        return False
+    P = d.co[d.tri_verts]            # world space, like d.corner_normals
+    fn = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
+    fn /= np.maximum(np.linalg.norm(fn, axis=1), 1e-30)[:, None]
+    fn *= np.sign(np.linalg.det(d.matrix_world[:3, :3])) or 1.0   # a mirrored object winds the other way
+    loops = d.tri_loops.ravel()
+    dots = np.einsum("ij,ij->i", d.corner_normals[loops], np.repeat(fn, 3, axis=0))
+    return float((dots < np.cos(np.radians(max_angle_deg))).mean()) > max_fraction
+
+
 def loopmesh_from_objects(objects):
     """Combine mesh objects into one world-space LoopMesh.  Returns (mesh, info) with
     info = [(obj, vertex offset, loop offset, loop count, matrix_world)]."""

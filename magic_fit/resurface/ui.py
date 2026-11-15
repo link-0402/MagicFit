@@ -76,6 +76,7 @@ class VIEW3D_PT_mesh_rebuild_sidebar(_RepairPanel, bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         s = prepare(layout, context)
+        layout.operator("magic_fit.reset_rebuild_settings", icon="LOOP_BACK")
         col = layout.column()
         col.row(align=True).prop(s, "size_mode", expand=True)
         if s.size_mode == "RELATIVE":
@@ -87,12 +88,13 @@ class VIEW3D_PT_mesh_rebuild_sidebar(_RepairPanel, bpy.types.Panel):
         sub.active = s.adaptive
         sub.prop(s, "tolerance")
         sub.prop(s, "min_edge_ratio")
+        sub.prop(s, "normal_tolerance")
         col.prop(s, "iterations")
         col.column(heading="Remove").prop(s, "remove_hidden", text="Hidden Layers")
 
         col = layout.column(heading="Afterwards")
         row = col.row(align=True)
-        row.prop(s, "rebuild_normals")
+        row.prop(s, "rebuild_normals_mode")
         subtab_link(row, context, "NORMALS")
         row = col.row(align=True)
         row.prop(s, "rebuild_uvs")
@@ -157,7 +159,8 @@ class VIEW3D_PT_smooth_normals_sidebar(_RepairPanel, bpy.types.Panel):
         col.separator()
         big_button(col, "magic_fit.smooth_normals", icon="NORMALS_VERTEX_FACE",
                    text=objects_text(context, "Smooth", "Smooth Normals"))
-        note = "Rebuild Mesh applies these too" if s.rebuild_normals else "Rebuild Mesh can apply these too"
+        note = {"AUTO": "Rebuild Mesh applies these to broken normals", "ON": "Rebuild Mesh applies these too",
+                "OFF": "Rebuild Mesh can apply these too"}[s.rebuild_normals_mode]
         row = col.row()
         row.label(text=note, icon="INFO")
         subtab_link(row, context, "REBUILD")

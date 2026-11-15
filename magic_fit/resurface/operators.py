@@ -54,9 +54,24 @@ def format_report(rep):
         lines.append(f"Triangle quality: median {rm['q_med']:.2f}, worst 1% {rm['q_p1']:.2f}")
     if "normals" in rep:
         flipped = rep["normals"]["flipped"]
-        lines.append("Smooth normals" + (f", flipped {flipped:,} faces that pointed the wrong way" if flipped else ""))
+        flips = f", flipped {flipped:,} faces that pointed the wrong way" if flipped else ""
+        auto = rep["normals"].get("auto_smoothed")
+        if auto is None:
+            lines.append("Smooth normals" + flips)
+        elif auto:
+            lines.append(f"Smooth normals on {len(auto)} of {len(rep.get('written', []))} object(s) "
+                         f"(broken normals){flips}")
+        else:
+            lines.append("Kept the original shading (normals were clean)")
     if "uvs" in rep:
         lines.extend(format_uv_stats(rep["uvs"]).split("\n"))
+    counts = rep.get("export_vertices", [])
+    over = [(name, n) for name, n in counts if n > blender_io.EXPORT_VERTEX_LIMIT]
+    for name, n in over:
+        lines.append(f"'{name}': about {n:,} vertices after export, over the game's limit of "
+                     f"{blender_io.EXPORT_VERTEX_LIMIT:,} per mesh")
+    if counts and not over:
+        lines.append(f"About {max(n for _, n in counts):,} vertices after export")
     return "\n".join(lines)
 
 
@@ -161,6 +176,20 @@ class MAGIC_FIT_OT_rebuild_mesh(Operator):
         busy = "" if self._writing else "   Esc to cancel"
         context.workspace.status_text_set(f"Rebuild Mesh: {msg} ({frac * 100:.0f}%){busy}")
         return {"RUNNING_MODAL"}
+
+
+class MAGIC_FIT_OT_reset_rebuild_settings(Operator):
+    """Reset the Rebuild Mesh settings to their defaults (the other Mesh Repair tools keep theirs)"""
+    bl_idname = "magic_fit.reset_rebuild_settings"
+    bl_label = "Reset to Defaults"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        from .props import REBUILD_PROPS
+        settings = context.scene.magic_fit_repair
+        for name in REBUILD_PROPS:
+            settings.property_unset(name)
+        return {"FINISHED"}
 
 
 class MAGIC_FIT_OT_analyze_mesh(Operator):
@@ -551,6 +580,7 @@ class MAGIC_FIT_OT_clear_repair_report(Operator):
 classes = (
     MAGIC_FIT_OT_rebuild_mesh,
     MAGIC_FIT_OT_analyze_mesh,
+    MAGIC_FIT_OT_reset_rebuild_settings,
     MAGIC_FIT_OT_restore_original,
     MAGIC_FIT_OT_discard_original,
     MAGIC_FIT_OT_smooth_normals,

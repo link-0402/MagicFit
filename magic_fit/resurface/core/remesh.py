@@ -55,6 +55,7 @@ class Remesher:
         self.sL = np.full(len(src.F), self.L0)
         self.sLmin = self._source_resolution()
         self.vn = None
+        self.normal_refined = 0          # edges refined because they faced away from the source
         self.timing = {}
         self._update_sizing()
 
@@ -218,15 +219,65 @@ class Remesher:
             host[oi] = h
         return E, err, host
 
-    def refine_sizing(self, eps, grad=0.35):
-        """Shrink the sizing field where the surface error exceeds eps."""
+    def _source_normals(self, max_angle=60.0):
+        """Per source face: the area-weighted mean normal of the faces that share a vertex with it and
+        face within `max_angle` of it.  Follows folds but not the tilt of single faces in decimation
+        noise (a noisy dress grew 37% with plain face normals).  Faces past the limit are left out, so
+        the two sides of a thin shell's rim do not cancel into a sideways normal."""
+        if getattr(self, "_snormals", None) is None:
+            s = self.src
+            fn = face_normals(s.V, s.F)
+            fu = fn / np.maximum(norm(fn), 1e-30)[:, None]
+            corner_f = np.repeat(np.arange(len(s.F)), 3)
+            corner_v = s.F.ravel()
+            order = np.argsort(corner_v, kind="stable")
+            starts = np.searchsorted(corner_v[order], np.arange(len(s.V) + 1))
+            count = np.diff(starts)[corner_v]
+            # (face, neighbour face) through every corner of the face
+            f_of = np.repeat(corner_f, count)
+            offs = np.arange(count.sum()) - np.repeat(np.cumsum(count) - count, count)
+            g_of = corner_f[order[np.repeat(starts[corner_v], count) + offs]]
+            near = np.einsum("ij,ij->i", fu[f_of], fu[g_of]) > math.cos(math.radians(max_angle))
+            acc = np.zeros_like(fn)
+            np.add.at(acc, f_of[near], fn[g_of[near]])
+            self._snormals = acc / np.maximum(norm(acc), 1e-30)[:, None]
+        return self._snormals
+
+    def normal_deviation(self, E, host):
+        """Per edge: the largest angle (degrees) between a new face next to it and the smoothed source
+        normal at its measured spot.  Orientation is ignored, so faces wound the other way are not folds.
+        Chain edges (they follow their source curve already) and edges without a source face get 0."""
+        F = self.F
+        _, fe = unique_edges(F)
+        FN = face_normals(self.V, F)
+        FN /= np.maximum(norm(FN), 1e-30)[:, None]
+        SN = self._source_normals()
+        slot_e = fe.ravel()
+        slot_f = np.repeat(np.arange(len(F)), 3)
+        ok = host[slot_e] >= 0
+        cos_e = np.ones(len(E))
+        dots = np.abs(np.einsum("ij,ij->i", FN[slot_f[ok]], SN[host[slot_e[ok]]]))
+        np.minimum.at(cos_e, slot_e[ok], dots)
+        cos_e[self._feature_mask(E)] = 1.0
+        return np.degrees(np.arccos(np.clip(cos_e, -1.0, 1.0)))
+
+    def refine_sizing(self, eps, normal_deg=None, grad=0.35):
+        """Shrink the sizing field where the surface error exceeds eps, or where the new surface faces
+        a different way than the source by more than normal_deg degrees (folds, creases)."""
         t0 = time.time()
         E, err, host = self.measure_error()
         Le = self._edge_target(E[:, 0], E[:, 1])
-        bad = err > eps
+        req = np.full(len(E), np.inf)
+        far = err > eps
+        req[far] = Le[far] * np.sqrt(eps / err[far])
+        if normal_deg:
+            dev = self.normal_deviation(E, host)
+            turned = dev > normal_deg
+            req[turned] = np.minimum(req[turned], Le[turned] * normal_deg / dev[turned])
+            self.normal_refined += int(turned.sum())
+        bad = np.isfinite(req)
         if bad.any():
-            req = Le[bad] * np.sqrt(eps / err[bad])
-            req = np.maximum(req, self.sLmin[host[bad]])
+            req = np.maximum(req[bad], self.sLmin[host[bad]])
             np.minimum.at(self.sL, host[bad], req)
             self._diffuse_sizing(grad)
             self._update_sizing()
@@ -843,6 +894,7 @@ class Remesher:
             "q_min": round(float(q.min()), 4), "q_p1": round(float(np.percentile(q, 1)), 3),
             "q_med": round(float(np.median(q)), 3), "q<0.3": round(float((q < 0.3).mean()), 4),
             "degenerate": int((el.min(1) < 1e-4 * self.Lmin).sum()),
+            "normal_refined": self.normal_refined,
         }
 
     def finalize(self):
@@ -852,7 +904,7 @@ class Remesher:
         self.flip_edges("valence")
         return n
 
-    def run(self, iterations=10, polish=3, adaptive_eps=None):
+    def run(self, iterations=10, polish=3, adaptive_eps=None, normal_deg=None):
         """Yields (fraction done, message) after every pass; stop iterating to cancel."""
         total = iterations + polish
         refine_rounds = set()
@@ -865,7 +917,7 @@ class Remesher:
             self.relax()
             self.project()
             if it in refine_rounds:
-                self.refine_sizing(adaptive_eps)
+                self.refine_sizing(adaptive_eps, normal_deg)
             yield (it + 1) / total, f"Remeshing {it + 1}/{iterations}"
         for it in range(polish):
             self.collapse_short(ratio=0.5)

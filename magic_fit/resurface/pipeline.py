@@ -17,11 +17,12 @@ class RebuildSettings:
 
     def __init__(self, **kw):
         self.size_mode = "RELATIVE"      # RELATIVE | LENGTH
-        self.density = 0.6               # RELATIVE: 1.0 = same triangle count as the input
+        self.density = 0.5               # RELATIVE: 1.0 = same triangle count as the input
         self.edge_length = 0.005         # LENGTH: target edge length in scene units
         self.adaptive = True
         self.tolerance = 0.04            # max deviation, as a fraction of the edge length
         self.min_edge_ratio = 0.25       # smallest edge as a fraction of the edge length
+        self.normal_tolerance = 20.0     # degrees the new surface may face away from the source; 0 = off
         self.iterations = 10
         self.merge_distance = 1e-5
         self.fragment_faces = 3
@@ -37,7 +38,7 @@ class RebuildSettings:
         self.clean_features = True       # dissolve seam/crease noise smaller than the triangles
         self.seam_threshold = 0.002      # UV/color difference below this is not a seam
         # afterwards, run the Smooth Normals tool on the result (off: keep the original shading)
-        self.smooth_normals = True
+        self.smooth_normals = "AUTO"     # True, False, or "AUTO": only objects whose source normals are broken
         self.normals_angle = 80.0        # degrees
         self.normals_blur = 1            # blur passes
         self.fix_winding = False
@@ -139,7 +140,8 @@ class RebuildJob:
                                     "chains", "corners", "thin_rim_edges")}
         rm = Remesher(src, L0, min_length=L0 * s.min_edge_ratio)
         eps = s.tolerance * L0 if s.adaptive else None
-        for frac, msg in rm.run(max(int(s.iterations), 1), adaptive_eps=eps):
+        nd = s.normal_tolerance if s.adaptive and s.normal_tolerance > 0 else None
+        for frac, msg in rm.run(max(int(s.iterations), 1), adaptive_eps=eps, normal_deg=nd):
             yield 0.05 + 0.8 * frac, msg
         self.report["remesh"] = rm.stats()
         self.src, self.rm = src, rm      # kept for inspection / debugging
@@ -151,24 +153,29 @@ class RebuildJob:
         written = []
         unchanged = []
         new_objs = []
+        smooth_objs = []
         self.modified = True
-        for obj, r in zip(self.objects, results):
+        for obj, r, d in zip(self.objects, results, g["datas"]):
             if r is None:
                 unchanged.append(obj.name)
                 continue
-            if s.smooth_normals:
+            smooth = blender_io.normals_broken(d) if s.smooth_normals == "AUTO" else bool(s.smooth_normals)
+            if smooth:
                 r.normals = None      # replaced right below
+                smooth_objs.append(obj)
             blender_io.apply_result(obj, r, keep_original=s.keep_original)
             written.append((obj.name, len(r.positions), len(r.faces)))
             new_objs.append(obj)
         self.report["written"] = written
         self.report["unchanged"] = unchanged
         # the optional steps are the standalone tools, run on the new meshes
-        if s.smooth_normals and new_objs:
+        if s.smooth_normals == "AUTO":
+            self.report["normals"] = {"flipped": 0, "auto_smoothed": [o.name for o in smooth_objs]}
+        if smooth_objs:
             yield 0.94, "Smoothing normals"
             flipped, _ = blender_io.smooth_object_normals(
-                new_objs, math.radians(s.normals_angle), s.normals_blur, s.fix_winding, s.merge_distance)
-            self.report["normals"] = {"flipped": flipped}
+                smooth_objs, math.radians(s.normals_angle), s.normals_blur, s.fix_winding, s.merge_distance)
+            self.report.setdefault("normals", {})["flipped"] = flipped
         if s.rebuild_uvs and new_objs:
             yield 0.95, "Rebuilding UVs"
             import bpy
@@ -181,6 +188,7 @@ class RebuildJob:
                 keep_orientation=s.uv_keep_orientation,
                 merge_distance=s.merge_distance,
             )
+        self.report["export_vertices"] = [(o.name, blender_io.export_vertex_estimate(o)) for o in new_objs]
         self.report["seconds"] = time.time() - t_start
         yield 1.0, "Done"
 

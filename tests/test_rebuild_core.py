@@ -58,6 +58,7 @@ def test_names():
         check(idnames and all(idname.startswith("magic_fit.") for idname in idnames),
               "operators are magic_fit.* ({:d})".format(len(idnames)))
         check(all(hasattr(bpy.ops.magic_fit, idname.split(".")[1]) for idname in idnames), "operators registered")
+        check("magic_fit.reset_rebuild_settings" in idnames, "Reset to Defaults is there")
         check(hasattr(bpy.context.scene, "magic_fit_repair") and not hasattr(bpy.context.scene, "resurface"),
               "settings are Scene.magic_fit_repair, Resurface's Scene.resurface is left free")
         check(not hasattr(bpy.types.WindowManager, "resurface_tab"), "no tab property of Resurface's own")
@@ -284,6 +285,315 @@ def test_thin_rim_same_facing():
     obj = shape([folded_sheet(0.1, 0.04, 0.005), folded_sheet(0.1, 0.04, 0.005, offset=0.0004)])
     _, report = rebuild(obj)
     check(report["features"].get("thin_rim_edges", -1) == 0, "same-facing layers are not thin rims")
+
+
+def rounded_step(width=0.1, depth=0.05, step=0.004, turn=65.0, n=50, flip_from=None):
+    """An open sheet facing up, `width` x `depth`, with one step down by `step` across it. Each of the two
+    step corners turns `turn` degrees over 3 segments of 0.5 mm, like the waist folds of a sculpted shirt.
+    flip_from: faces past this y are wound the other way. Returns (verts, faces, corner ys)."""
+    seg, flat = 0.0005, 0.002
+    t = math.radians(turn)
+    drop_corners = 2 * sum(seg * math.sin(t * k / 3) for k in (1, 2, 3))
+    slope = max((step - drop_corners) / math.sin(t), 0.0)
+    prof = [(0.0, 0.0)]
+
+    def walk(angle, length):
+        y, z = prof[-1]
+        prof.append((y + length * math.cos(angle), z - length * math.sin(angle)))
+
+    while prof[-1][0] < 0.4 * depth:
+        walk(0.0, flat)
+    corners = [prof[-1][0]]
+    for k in (1, 2, 3):
+        walk(t * k / 3, seg)
+    walk(t, slope)
+    for k in (2, 1, 0):
+        walk(t * k / 3, seg)
+    corners.append(prof[-1][0])
+    while prof[-1][0] < depth:
+        walk(0.0, flat)
+    verts = [(-width / 2 + width * i / n, y, z) for y, z in prof for i in range(n + 1)]
+    m = n + 1
+    faces = []
+    for r in range(len(prof) - 1):
+        for i in range(n):
+            f = [r * m + i, r * m + i + 1, (r + 1) * m + i + 1, (r + 1) * m + i]
+            faces.append(f[::-1] if flip_from is not None and prof[r][0] >= flip_from else f)
+    return verts, faces, corners
+
+
+def fold_cut(obj, **kw):
+    """Rebuild obj and return (largest distance in metres from a source vertex within 2 mm of a step
+    corner to the new surface, new triangle count). The corners are in obj["corners"]."""
+    from mathutils import Vector
+    from mathutils.bvhtree import BVHTree
+    near = [v.co.copy() for v in obj.data.vertices
+            if min(abs(v.co.y - c) for c in obj["corners"]) < 0.002]
+    rebuild(obj, **kw)
+    me = obj.data
+    tree = BVHTree.FromPolygons([v.co for v in me.vertices], [p.vertices[:] for p in me.polygons])
+    return max(tree.find_nearest(Vector(p))[3] for p in near), len(me.polygons)
+
+
+def step_object(**kw):
+    verts, faces, corners = rounded_step(**kw)
+    obj = shape([(verts, faces)])
+    obj["corners"] = corners
+    return obj
+
+
+def tri_count(obj, **kw):
+    rebuild(obj, **kw)
+    return len(obj.data.polygons)
+
+
+def test_normal_refine_fold():
+    """A rounded fold corner (65° over 1.5 mm, no edge over 22°) is followed much more closely with
+    Normal Tolerance 15° than with the distance check alone, for at most three times the triangles."""
+    common = dict(density=0.4, smooth_normals=False)
+    cut0, tris0 = fold_cut(step_object(), normal_tolerance=0, **common)
+    cut15, tris15 = fold_cut(step_object(), normal_tolerance=15, **common)
+    check(cut15 <= 0.5 * cut0, "the fold corner is followed ({:.3f} mm, was {:.3f} mm)".format(cut15 * 1e3, cut0 * 1e3))
+    check(tris15 <= 3 * tris0, "for at most 3x the triangles ({:,} -> {:,})".format(tris0, tris15))
+
+
+def test_normal_refine_flat():
+    """A flat grid and a sphere have no folds: Normal Tolerance adds (almost) no triangles."""
+    import bmesh
+    n = 50
+    grid = ([(0.1 * i / n, 0.1 * j / n, 0.0) for j in range(n + 1) for i in range(n + 1)],
+            [[j * (n + 1) + i, j * (n + 1) + i + 1, (j + 1) * (n + 1) + i + 1, (j + 1) * (n + 1) + i]
+             for j in range(n) for i in range(n)])
+    bm = bmesh.new()
+    bmesh.ops.create_uvsphere(bm, u_segments=64, v_segments=32, radius=0.1)
+    ball = ([v.co[:] for v in bm.verts], [[v.index for v in f.verts] for f in bm.faces])
+    bm.free()
+    for name, piece in (("grid", grid), ("sphere", ball)):
+        t0 = tri_count(shape([piece]), normal_tolerance=0, smooth_normals=False)
+        t15 = tri_count(shape([piece]), normal_tolerance=15, smooth_normals=False)
+        check(abs(t15 - t0) <= 0.02 * t0, "{}: no extra triangles ({:,} -> {:,})".format(name, t0, t15))
+
+
+def test_normal_refine_noisy_source():
+    """Decimation noise is not a fold: a flat grid of 2 mm squares whose points jitter up and down by up to
+    0.5 mm gets at most 15% more triangles from Normal Tolerance 20° (single source faces: 43% more)."""
+    import random
+    rnd = random.Random(7)
+    verts, faces = flat_grid(n=50)
+    noisy = ([(x, y, rnd.uniform(-0.0005, 0.0005)) for x, y, _ in verts], faces)
+    t0 = tri_count(shape([noisy]), normal_tolerance=0, smooth_normals=False)
+    t20 = tri_count(shape([noisy]), normal_tolerance=20, smooth_normals=False)
+    check(t20 <= 1.15 * t0, "noise adds few triangles ({:,} -> {:,})".format(t0, t20))
+
+
+def test_normal_refine_low_poly():
+    """A low-poly source (a 16 x 8 sphere, 22.5° between facets) is followed facet by facet: the new
+    triangles lie on its flat facets, so Normal Tolerance 20° adds at most 15% triangles."""
+    import bmesh
+    bm = bmesh.new()
+    bmesh.ops.create_uvsphere(bm, u_segments=16, v_segments=8, radius=0.1)
+    ball = ([v.co[:] for v in bm.verts], [[v.index for v in f.verts] for f in bm.faces])
+    bm.free()
+    t0 = tri_count(shape([ball]), normal_tolerance=0, smooth_normals=False)
+    t20 = tri_count(shape([ball]), normal_tolerance=20, smooth_normals=False)
+    check(t20 <= 1.15 * t0, "a low-poly sphere adds few triangles ({:,} -> {:,})".format(t0, t20))
+
+
+def pillow(size=0.06, h=0.001, n=12):
+    """A thin closed shell like a bra cup: a top sheet facing up and a bottom sheet facing down, up to
+    2*h apart in the middle and meeting at a sharp rim along their shared border."""
+    verts, faces = [], []
+    index = {}
+    for side, sign in (("top", 1.0), ("bottom", -1.0)):
+        for j in range(n + 1):
+            for i in range(n + 1):
+                rim = i in (0, n) or j in (0, n)
+                key = ("rim", i, j) if rim else (side, i, j)
+                if key not in index:
+                    z = sign * h * math.sin(math.pi * i / n) * math.sin(math.pi * j / n)
+                    index[key] = len(verts)
+                    verts.append((size * i / n, size * j / n, z))
+        for j in range(n):
+            for i in range(n):
+                q = [index[("rim", a, b) if a in (0, n) or b in (0, n) else (side, a, b)]
+                     for a, b in ((i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1))]
+                faces.append(q if sign > 0 else q[::-1])
+    return verts, faces
+
+
+def test_normal_refine_thin_shell():
+    """The sharp rim of a thin closed shell is not a fold to refine: its two sides point opposite ways,
+    and averaging them gives a sideways normal. Normal Tolerance 20° adds at most 15% triangles."""
+    t0 = tri_count(shape([pillow()]), normal_tolerance=0, smooth_normals=False)
+    t20 = tri_count(shape([pillow()]), normal_tolerance=20, smooth_normals=False)
+    check(t20 <= 1.15 * t0, "the thin shell's rim adds few triangles ({:,} -> {:,})".format(t0, t20))
+
+
+def test_normal_refine_flipped_source():
+    """Faces wound the other way are not folds: the orientation of the source does not count."""
+    plain = tri_count(step_object(), normal_tolerance=15, smooth_normals=False)
+    flipped = tri_count(step_object(flip_from=0.04), normal_tolerance=15, smooth_normals=False)
+    check(flipped <= 1.1 * plain, "a reversed part adds no triangles ({:,} -> {:,})".format(plain, flipped))
+
+
+def test_normal_refine_adaptive_off():
+    """With Adaptive Detail off, Normal Tolerance does nothing."""
+    t0 = tri_count(step_object(), adaptive=False, normal_tolerance=0, smooth_normals=False)
+    t15 = tri_count(step_object(), adaptive=False, normal_tolerance=15, smooth_normals=False)
+    check(t0 == t15, "same triangles with Adaptive Detail off ({:,}, {:,})".format(t0, t15))
+
+
+def flat_grid(n=20, size=0.1, x0=0.0):
+    return ([(x0 + size * i / n, size * j / n, 0.0) for j in range(n + 1) for i in range(n + 1)],
+            [[j * (n + 1) + i, j * (n + 1) + i + 1, (j + 1) * (n + 1) + i + 1, (j + 1) * (n + 1) + i]
+             for j in range(n) for i in range(n)])
+
+
+def grid_object(name, x0=0.0, broken=None):
+    """A flat grid facing up as its own object. broken: share of corners whose custom normal points down
+    (None: no custom normals, 0: custom normals equal to the face normals)."""
+    verts, faces = flat_grid(x0=x0)
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(verts, [], faces)
+    if broken is not None:
+        nl = len(mesh.loops)
+        mesh.normals_split_custom_set([(0.0, 0.0, -1.0) if i < broken * nl else (0.0, 0.0, 1.0) for i in range(nl)])
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    return obj
+
+
+def test_normals_broken():
+    """Normals count as broken only when custom normals point far from their faces."""
+    for obj in list(bpy.data.objects):
+        bpy.data.objects.remove(obj)
+    for broken, expect, what in ((None, False, "no custom normals"), (0.0, False, "custom normals along the faces"),
+                                 (0.03, False, "3% of the corners reversed (clean game meshes reach ~2%)"),
+                                 (0.1, True, "10% of the corners reversed")):
+        obj = grid_object("G", broken=broken)
+        got = blender_io.normals_broken(blender_io.ObjectData(obj))
+        check(got == expect, "{}: broken is {}".format(what, got))
+        bpy.data.objects.remove(obj)
+    obj = grid_object("Turned", broken=0.0)
+    obj.rotation_euler = (math.radians(90.0), 0.0, 0.0)
+    bpy.context.view_layer.update()
+    check(not blender_io.normals_broken(blender_io.ObjectData(obj)), "a turned object with clean normals is not broken")
+    bpy.data.objects.remove(obj)
+    obj = grid_object("Mirrored", broken=0.0)
+    obj.scale = (-1.0, 1.0, 1.0)
+    bpy.context.view_layer.update()
+    check(not blender_io.normals_broken(blender_io.ObjectData(obj)), "a mirrored object with clean normals is not broken")
+    bpy.data.objects.remove(obj)
+
+
+def test_saved_smooth_normals_off():
+    """A file saved with the old Smooth Normals toggle off opens with Smooth Normals: Off, not Auto."""
+    from magic_fit.resurface import props
+    magic_fit.register()
+    try:
+        check(props.migrate_rebuild_normals in bpy.app.handlers.load_post, "the migration runs when a file loads")
+        s = bpy.context.scene.magic_fit_repair
+        for old, expect in ((0, "OFF"), (1, "ON")):
+            s.rebuild_normals_mode = "AUTO"
+            s.bl_system_properties_get(do_create=True)["rebuild_normals"] = old
+            props.migrate_rebuild_normals(None)
+            check(s.rebuild_normals_mode == expect, "old toggle {} opens as {} ({})".format(old, expect, s.rebuild_normals_mode))
+            check("rebuild_normals" not in s.bl_system_properties_get(), "the old value is dropped")
+        props.migrate_rebuild_normals(None)
+        check(s.rebuild_normals_mode == "ON", "without an old value nothing changes")
+        s.property_unset("rebuild_normals_mode")
+    finally:
+        magic_fit.unregister()
+
+
+def test_auto_normals_per_object():
+    """Auto smooths only the object whose source normals are broken; the other keeps its shading."""
+    from magic_fit.resurface.pipeline import RebuildJob, RebuildSettings
+    for obj in list(bpy.data.objects):
+        bpy.data.objects.remove(obj)
+    clean = grid_object("Clean")
+    broken = grid_object("Broken", x0=0.2, broken=0.1)
+    report = RebuildJob([clean, broken], RebuildSettings(smooth_normals="AUTO")).run()
+    check(report.get("normals", {}).get("auto_smoothed") == ["Broken"],
+          "Auto smoothed only the broken one ({})".format(report.get("normals")))
+    ups = [n.vector.z for n in clean.data.corner_normals]
+    check(min(ups) > math.cos(math.radians(1.0)), "the clean one keeps its shading (min z {:.4f})".format(min(ups)))
+
+
+def test_export_estimate_cube():
+    """A flat-shaded cube with one UV island per face exports 24 vertices."""
+    import bmesh
+    for obj in list(bpy.data.objects):
+        bpy.data.objects.remove(obj)
+    bm = bmesh.new()
+    bmesh.ops.create_cube(bm, size=1.0)
+    uv = bm.loops.layers.uv.new("UVMap")
+    for f in bm.faces:
+        for k, loop in enumerate(f.loops):
+            loop[uv].uv = (f.index / 6 + (k in (1, 2)) / 7, (k in (2, 3)) / 7)
+    mesh = bpy.data.meshes.new("Cube")
+    bm.to_mesh(mesh)
+    bm.free()
+    for p in mesh.polygons:
+        p.use_smooth = False
+    obj = bpy.data.objects.new("Cube", mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    n = blender_io.export_vertex_estimate(obj)
+    check(n == 24, "cube: 24 vertices after export ({})".format(n))
+
+
+def test_export_estimate_smooth():
+    """A smooth UV sphere splits only where its UVs split."""
+    obj = sphere()
+    me = obj.data
+    for p in me.polygons:
+        p.use_smooth = True
+    uv = me.uv_layers.active.data
+    expect = len({(l.vertex_index, round(uv[l.index].uv[0], 4), round(uv[l.index].uv[1], 4)) for l in me.loops})
+    n = blender_io.export_vertex_estimate(obj)
+    check(n == expect, "sphere: {} vertices after export ({} expected, {} in Blender)".format(n, expect, len(me.vertices)))
+
+
+def test_export_estimate_no_uv():
+    """A smooth mesh without UV maps counts its vertices and does not fail."""
+    for obj in list(bpy.data.objects):
+        bpy.data.objects.remove(obj)
+    obj = grid_object("NoUV")
+    for p in obj.data.polygons:
+        p.use_smooth = True
+    n = blender_io.export_vertex_estimate(obj)
+    check(n == len(obj.data.vertices), "no UVs: {} vertices after export ({})".format(n, len(obj.data.vertices)))
+
+
+def test_rebuild_defaults():
+    """New scenes rebuild with Density 0.5 and Normal Tolerance 20°."""
+    magic_fit.register()
+    try:
+        settings = bpy.context.scene.magic_fit_repair
+        check(abs(settings.density - 0.5) < 1e-6, "Density defaults to 0.5 ({:.2f})".format(settings.density))
+        check(abs(settings.normal_tolerance - math.radians(20.0)) < 1e-6, "Normal Tolerance defaults to 20°")
+        check(abs(settings.to_settings().normal_tolerance - 20.0) < 1e-4, "the rebuild gets it in degrees")
+        check(settings.rebuild_normals_mode == "AUTO" and settings.to_settings().smooth_normals == "AUTO",
+              "Smooth Normals defaults to Auto")
+    finally:
+        magic_fit.unregister()
+
+
+def test_reset_rebuild_settings():
+    """Reset to Defaults puts the Rebuild Mesh settings back and leaves the other tools' settings alone."""
+    magic_fit.register()
+    try:
+        s = bpy.context.scene.magic_fit_repair
+        s.density, s.tolerance, s.preserve_sharp = 1.5, 10.0, True
+        s.normals_angle, s.canvas_new_w = math.radians(30.0), 512
+        run(bpy.ops.magic_fit.reset_rebuild_settings, "Reset to Defaults")
+        rna = s.bl_rna.properties
+        check(s.density == rna["density"].default and s.tolerance == rna["tolerance"].default
+              and s.preserve_sharp == rna["preserve_sharp"].default, "the Rebuild Mesh settings are back")
+        check(abs(s.normals_angle - math.radians(30.0)) < 1e-6 and s.canvas_new_w == 512,
+              "the Smooth Normals and Resize Canvas settings are unchanged")
+    finally:
+        magic_fit.unregister()
 
 
 def main():

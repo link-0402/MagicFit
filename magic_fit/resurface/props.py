@@ -34,6 +34,16 @@ ANCHOR_ITEMS = [
 ]
 
 
+# What the Rebuild Mesh panel shows, and what its Reset to Defaults resets
+REBUILD_PROPS = (
+    "size_mode", "density", "edge_length", "adaptive", "tolerance", "min_edge_ratio", "normal_tolerance",
+    "iterations", "remove_hidden", "rebuild_normals_mode", "rebuild_uvs",
+    "preserve_uv_seams", "preserve_color_seams", "preserve_sharp", "sharp_angle", "seam_threshold",
+    "clean_features", "corner_angle", "hidden_gap", "merge_distance", "fragment_faces",
+    "max_influences", "keep_original",
+)
+
+
 class MeshRepairSettings(PropertyGroup):
     """The settings of the Mesh Repair tab's Mesh Rebuild, Normals and UV sub-tabs (Scene.magic_fit_repair)."""
     # ---- Mesh Rebuild ---------------------------------------------------------------------
@@ -49,7 +59,7 @@ class MeshRepairSettings(PropertyGroup):
         name="Density",
         description="Base density before adaptive refinement. 1.0 gives about as many "
                     "triangles as the input, lower values give fewer and larger triangles",
-        default=0.6, min=0.02, soft_max=4.0, max=20.0,
+        default=0.5, min=0.02, soft_max=4.0, max=20.0,
     )  # type: ignore
     edge_length: FloatProperty(
         name="Edge Length",
@@ -73,17 +83,29 @@ class MeshRepairSettings(PropertyGroup):
         description="Adaptive refinement never makes edges shorter than this percentage of the base edge length",
         default=25.0, min=2.0, max=100.0, subtype="PERCENTAGE", precision=0,
     )  # type: ignore
+    normal_tolerance: FloatProperty(
+        name="Normal Tolerance",
+        description="Use smaller triangles where the new surface faces a different way than the original by "
+                    "more than this (folds, creases). Lower keeps more detail but adds triangles",
+        default=math.radians(20.0), min=math.radians(1.0), max=math.radians(90.0), subtype="ANGLE",
+    )  # type: ignore
     iterations: IntProperty(
         name="Iterations",
         description="Remeshing passes. More passes give more even triangles",
         default=10, min=2, max=50,
     )  # type: ignore
-    rebuild_normals: BoolProperty(
+    rebuild_normals_mode: EnumProperty(
         name="Smooth Normals",
         description="After rebuilding, give the new meshes clean smooth normals with the settings of the "
-                    "Normals sub-tab. Off: the original normals are interpolated onto the new mesh "
-                    "(right for hair or anything with edited normals)",
-        default=True,
+                    "Normals sub-tab, or interpolate the original normals onto them",
+        items=[
+            ("AUTO", "Auto", "Smooth the normals only of meshes whose original normals are broken (corners "
+                             "pointing far away from their faces); the others keep their original shading"),
+            ("ON", "On", "Always give the new meshes clean smooth normals"),
+            ("OFF", "Off", "Interpolate the original normals onto the new meshes "
+                           "(right for hair or anything with edited normals)"),
+        ],
+        default="AUTO",
     )  # type: ignore
     rebuild_uvs: BoolProperty(
         name="Rebuild UVs",
@@ -402,6 +424,7 @@ class MeshRepairSettings(PropertyGroup):
             adaptive=self.adaptive,
             tolerance=self.tolerance / 100.0,
             min_edge_ratio=self.min_edge_ratio / 100.0,
+            normal_tolerance=math.degrees(self.normal_tolerance),
             iterations=self.iterations,
             merge_distance=self.merge_distance,
             fragment_faces=self.fragment_faces,
@@ -416,7 +439,7 @@ class MeshRepairSettings(PropertyGroup):
             hidden_gap=self.hidden_gap,
             clean_features=self.clean_features,
             seam_threshold=self.seam_threshold,
-            smooth_normals=self.rebuild_normals,
+            smooth_normals={"AUTO": "AUTO", "ON": True, "OFF": False}[self.rebuild_normals_mode],
             normals_angle=math.degrees(self.normals_angle),
             normals_blur=self.normals_blur,
             fix_winding=self.fix_winding,
@@ -429,11 +452,25 @@ class MeshRepairSettings(PropertyGroup):
         )
 
 
+@bpy.app.handlers.persistent
+def migrate_rebuild_normals(*_args):
+    """Files saved before Smooth Normals got Auto/On/Off keep the old toggle's value: off opens as Off."""
+    for scene in bpy.data.scenes:
+        s = scene.magic_fit_repair
+        stored = s.bl_system_properties_get()
+        if stored is not None and "rebuild_normals" in stored:
+            s.rebuild_normals_mode = "ON" if stored["rebuild_normals"] else "OFF"
+            del stored["rebuild_normals"]
+
+
 def register():
     bpy.utils.register_class(MeshRepairSettings)
     bpy.types.Scene.magic_fit_repair = bpy.props.PointerProperty(type=MeshRepairSettings)
+    bpy.app.handlers.load_post.append(migrate_rebuild_normals)
 
 
 def unregister():
+    if migrate_rebuild_normals in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(migrate_rebuild_normals)
     del bpy.types.Scene.magic_fit_repair
     bpy.utils.unregister_class(MeshRepairSettings)
