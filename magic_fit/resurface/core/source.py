@@ -404,13 +404,17 @@ class SourceMesh:
         C = self.V[self.F].mean(axis=1)
         faces = np.unique(np.r_[f1[sel], f2[sel]])
         thin = np.zeros(len(self.F), bool)
-        verts = self.V.tolist()
+        order = np.argsort(fpiece, kind="stable")
+        bounds = np.searchsorted(fpiece[order], np.arange(fpiece.max() + 2))
         trees = {}
         for f in faces.tolist():
             p = int(fpiece[f])
             if p not in trees:
-                fids = np.nonzero(fpiece == p)[0]
-                trees[p] = (BVHTree.FromPolygons(verts, self.F[fids].tolist(), all_triangles=True), fids)
+                # each piece's tree holds only its own vertices
+                fids = order[bounds[p]:bounds[p + 1]]
+                vids, local = np.unique(self.F[fids], return_inverse=True)
+                tree = BVHTree.FromPolygons(self.V[vids].tolist(), local.reshape(-1, 3).tolist(), all_triangles=True)
+                trees[p] = (tree, fids)
             tree, fids = trees[p]
             n = Vector(N[f])
             _loc, _nrm, hit, _d = tree.ray_cast(Vector(C[f]) - n * 1e-6, -n, size)
