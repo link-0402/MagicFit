@@ -104,7 +104,7 @@ class MeshRepairSettings(PropertyGroup):
     preserve_sharp: BoolProperty(
         name="Sharp Edges",
         description="Keep creases sharper than the angle below as edges (hard-surface models). "
-                    "Leave off for cloth and other organic meshes",
+                    "Leave off for cloth: the folded rims of thin cloth are kept anyway",
         default=False,
     )  # type: ignore
     sharp_angle: FloatProperty(

@@ -50,6 +50,7 @@ class SourceOptions:
         self.min_feature_size = 0.0      # > 0: dissolve seam/crease noise and flip winding
                                          # islands smaller than this (the target edge length)
         self.flip_islands = True         # flip tiny islands wound against their surroundings
+        self.thin_rim_size = 0.0         # > 0: keep sharp folds where the other side of the shell is closer than this
         for k, v in kw.items():
             if not hasattr(self, k):
                 raise AttributeError(k)
@@ -167,9 +168,15 @@ class SourceMesh:
         self.efeature = self.ekind != 0
         flip = self.opts.flip_islands
         self._orient_patches(max_island=8 if flip else 0, max_island_area=2.0 * Lmin * Lmin if flip else 0.0)
+        self.stats["thin_rim_edges"] = 0
         if self.opts.sharp_angle is not None:
             self.ekind[self._sharp_features(self.opts.sharp_angle)] |= K_SHARP
             self.efeature = self.ekind != 0
+        elif self.opts.thin_rim_size > 0:
+            thin = self._thin_rim_features(self.opts.thin_rim_size)
+            self.ekind[thin] |= K_SHARP
+            self.efeature = self.ekind != 0
+            self.stats["thin_rim_edges"] = int(thin.sum())
         if Lmin > 0:
             self._simplify_features(Lmin)
             self.efeature = self.ekind != 0
@@ -354,7 +361,8 @@ class SourceMesh:
         self.efeature = self.ekind != 0
         self.stats["winding_cuts"] = int(bad.sum())
 
-    def _sharp_features(self, angle_deg):
+    def _creases(self, angle_deg):
+        """Non-feature edges whose faces meet at more than `angle_deg`: (mask over E, edge pairs, unit normals)."""
         e, f1, k1, f2, k2 = self._edge_pairs()
         N = face_normals(self.V, self.F)
         N = N / np.maximum(norm(N), 1e-30)[:, None]
@@ -362,18 +370,55 @@ class SourceMesh:
         cand = np.zeros(len(self.E), bool)
         cand[e[cosang < math.cos(math.radians(angle_deg))]] = True
         cand &= ~self.efeature
+        return cand, (e, f1, f2), N
+
+    def _keep_long_groups(self, cand):
+        """Only crease chains with enough edges (decimation noise is isolated)."""
         idx = np.nonzero(cand)[0]
+        out = np.zeros(len(self.E), bool)
         if len(idx) == 0:
-            return cand
-        # keep only crease chains with enough edges (decimation noise is isolated)
+            return out
         lab = relabel(connected_components(len(self.V), self.E[idx, 0], self.E[idx, 1]))
         clab = lab[self.E[idx, 0]]
-        size = np.bincount(clab)
-        keep = size[clab] >= self.opts.sharp_min_edges
-        out = np.zeros(len(self.E), bool)
-        out[idx[keep]] = True
-        self.stats["sharp_edges"] = int(keep.sum())
+        out[idx[np.bincount(clab)[clab] >= self.opts.sharp_min_edges]] = True
         return out
+
+    def _sharp_features(self, angle_deg):
+        out = self._keep_long_groups(self._creases(angle_deg)[0])
+        self.stats["sharp_edges"] = int(out.sum())
+        return out
+
+    def _thin_rim_features(self, size, angle_deg=60.0):
+        """Creases where the shell folds back on itself: a ray from one of the edge's faces, straight
+        into the surface, hits a face of the same connected piece that faces the other way within `size`.
+        Such rims of thin closed shells (cloth a fraction of a mm thick) would otherwise zip shut.
+        Rays only see their own piece, so a separate under-layer or a nested shell never counts."""
+        cand, (e, f1, f2), N = self._creases(angle_deg)
+        sel = cand[e]
+        if not sel.any():
+            return cand
+        from mathutils import Vector
+        from mathutils.bvhtree import BVHTree
+        vlab = relabel(connected_components(len(self.V), self.E[:, 0], self.E[:, 1]))
+        fpiece = vlab[self.F[:, 0]]
+        C = self.V[self.F].mean(axis=1)
+        faces = np.unique(np.r_[f1[sel], f2[sel]])
+        thin = np.zeros(len(self.F), bool)
+        verts = self.V.tolist()
+        trees = {}
+        for f in faces.tolist():
+            p = int(fpiece[f])
+            if p not in trees:
+                fids = np.nonzero(fpiece == p)[0]
+                trees[p] = (BVHTree.FromPolygons(verts, self.F[fids].tolist(), all_triangles=True), fids)
+            tree, fids = trees[p]
+            n = Vector(N[f])
+            _loc, _nrm, hit, _d = tree.ray_cast(Vector(C[f]) - n * 1e-6, -n, size)
+            if hit is not None and float(N[fids[hit]] @ N[f]) < 0:
+                thin[f] = True
+        keep = np.zeros(len(self.E), bool)
+        keep[e[sel & (thin[f1] | thin[f2])]] = True
+        return self._keep_long_groups(keep)
 
     def _raw_chains(self, feat):
         """Split feature edges into maximal paths between vertices whose feature degree is

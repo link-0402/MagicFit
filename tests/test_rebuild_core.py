@@ -6,6 +6,7 @@ Run from the repository root:
     blender -b --factory-startup --python tests/test_rebuild_core.py
 """
 
+import math
 import os
 import shutil
 import struct
@@ -194,8 +195,99 @@ def test_tools():
         magic_fit.unregister()
 
 
+def shape(pieces, name="Shape"):
+    """One object from pieces: lists of (verts, faces) in metres, triangulated."""
+    import bmesh
+    for obj in list(bpy.data.objects):
+        bpy.data.objects.remove(obj)
+    bm = bmesh.new()
+    for verts, faces in pieces:
+        made = [bm.verts.new(v) for v in verts]
+        for f in faces:
+            bm.faces.new([made[i] for i in f])
+    bmesh.ops.triangulate(bm, faces=bm.faces[:])
+    mesh = bpy.data.meshes.new(name)
+    bm.to_mesh(mesh)
+    bm.free()
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    return obj
+
+
+def box(sx, sy, sz, cuts=10, bend=False):
+    """A closed box sx x sy x sz (metres) centred at 0, each side a grid of quads. bend: bent 90° along x."""
+    import bmesh
+    bm = bmesh.new()
+    bmesh.ops.create_cube(bm, size=1.0)
+    bmesh.ops.subdivide_edges(bm, edges=bm.edges[:], cuts=cuts, use_grid_fill=True)
+    R = sx / (math.pi / 2)
+    verts = []
+    for v in bm.verts:
+        x, y, z = v.co.x * sx, v.co.y * sy, v.co.z * sz
+        if bend:
+            t = x / R
+            x, z = (R + z) * math.sin(t), (R + z) * math.cos(t) - R
+        verts.append((x, y, z))
+    faces = [[v.index for v in f.verts] for f in bm.faces]
+    bm.free()
+    return verts, faces
+
+
+def folded_sheet(width, depth, flap, offset=0.0, n=20):
+    """An open sheet facing up, `width` x `depth`, with its far long border folded down by `flap`,
+    moved down and back by `offset`."""
+    rows = [i * depth / n for i in range(n + 1)] + [depth + flap * k / 4 for k in range(1, 5)]
+    verts = []
+    for y in rows:
+        for i in range(n + 1):
+            x = -width / 2 + width * i / n
+            yy, z = (y, 0.0) if y <= depth else (depth, depth - y)
+            verts.append((x, yy - offset, z - offset))
+    m = n + 1
+    faces = [[r * m + i, r * m + i + 1, (r + 1) * m + i + 1, (r + 1) * m + i]
+             for r in range(len(rows) - 1) for i in range(n)]
+    return verts, faces
+
+
+def rebuild(obj, **kw):
+    from magic_fit.resurface.pipeline import RebuildJob, RebuildSettings
+    before = sum(p.area for p in obj.data.polygons)
+    report = RebuildJob([obj], RebuildSettings(**kw)).run()
+    return sum(p.area for p in obj.data.polygons) / before, report
+
+
+def test_thin_rim_shell():
+    """A closed shell 0.4 mm thick, bent like a cup, keeps its shape with default settings."""
+    kept, report = rebuild(shape([box(0.1, 0.04, 0.0004, bend=True)]))
+    check(kept >= 0.97, "the thin shell keeps its area ({:.3f})".format(kept))
+    check(report["features"].get("thin_rim_edges", 0) > 0, "its rim is found")
+
+
+def test_thin_rim_nested():
+    """A thin shell inside another thin shell, joined into one object: both rims are found."""
+    pieces = [box(0.1, 0.04, 0.001, bend=True), box(0.096, 0.036, 0.0004, bend=True)]
+    kept, _ = rebuild(shape(pieces))
+    kept_sharp, _ = rebuild(shape(pieces), preserve_sharp=True)
+    check(abs(kept - kept_sharp) <= 0.01,
+          "nested shells keep as much as with Sharp Edges ({:.3f}, {:.3f})".format(kept, kept_sharp))
+
+
+def test_thin_rim_thick_box():
+    """A 100 x 40 x 20 mm box keeps no thin rims: its other side is farther than a triangle."""
+    _, report = rebuild(shape([box(0.1, 0.04, 0.02)]))
+    check(report["features"].get("thin_rim_edges", -1) == 0, "no thin rims on a thick box")
+
+
+def test_thin_rim_same_facing():
+    """One object made of two open 100 x 40 mm sheets 0.4 mm apart, both facing up, each with one long
+    border folded down 90°: the sheet below is not the other side of the sheet above."""
+    obj = shape([folded_sheet(0.1, 0.04, 0.005), folded_sheet(0.1, 0.04, 0.005, offset=0.0004)])
+    _, report = rebuild(obj)
+    check(report["features"].get("thin_rim_edges", -1) == 0, "same-facing layers are not thin rims")
+
+
 def main():
-    tests = [value for name, value in globals().items() if name.startswith("test_")]
+    tests =[value for name, value in globals().items() if name.startswith("test_")]
     for test in tests:
         try:
             test()

@@ -125,7 +125,8 @@ class RebuildJob:
             self.report["hidden_hint"] = hidden_area
         L0 = self.target_length(src0, excl)
         self.report["edge_length"] = L0
-        if s.clean_features or excl is not None:
+        opts.thin_rim_size = L0           # used only while Sharp Edges is off
+        if s.clean_features or excl is not None or not s.preserve_sharp:
             yield 0.045, "Cleaning up features"
             if s.clean_features:
                 opts.min_feature_size = L0
@@ -135,7 +136,7 @@ class RebuildJob:
             src = src0
         self.report["features"] = {k: src.stats.get(k, 0) for k in
                                    ("noise_patches_merged", "noise_curves_dropped", "faces_reoriented",
-                                    "chains", "corners")}
+                                    "chains", "corners", "thin_rim_edges")}
         rm = Remesher(src, L0, min_length=L0 * s.min_edge_ratio)
         eps = s.tolerance * L0 if s.adaptive else None
         for frac, msg in rm.run(max(int(s.iterations), 1), adaptive_eps=eps):
