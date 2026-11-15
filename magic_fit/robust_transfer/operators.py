@@ -212,6 +212,38 @@ def _transferred(settings, body, count):
     return f'Weights transferred from {body.name} to {count} object(s){posed}'
 
 
+UNSHAPED_MOVE = 0.001
+"""Meters the body's shape keys and modifiers must move a vertex by before `_unshaped` warns."""
+UNSHAPED_WEIGHT = 0.01
+"""How much they must change a vertex's weight in a group before `_unshaped` warns."""
+
+
+def _unshaped(context, body):
+    """The warning for a transfer with Use Deformed Body off, from the body as stored, when its shape keys and
+    modifiers (Armature modifiers off, so no pose or Customize+) move it or change its weights; else None."""
+    vertices = util.get_obj_arrs_world(body)[0]
+    weights = util.get_groups_arr(body)
+    with _rest_pose([body]):
+        shaped = body.evaluated_get(context.evaluated_depsgraph_get())
+        shaped_vertices = util.get_obj_arrs_world(shaped)[0]
+        shaped_weights = util.get_groups_arr(shaped)
+    if shaped_vertices.shape != vertices.shape or shaped_weights.shape != weights.shape:
+        changes = "change its vertices"
+    else:
+        moved = float(np.linalg.norm(shaped_vertices - vertices, axis=1).max(initial=0))
+        reweighted = int(np.count_nonzero(np.abs(shaped_weights - weights).max(axis=1, initial=0) > UNSHAPED_WEIGHT))
+        found = []
+        if moved > UNSHAPED_MOVE:
+            found.append(f"move it up to {moved * 1000:.0f} mm")
+        if reweighted:
+            found.append(f"change the weights of {reweighted} vertices")
+        if not found:
+            return None
+        changes = " and ".join(found)
+    return (f"Use Deformed Body is off, so the weights came from '{body.name}' without its shape keys and "
+            f"modifiers. They {changes}")
+
+
 def cplus_on(body):
     """Whether Customize+ is on for the body's armature."""
     from ..cplus import rig as cplus_rig
@@ -309,6 +341,7 @@ class MAGIC_FIT_OT_transfer_weights(bpy.types.Operator):
         target_objs = transfer_targets(context, settings, source_original)
         targets = []
         try:
+            unshaped = None if settings.use_deformed_source else _unshaped(context, source_original)
             cplus = cplus_deform(context, source_original) if settings.use_cplus else None
             targets, (names, deform, included) = match_objects(context, settings, source_original, target_objs,
                                                                cplus)
@@ -349,6 +382,8 @@ class MAGIC_FIT_OT_transfer_weights(bpy.types.Operator):
         transfer.report_stability(self, targets)
         transfer.report_postprocess(self, post_counts)
         transfer.report_rigid(self, targets, made_rigid, holding)
+        if unshaped is not None:
+            self.report({'WARNING'}, unshaped)
         self.report({'INFO'}, _transferred(settings, source_original, len(targets)))
         return {'FINISHED'}
 

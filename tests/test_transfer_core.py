@@ -2417,6 +2417,35 @@ class CreaseSmoothingTests(TransferScene, unittest.TestCase):
         self.assertEqual(operators._transferred(self.settings, self.body, 2),
                          f'Weights transferred from {self.body.name} to 2 object(s)')
 
+    def test_without_use_deformed_body_it_warns_what_the_shape_keys_and_modifiers_change(self):
+        rig, _gusset, _x = self.crease_scene(gusset=True)
+        self.settings.use_deformed_source = False
+        # A pose isn't a change: the body's Armature modifier doesn't count.
+        self.pose_left(rig, 30)
+        self.assertIsNone(operators._unshaped(bpy.context, self.body))
+        self.body.shape_key_add(name='Basis')
+        key = self.body.shape_key_add(name='Bigger')
+        key.data[0].co.z += 0.02
+        key.value = 1
+        bpy.context.view_layer.update()
+        name = self.body.name
+        self.assertEqual(operators._unshaped(bpy.context, self.body),
+                         f"Use Deformed Body is off, so the weights came from '{name}' without its shape keys "
+                         "and modifiers. They move it up to 20 mm")
+        edit = self.body.modifiers.new('Drop L', 'VERTEX_WEIGHT_EDIT')
+        edit.vertex_group = 'L'
+        edit.use_remove = True
+        edit.remove_threshold = 1.01
+        bpy.context.view_layer.update()
+        dropped = sum(1 for v in self.body.data.vertices
+                      for g in v.groups if self.body.vertex_groups[g.group].name == 'L' and g.weight > 0.01)
+        self.assertGreater(dropped, 0)
+        self.assertTrue(operators._unshaped(bpy.context, self.body).endswith(
+            f"They move it up to 20 mm and change the weights of {dropped} vertices"))
+        # Nothing switched for good, and the transfer still runs.
+        self.assertTrue(all(mod.show_viewport for mod in self.body.modifiers))
+        self.assertEqual(bpy.ops.magic_fit.transfer_weights(), {'FINISHED'})
+
     def test_a_pose_counts_with_the_customize_plus_preview_on(self):
         from magic_fit.cplus import rig as cplus_rig
         rig, gusset, _x = self.crease_scene(gusset=True)
