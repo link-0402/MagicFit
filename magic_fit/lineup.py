@@ -284,7 +284,8 @@ def _kind_of(tokens):
     for kind, keys in _KIND_WORDS:
         if any(key in candidates for key in keys):
             return kind
-    flat = "".join(tokens)
+    # Not "handle" (Second Life's attachment points LEFT_HANDLE, RIGHT_HANDLE sit at the chest).
+    flat = "".join(token for token in tokens if token != "handle")
     for kind, keys in _EMBEDDED:
         if any(key in flat for key in keys):
             return kind
@@ -382,6 +383,10 @@ def bone_parts(names, parents):
     """Part of each bone (``names``; ``parents``: name -> parent name or None), from its name, else the
     nearest ancestor's. Limb bones without a side take their ancestor's part."""
     kinds = _resolve_legs({name: classify(name) for name in names}, parents)
+    # Second Life's mShoulder is the upper arm, below its mCollar.
+    for side, word in (("l", "Left"), ("r", "Right")):
+        if "mCollar" + word in kinds and "mShoulder" + word in kinds:
+            kinds["mShoulder" + word] = ("upperarm", side)
     parts = {}
 
     def part_of(name):

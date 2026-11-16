@@ -15,8 +15,8 @@ from mathutils.bvhtree import BVHTree
 from mathutils.geometry import intersect_line_line, intersect_line_plane
 
 from . import (api, connecting, earring, facedata, facing, fitting, goals, hairing, hairlineup, hairrig, heeling, lineup,
-               mending, moving, painting, refining, relaxing, resizing, sizing, skirting, sliders, smoothing, squishing,
-               straighten, tabs)
+               mending, moving, painting, refining, relaxing, resizing, secondlife, sizing, skirting, sliders, smoothing,
+               squishing, straighten, tabs)
 from .cplus import rig as cplus_rig
 from .properties import COMING_MODES, SQUISH_PRESETS, sync_sizes
 
@@ -729,6 +729,11 @@ def check_lineup_ready(context):
         return "Line up one model at a time ('{:s}' and '{:s}')".format(armatures[0].name, other.name)
     if not meshes:
         return "Select the model to line up, its meshes or armature"
+    state = secondlife.import_state(meshes)
+    if state == 'MIXED':
+        return "Line up the Second Life pieces on their own, without other meshes"
+    if state == 'IMPORT' and not secondlife.body_setting():
+        return "Set the Second Life Body in Magic Fit's preferences to line up Second Life pieces"
     posed = next((armature for armature in armatures if lineup.is_posed(armature)), None)
     if posed is not None:
         return "'{:s}' is posed: clear its pose first".format(posed.name)
@@ -740,6 +745,8 @@ def lineup_summary(context):
     meshes, armatures = lineup_model(context)
     if not meshes:
         return None
+    if secondlife.import_state(meshes) == 'IMPORT':
+        return "{:d} Second Life pieces".format(len(secondlife.split_import(meshes)[0]))
     count = "{:d} meshes".format(len(meshes)) if len(meshes) > 1 else "'{:s}'".format(meshes[0].name)
     if len(armatures) > 2:
         return "{:s} of '{:s}' and {:d} copies".format(count, armatures[0].name, len(armatures) - 1)
@@ -4245,6 +4252,8 @@ class MAGIC_FIT_OT_line_up(bpy.types.Operator):
         meshes, armatures = lineup_model(context)
         armature = armatures[0] if armatures else None
         started = time.perf_counter()
+        if secondlife.import_state(meshes) == 'IMPORT':
+            return self._line_up_second_life(context, body, meshes, started)
         try:
             result = lineup.plan(meshes, armature, body, context.evaluated_depsgraph_get(), stretch=self.stretch,
                                  fit=self.fit_shape)
@@ -4262,12 +4271,38 @@ class MAGIC_FIT_OT_line_up(bpy.types.Operator):
                         moved.append(copy)
             result.armature = armature
 
-        solution = result.solution
         what = "{:d} mesh{:s}".format(len(meshes), "es" if len(meshes) != 1 else "")
         if len(moved) == 1:
             what += " and '{:s}'".format(moved[0].name)
         elif moved:
             what += " and {:d} armatures".format(len(moved))
+        self._report_lined_up(result, what, body, started)
+        if moved and result.bone_places:
+            self.report({'WARNING'}, "The bones of '{:s}' all sat at one spot: they were put where their vertex "
+                                     "groups are".format(armature.name))
+        elif armature is not None and not result.move_armature and not result.bone_places:
+            self.report({'WARNING'}, "'{:s}' has no usable joints (its bones sit at one spot or have unknown "
+                                     "names), so its rest pose was left as it was".format(armature.name))
+        return {'FINISHED'}
+
+    def _line_up_second_life(self, context, body, meshes, started):
+        """Line up a Second Life import (see `secondlife.line_up`)."""
+        try:
+            done = secondlife.line_up(context, meshes, body, self.stretch, self.fit_shape)
+        except (secondlife.SecondLifeError, lineup.LineUpError) as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
+        count = len(done.placed) + len(done.failed)
+        self._report_lined_up(done.plan, "{:d} Second Life pieces".format(count), body, started)
+        if done.failed:
+            self.report({'WARNING'}, "Not placed, put at the torso: {:s}".format(", ".join(done.failed)))
+        if done.skipped:
+            self.report({'INFO'}, "Skipped: {:s}".format(", ".join(done.skipped)))
+        return {'FINISHED'}
+
+    def _report_lined_up(self, result, what, body, started):
+        """Report how Line Up moved ``what``, and the parts the model lacks."""
+        solution = result.solution
         details = ["{:.0f} % of its size".format(100.0 * solution.scale)]
         if solution.half == "upper":
             details.append("only an upper body (no hips), sized by its arms")
@@ -4295,13 +4330,6 @@ class MAGIC_FIT_OT_line_up(bpy.types.Operator):
         if missing:
             self.report({'WARNING'}, "The model has no {:s}: moved with the part above".format(
                 _missing_note(missing)))
-        if moved and result.bone_places:
-            self.report({'WARNING'}, "The bones of '{:s}' all sat at one spot: they were put where their vertex "
-                                     "groups are".format(armature.name))
-        elif armature is not None and not result.move_armature and not result.bone_places:
-            self.report({'WARNING'}, "'{:s}' has no usable joints (its bones sit at one spot or have unknown "
-                                     "names), so its rest pose was left as it was".format(armature.name))
-        return {'FINISHED'}
 
     def _move_rest_pose(self, context, result):
         """Move the armature's rest pose along, or put its bones where their vertex groups are, in its Edit

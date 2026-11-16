@@ -87,6 +87,28 @@ def test_classify():
         len(cases), wrong if wrong else "all right"))
 
 
+def test_second_life_names():
+    names = ["mPelvis", "mTorso", "mChest", "mNeck", "mHead", "mCollarLeft", "mShoulderLeft", "mElbowLeft",
+             "mWristLeft", "mHipLeft", "mKneeLeft", "mAnkleLeft", "L_UPPER_ARM"]
+    parents = {"mPelvis": None, "mTorso": "mPelvis", "mChest": "mTorso", "mNeck": "mChest", "mHead": "mNeck",
+               "mCollarLeft": "mChest", "mShoulderLeft": "mCollarLeft", "mElbowLeft": "mShoulderLeft",
+               "mWristLeft": "mElbowLeft", "mHipLeft": "mPelvis", "mKneeLeft": "mHipLeft",
+               "mAnkleLeft": "mKneeLeft", "L_UPPER_ARM": "mShoulderLeft"}
+    parts = lineup.bone_parts(names, parents)
+    check(parts["mCollarLeft"] == "clavicle_l", "Second Life: mCollar is the clavicle")
+    check(parts["mShoulderLeft"] == "upperarm_l", "Second Life: mShoulder is the upper arm")
+    check(parts["mElbowLeft"] == "forearm_l" and parts["mHipLeft"] == "thigh_l",
+          "Second Life: mElbow is the forearm, mHip the thigh")
+    handles = dict(parents, LEFT_HANDLE="mChest", L_HAND="mWristLeft")
+    parts = lineup.bone_parts(list(handles), handles)
+    check(parts["LEFT_HANDLE"] == "torso" and parts["L_HAND"] == "hand_l",
+          "Second Life: an attachment handle on the chest is not a hand ({:s})".format(parts["LEFT_HANDLE"]))
+    no_collar = {name: parent for name, parent in parents.items() if name != "mCollarLeft"}
+    no_collar["mShoulderLeft"] = "mChest"
+    parts = lineup.bone_parts(list(no_collar), no_collar)
+    check(parts["mShoulderLeft"] == "clavicle_l", "a shoulder bone without a collar stays a clavicle")
+
+
 def test_leg_bones():
     # Mixamo: LeftUpLeg (thigh) > LeftLeg (shin). VRChat: Leg_L (thigh) > Knee_L, with a jiggle bone.
     parents = {"Hips": None, "LeftUpLeg": "Hips", "LeftLeg": "LeftUpLeg", "LeftFoot": "LeftLeg"}

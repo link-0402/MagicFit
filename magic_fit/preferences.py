@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""The add-on's preferences: its hotkeys, which can be changed there, and the game folder Face reads the
-game's faces from."""
+"""The add-on's preferences: its hotkeys, which can be changed there, the game folder Face reads the
+game's faces from, and the Second Life body Line Up places Second Life pieces on."""
 
 import bpy
 from bpy.props import StringProperty
 
-from . import facedata, facing, gamefiles
+from . import facedata, facing, gamefiles, secondlife
 
 # Keys in the 3D Viewport, in every mode: (operator, label, default key, optionally the operator properties the
 # key sets). Alt Shift C isn't used by Blender's default keymap anywhere. Delete Hair Chain passes the key on
@@ -58,6 +58,24 @@ def _draw_game(layout, prefs):
     row.operator("magic_fit.read_game_faces", icon='FILE_REFRESH')
 
 
+def _second_life_body_changed(_self, _context):
+    secondlife.describe(secondlife.body_setting())
+
+
+def _draw_second_life(layout, prefs):
+    """The Second Life body file, and what Line Up found in it."""
+    col = layout.column()
+    col.label(text="Line Up places Second Life pieces (Firestorm exports) on this body first:")
+    col.prop(prefs, "second_life_body")
+    path = secondlife.body_setting()
+    if path:
+        text = secondlife.described(path)
+        if text is None:
+            col.label(text="Not read yet: Line Up reads it when it lines up Second Life pieces", icon='INFO')
+        else:
+            col.label(text=text, icon='CHECKMARK' if text.startswith("Body ") else 'ERROR')
+
+
 class MagicFitPreferences(bpy.types.AddonPreferences):
     bl_idname = __package__
 
@@ -68,10 +86,19 @@ class MagicFitPreferences(bpy.types.AddonPreferences):
         subtype='DIR_PATH',
         update=_game_folder_changed,
     )
+    second_life_body: StringProperty(
+        name="Second Life Body",
+        description="The .blend with the Second Life body that the clothes are made for (an eBody devkit). "
+                    "Line Up places Second Life pieces on it before it lines them up",
+        subtype='FILE_PATH',
+        update=_second_life_body_changed,
+    )
 
     def draw(self, context):
         layout = self.layout
         _draw_game(layout, self)
+        layout.separator()
+        _draw_second_life(layout, self)
         layout.separator()
         col = layout.column()
         col.label(text="Hotkeys (3D Viewport, in every mode):")

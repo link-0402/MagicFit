@@ -8,18 +8,21 @@ Screenshots are written to the directory in the MF_SCREENSHOTS environment varia
 
 import os
 import sys
+import tempfile
 import traceback
 
 import bpy
 import numpy as np
+from mathutils import Matrix, Vector
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "tests"))
+sys.path.insert(0, os.path.join(ROOT, "deps"))  # SciPy, for placing Second Life pieces
 
 import lineup as fixture  # noqa: E402
 import magic_fit  # noqa: E402
-from magic_fit import operators  # noqa: E402
+from magic_fit import operators, secondlife  # noqa: E402
 
 SHOTS = os.environ.get("MF_SCREENSHOTS")
 FAILURES = []
@@ -207,6 +210,46 @@ def steps():
     hair = bpy.data.objects["Hair"]
     check(np.abs(fixture.world_positions(hair) - before).max() < 1e-6, "hair: one undo puts it back")
     bpy.context.scene.body_fit_brush.lineup_mode = 'OUTFIT'
+
+    # --- Second Life pieces: placed on the Second Life body of the preferences, then lined up; one undo.
+    for obj in list(bpy.context.view_layer.objects):
+        obj.hide_set(True)
+    path = os.path.join(tempfile.gettempdir(), "sl_body_ui.blend")
+    fixture.write_second_life_blend(path)
+    sl_body, rig, _joints = fixture.build_second_life_body()
+    regions = [(name, fixture.SL_REGIONS[name]) for name in ("top", "skirt")]
+    made = [prim for prim, _centre in fixture.prims_from(sl_body, regions, (0.3, -0.2, 0.05))]
+    names = [obj.name for obj in made]
+    for obj in (sl_body, rig):
+        bpy.data.objects.remove(obj)
+    body = bpy.data.objects["Body"]
+    body.hide_set(False)
+    bpy.context.scene.magic_fit.target = body
+    real_setting = secondlife.body_setting
+    secondlife.body_setting = lambda: path
+    try:
+        fixture.select(made)
+        with env.override():
+            bpy.ops.view3d.view_all()
+            bpy.ops.ed.undo_push(message="Second Life")
+        yield 0.3
+        check(operators.lineup_summary(bpy.context) == "2 Second Life pieces", "second life: the panel counts the pieces")
+        with env.override(sidebar):
+            result = bpy.ops.magic_fit.line_up('EXEC_DEFAULT', True)
+        yield 0.5
+        check(result == {'FINISHED'} and all(bpy.data.objects[name].matrix_world == Matrix.Identity(4) for name in names),
+              "second life: the button lines the pieces up")
+        env.screenshot("secondlife.png")
+        with env.override():
+            bpy.ops.ed.undo()
+        yield 0.4
+        # Undo reloads the scene: look the pieces up again.
+        pieces = [bpy.data.objects[name] for name in names]
+        check(all(secondlife.is_prim(obj) and (obj.matrix_world.translation - Vector((0.3, -0.2, 0.05))).length < 1e-6
+                  for obj in pieces) and "SL Body" not in bpy.data.objects,
+              "second life: one undo brings the prims back, without the Second Life body")
+    finally:
+        secondlife.body_setting = real_setting
 
 
 def run():

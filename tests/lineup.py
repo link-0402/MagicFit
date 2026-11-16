@@ -82,6 +82,11 @@ CP_BONES = {
     "hip": "{Side}UpLeg", "knee": "{Side}Leg", "ankle": "{Side}Foot", "toe": "{Side}ToeBase",
     "clavicle": "{Side}Shoulder", "shoulder": "{Side}Arm", "elbow": "{Side}ForeArm", "wrist": "{Side}Hand",
 }
+SL_BONES = {
+    "hips": "mPelvis", "spine_b": "mTorso", "spine_c": "mChest", "neck": "mNeck", "head": "mHead",
+    "hip": "mHip{Side}", "knee": "mKnee{Side}", "ankle": "mAnkle{Side}", "toe": "mFoot{Side}",
+    "clavicle": "mCollar{Side}", "shoulder": "mShoulder{Side}", "elbow": "mElbow{Side}", "wrist": "mWrist{Side}",
+}
 TORSO_CHAIN = ("hips", "spine_b", "spine_c", "neck", "head")
 LEG_CHAIN = ("hip", "knee", "ankle", "toe")
 ARM_CHAIN = ("clavicle", "shoulder", "elbow", "wrist")
@@ -417,6 +422,145 @@ def build_body(fingers=False):
 VRC_JOINTS = dict(scale=0.85, leg_scale=1.12, arm_angle=0.0)
 BIPED_JOINTS = dict(scale=1.1, leg_scale=0.95, arm_angle=70.0, turn=90.0)
 ANON_JOINTS = dict(scale=1.2, leg_scale=1.0, arm_angle=30.0, feet=False)
+SL_JOINTS = dict(scale=1.1, leg_scale=1.05, arm_angle=45.0, turn=90.0)  # faces +X, like the eBody
+# Garment pieces cut from the Second Life body: the vertex groups each covers.
+SL_REGIONS = {
+    "top": ("mTorso", "mChest", "mCollarLeft", "mCollarRight", "mShoulderLeft", "mShoulderRight"),
+    "skirt": ("mPelvis", "mHipLeft", "mHipRight"),
+    "boot_l": ("mKneeLeft", "mAnkleLeft", "mFootLeft"),
+    "boot_r": ("mKneeRight", "mAnkleRight", "mFootRight"),
+}
+
+
+def build_second_life_body():
+    """A Second Life body like the eBody: "SL Body", bent by "SL Rig" with Second Life's bone names."""
+    joints = model_joints(**SL_JOINTS)
+    vertices, faces, weights, _markers = build_humanoid(joints, SL_BONES)
+    # Tube legs are mirror images of one another, so a boot would fit either: bulge each shin out at the
+    # outer ankle, as real ankles do.
+    vertices = np.array(vertices, dtype=np.float64)
+    for side, sign in (("l", 1.0), ("r", -1.0)):
+        axis = joints["ankle_" + side]
+        for index, weight in enumerate(weights):
+            if weight.get(sided(SL_BONES["knee"], side), 0.0) <= 0.5:
+                continue
+            out = (vertices[index, 1] - axis[1]) * sign
+            if out > 0.0:
+                height = np.exp(-((vertices[index, 2] - axis[2] - 0.1) / 0.06) ** 2)
+                vertices[index, 1] += sign * out * 0.4 * height
+    body = mesh_object("SL Body", vertices, faces, weights)
+    rig = armature_object("SL Rig", joints, SL_BONES, bone_list(joints, SL_BONES))
+    body.modifiers.new("Armature", 'ARMATURE').object = rig
+    return body, rig, joints
+
+
+def _prim(name, points, faces, at):
+    """A prim as Firestorm exports it: the mesh fills the -0.5..0.5 cube, the object scales it to its size."""
+    low, high = points.min(axis=0), points.max(axis=0)
+    obj = mesh_object(name, (points - (low + high) / 2.0) / (high - low), faces, [])
+    obj.scale = tuple(high - low)
+    obj.location = tuple(at)
+    bpy.context.view_layer.update()  # matrix_world, as an import leaves it
+    return obj, (low + high) / 2.0
+
+
+def prims_from(body, regions, shared, out=0.003):
+    """A prim per region (name, vertex group names) of ``body``: its vertices in those groups (most weight),
+    ``out`` (m) out along their normals, at the point ``shared``. Returns (prim, the region's true centre)
+    each."""
+    mesh = body.data
+    count = len(mesh.vertices)
+    co = np.empty(count * 3)
+    mesh.vertices.foreach_get("co", co)
+    normals = np.array([tuple(v.normal) for v in mesh.vertices])
+    points = co.reshape(-1, 3) + out * normals
+    names = [group.name for group in body.vertex_groups]
+    best = np.full(count, -1)
+    most = np.zeros(count)
+    for vert in mesh.vertices:
+        for element in vert.groups:
+            if element.weight > most[vert.index]:
+                most[vert.index], best[vert.index] = element.weight, element.group
+    result = []
+    for name, groups in regions:
+        wanted = {names.index(group) for group in groups if group in names}
+        keep = np.flatnonzero([b in wanted for b in best])
+        remap = {int(old): new for new, old in enumerate(keep)}
+        faces = [tuple(remap[i] for i in poly.vertices) for poly in mesh.polygons
+                 if all(i in remap for i in poly.vertices)]
+        result.append(_prim(name, points[keep], faces, shared))
+    return result
+
+
+def box_prim(name, size, shared):
+    """A box of ``size`` (x, y, z) as a prim at ``shared``: 24 vertices, each face its own four."""
+    corners = []
+    faces = []
+    for axis in range(3):
+        for sign in (-0.5, 0.5):
+            first = len(corners)
+            a, b = [k for k in range(3) if k != axis]
+            for u, v in ((-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)):
+                point = [0.0, 0.0, 0.0]
+                point[axis], point[a], point[b] = sign, u, v
+                corners.append(point)
+            faces.append(tuple(range(first, first + 4)))
+    return _prim(name, np.array(corners) * np.array(size), faces, shared)[0]
+
+
+def write_second_life_blend(path):
+    """Save a stand-in for the eBody devkit to ``path``: "SL Body" bent by "SL Rig", feet "SL Feet" under it,
+    a 40 m decoy bent by the rig and two stray prims; then remove them from the open file."""
+    body, rig, joints = build_second_life_body()
+    feet = box_prim("SL Feet", (0.3, 0.3, 0.06), (0.05, 0.0, 0.03))
+    feet.data.transform(feet.matrix_world)
+    feet.matrix_world = feet.matrix_world.Identity(4)
+    decoy = box_prim("Decoy", (40.0, 1.0, 40.0), (0.0, 0.0, 0.0))
+    decoy.data.transform(decoy.matrix_world)
+    decoy.matrix_world = decoy.matrix_world.Identity(4)
+    # Like the devkit's nails and raised feet: unplaced pieces about 0.9 m across, over the ankles.
+    nails = box_prim("Unplaced Nails", (0.9, 0.9, 0.8), (0.0, 0.0, 0.2))
+    nails.data.transform(nails.matrix_world)
+    nails.matrix_world = nails.matrix_world.Identity(4)
+    for obj in (feet, decoy, nails):
+        obj.modifiers.new("Armature", 'ARMATURE').object = rig
+    strays = [box_prim("Stray", (0.1, 0.2, 0.3), (0.5, 0.5, 0.5)), box_prim("Stray", (0.2, 0.1, 0.1), (0.5, 0.5, 0.5))]
+    # Like the devkit's own unplaced pieces: a rigged prim with more vertices than the body.
+    count = len(body.data.vertices)
+    co = np.empty(count * 3)
+    body.data.vertices.foreach_get("co", co)
+    co = np.concatenate([co.reshape(-1, 3), co.reshape(-1, 3) * 0.99])
+    rigged = _prim("Rigged Prim", co, [], (0.0, 0.0, 1.0))[0]
+    rigged.scale = (1.0, 1.0, 1.2)
+    rigged.vertex_groups.new(name="mPelvis").add(list(range(len(co))), 1.0, 'REPLACE')
+    rigged.modifiers.new("Armature", 'ARMATURE').object = rig
+    # Like the devkit's Marvelous Designer stand-in: a body with more vertices on a rig of its own.
+    other_rig = armature_object("Other Rig", joints, SL_BONES, bone_list(joints, SL_BONES))
+    stand_in = mesh_object("Stand-in", co, [], [{"mPelvis": 1.0}] * len(co))
+    stand_in.modifiers.new("Armature", 'ARMATURE').object = other_rig
+    objects = [body, rig, feet, decoy, nails, rigged, other_rig, stand_in] + strays
+    bpy.data.libraries.write(path, set(objects), fake_user=True)
+    datas = [obj.data for obj in objects]
+    for obj in objects:
+        bpy.data.objects.remove(obj)
+    for data in datas:
+        (bpy.data.armatures if isinstance(data, bpy.types.Armature) else bpy.data.meshes).remove(data)
+
+
+def prims_only_blend(path):
+    """Save a .blend holding only two prims to ``path``, then remove them from the open file."""
+    objects = [box_prim("Stray", (0.1, 0.2, 0.3), (0.5, 0.5, 0.5)), box_prim("Stray", (0.2, 0.1, 0.1), (0.5, 0.5, 0.5))]
+    bpy.data.libraries.write(path, set(objects), fake_user=True)
+    datas = [obj.data for obj in objects]
+    for obj in objects:
+        bpy.data.objects.remove(obj)
+    for data in datas:
+        bpy.data.meshes.remove(data)
+
+
+def root_prim(at=(0.0, 0.0, 0.0)):
+    """The root prim of a Firestorm export: a 2 cm cube at the origin."""
+    return box_prim("SL Root", (0.02, 0.02, 0.02), at)
 
 
 def build_vrc(fingers=None):
