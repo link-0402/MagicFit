@@ -90,14 +90,41 @@ def apply_targets(context, template):
     if context.scene.magic_fit_cplus.scope == 'ONE':
         armature = target_armature(context)
         return [armature] if armature is not None else []
+    return _all_targets(context, template, options(context), bust(context))
+
+
+def _all_targets(context, template, opts, size):
+    """The armatures of All Armatures for ``template``, Options ``opts`` and Bust Size ``size`` (None: off)."""
     edits = template.edited()
     names = set(edits)
-    if solver.root_change(edits.get(ROOT_BONE), options(context)) is not None:
+    if solver.root_change(edits.get(ROOT_BONE), opts) is not None:
         names.update(reference.BONES)
-    if bust(context) is not None:
+    if size is not None:
         names.update(solver.BUST_BONES)
     return [armature for armature in _scene_armatures(context)
             if any(bone.name in names for bone in armature.data.bones)]
+
+
+def _added_since(context, armatures):
+    """With All Armatures, the armatures without a rig (imported since Apply) that the template of the rigs of
+    ``armatures`` goes on, each given a rig with that template, options and Bust Size: turning Customize+ on
+    doesn't change what it shows. Nothing if the rigs show different templates."""
+    if context.scene.magic_fit_cplus.scope != 'ALL':
+        return []
+    states = {}
+    for armature in armatures:
+        rig_object = rig.rig_of(armature)
+        template, opts = rig.state(rig_object)
+        size = rig.bust_state(rig_object)[0]
+        states[(template.to_json(), tuple(sorted(opts.to_dict().items())), size)] = (template, opts, size)
+    if len(states) != 1:
+        return []
+    template, opts, size = next(iter(states.values()))
+    added = [armature for armature in _all_targets(context, template, opts, size)
+             if rig.rig_of(armature) is None and armature.mode != 'EDIT']
+    for armature in added:
+        rig.build(context, armature, template, opts, size)
+    return added
 
 
 def rigged(context):
@@ -290,6 +317,7 @@ class MAGIC_FIT_OT_cplus_toggle(bpy.types.Operator):
                 rig.disconnect(armature)
             self.report({'INFO'}, "Customize+ off on {:s}".format(_where(armatures)))
             return {'FINISHED'}
+        armatures += _added_since(context, armatures)
         meshes = 0
         names = set()
         for armature in armatures:

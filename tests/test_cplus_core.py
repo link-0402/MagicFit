@@ -855,6 +855,31 @@ def test_another_template_on_fewer_armatures():
           "One Armature leaves the other armatures alone")
 
 
+def test_turn_on_takes_in_armatures_added_since():
+    reset_scene()
+    scene = fixture.build(garment=False)
+    body_rig = scene["rig"]
+    head = json.dumps(template_json({"j_kao": bone_json(scaling=(1.2, 1.2, 1.2))}, name="Head"))
+    apply(head)
+    bpy.ops.magic_fit.cplus_toggle()  # off
+    hair_rig, hair = fixture.build_head('HAIR')  # imported after Apply, like an Instant Edit armature
+    # Another template pasted meanwhile: Turn On still shows what was applied.
+    bpy.context.scene.magic_fit_cplus.template = json.dumps(
+        template_json({"j_asi_a_l": bone_json(scaling=(1.0, 1.3, 1.3))}, name="Legs"))
+    check(bpy.ops.magic_fit.cplus_toggle() == {'FINISHED'}, "turned on")
+    hair_shown = rig.state(rig.rig_of(hair_rig))[0].name if rig.rig_of(hair_rig) else None
+    check(rig.is_on(body_rig) and rig.is_on(hair_rig) and moved(hair) > 0.001 and hair_shown == "Head",
+          "All Armatures: Turn On also puts the applied template on an armature added since ({:s})".format(
+              str(hair_shown)))
+    check(rig.state(rig.rig_of(body_rig))[0].name == "Head", "and leaves the body's rig as it was")
+    bpy.ops.magic_fit.cplus_toggle()  # off
+    bpy.context.scene.magic_fit_cplus.scope = 'ONE'
+    bpy.context.scene.magic_fit_cplus.armature = body_rig
+    unrelated_rig, _hair = fixture.build_head('HAIR')
+    bpy.ops.magic_fit.cplus_toggle()
+    check(rig.rig_of(unrelated_rig) is None, "One Armature: Turn On leaves the other armatures alone")
+
+
 def test_armature_in_disabled_collection():
     reset_scene()
     scene = fixture.build(garment=False)
