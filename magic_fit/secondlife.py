@@ -279,10 +279,52 @@ class Placement:
     gap: float
     inside: float
     outside: float
+    cost: float = 0.0
+    # Every spot refined for the piece, this one included, cheapest first (see `choose_together`).
+    choices: list = field(default_factory=list)
 
     @property
     def ok(self):
         return self.gap <= MAX_GAP and self.inside <= MAX_INSIDE and self.outside <= MAX_OUTSIDE
+
+
+# Pieces of one import are one garment (`choose_together`): its centre is where most of it lands (the median of
+# the placed pieces' best spots, weighted by their vertices). A placed piece moves to another of its spots that
+# passes the limits and costs under CLEAR times its best only when that spot is over FAR closer to that centre.
+# The storm skirt's layers fit the hips and the chest 30 cm above nearly alike (9 of 15 land on the hips);
+# a strap fitting either leg keeps its best side, both being about as far from the centre.
+CLEAR = 2.0
+FAR = 0.15
+
+
+def _weighted_median(values, weights):
+    order = np.argsort(values)
+    total = np.cumsum(np.asarray(weights, dtype=np.float64)[order])
+    return values[order][np.searchsorted(total, total[-1] / 2.0)]
+
+
+def choose_together(middles, placements, weights):
+    """The spot of each piece (unplaced bounds centre ``middles``, `place` results ``placements``, vertex counts
+    ``weights``): its best, or a near-best spot that passes the limits and lies over FAR closer to the garment's
+    centre. A piece whose best spot fails stays as it is."""
+    placed = [k for k, placement in enumerate(placements) if placement.ok]
+    if not placed:
+        return list(placements)
+    spots = np.array([middles[k] + placements[k].offset for k in placed])
+    mass = [weights[k] for k in placed]
+    centre = np.array([_weighted_median(spots[:, axis], mass) for axis in range(3)])
+    chosen = []
+    for middle, placement in zip(middles, placements):
+        if not placement.ok:
+            chosen.append(placement)
+            continue
+        here = np.linalg.norm(middle + placement.offset - centre)
+        near = [choice for choice in placement.choices
+                if choice.ok and choice.cost < CLEAR * placement.cost and
+                np.linalg.norm(middle + choice.offset - centre) < here - FAR]
+        chosen.append(min(near, key=lambda choice: np.linalg.norm(middle + choice.offset - centre))
+                      if near else placement)
+    return chosen
 
 
 def _gaps(tree, points, body_points, body_normals, reach=None):
@@ -358,12 +400,17 @@ def place(points, body_points, body_normals, seed=0):
             if np.linalg.norm(step) < 1e-4:
                 break
         results.append((float(_costs(_gaps(tree, fine + at, body_points, body_normals)[0])), at))
-    _best, at = min(results, key=lambda result: result[0])
-    placed = centred + at
-    gaps, _normals = _gaps(tree, placed, body_points, body_normals)
-    outside = max(0.0, float(np.max(body_points.min(axis=0) - placed.min(axis=0))),
-                  float(np.max(placed.max(axis=0) - body_points.max(axis=0))))
-    return Placement(at - middle, float(np.median(np.abs(gaps))), float((gaps < -INSIDE).mean()), outside)
+    choices = []
+    low, high = body_points.min(axis=0), body_points.max(axis=0)
+    for cost, at in sorted(results, key=lambda result: result[0]):
+        placed = centred + at
+        gaps, _normals = _gaps(tree, placed, body_points, body_normals)
+        outside = max(0.0, float(np.max(low - placed.min(axis=0))), float(np.max(placed.max(axis=0) - high)))
+        choices.append(Placement(at - middle, float(np.median(np.abs(gaps))), float((gaps < -INSIDE).mean()),
+                                 outside, cost))
+    best = choices[0]
+    best.choices = choices
+    return best
 
 
 # -----------------------------------------------------------------------------
@@ -445,9 +492,11 @@ def line_up(context, meshes, body, stretch, fit):
             groups = {name: column for name, column in groups.items() if name in deforming}
             torso = torso_centre(lineup.armature_rig(loaded.armature, rig=rig)[2])
             placed, failed = [], []
-            for obj in pieces:
-                where = lineup.mesh_positions(obj)
-                placement = place(where, points, normals)
+            spread = [lineup.mesh_positions(obj) for obj in pieces]
+            middles = [(where.min(axis=0) + where.max(axis=0)) / 2.0 for where in spread]
+            placements = choose_together(middles, [place(where, points, normals) for where in spread],
+                                         [len(where) for where in spread])
+            for obj, where, placement in zip(pieces, spread, placements):
                 if placement.ok:
                     offset = placement.offset
                     placed.append(obj)

@@ -196,6 +196,41 @@ def test_place_rejects_overhang():
           "{:.0f} cm)".format(1000.0 * placed.gap, 100.0 * placed.outside))
 
 
+def spot(cost, offset, gap=0.003):
+    return secondlife.Placement(np.array(offset, dtype=float), gap, 0.0, 0.0, cost)
+
+
+def with_choices(*choices):
+    best = min(choices, key=lambda choice: choice.cost)
+    best.choices = sorted(choices, key=lambda choice: choice.cost)
+    return best
+
+
+def test_choose_together():
+    hips, chest = (0.0, 0.0, 1.0), (0.0, 0.0, 1.3)
+    middles = [np.zeros(3)] * 3
+    skirt = [with_choices(spot(1e-6, hips)), with_choices(spot(1e-6, (0.0, 0.05, 0.98)))]
+    weights = [1000, 1000, 1000]
+    layer = with_choices(spot(1.0e-5, chest), spot(1.5e-5, hips))
+    chosen = secondlife.choose_together(middles, skirt + [layer], weights)
+    check(np.allclose(chosen[2].offset, hips), "together: a layer that fits hips and chest nearly alike joins the "
+          "skirt on the hips")
+    clear = with_choices(spot(1.0e-5, chest), spot(5e-5, hips))
+    chosen = secondlife.choose_together(middles, skirt + [clear], weights)
+    check(np.allclose(chosen[2].offset, chest), "together: a piece whose best spot clearly wins stays there")
+    misfit = with_choices(spot(1.0e-5, chest), spot(1.5e-5, hips, gap=0.05))
+    chosen = secondlife.choose_together(middles, skirt + [misfit], weights)
+    check(np.allclose(chosen[2].offset, chest), "together: a nearer spot that fails the limits isn't taken")
+    sign = with_choices(spot(1.0e-5, chest, gap=0.5), spot(1.5e-5, hips))
+    chosen = secondlife.choose_together(middles, skirt + [sign], weights)
+    check(chosen[2] is sign, "together: a piece whose best spot fails stays failed (a demo sign isn't rescued)")
+    left, right = (0.0, 0.09, 0.45), (0.0, -0.09, 0.45)
+    boots = [with_choices(spot(1e-6, left)), with_choices(spot(1e-6, right)),
+             with_choices(spot(1.0e-5, left), spot(1.1e-5, right))]
+    chosen = secondlife.choose_together(middles, boots, weights)
+    check(np.allclose(chosen[2].offset, left), "together: a strap that fits either leg keeps its best side")
+
+
 def test_place_speed():
     body, _rig, _joints, made = pieces()
     body_points, body_normals = surface(body)
