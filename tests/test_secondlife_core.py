@@ -185,6 +185,17 @@ def test_place_rejects():
         1000.0 * placed.gap, 100.0 * placed.inside))
 
 
+def test_place_rejects_overhang():
+    # Like the Lumi exports' 2.45 m helper: rings that hug the legs and a plate far below the feet.
+    body, _rig, _joints, made = pieces(("boot_l",))
+    body_points, body_normals = surface(body)
+    boot = world_points(made[0][0])
+    plate = np.array([(x, y, -1.2) for x in np.linspace(-0.3, 0.3, 8) for y in np.linspace(-0.3, 0.3, 8)])
+    placed = secondlife.place(np.concatenate([boot, plate]), body_points, body_normals)
+    check(not placed.ok, "place: a piece reaching 1 m past the body doesn't fit (gap {:.1f} mm, past the body "
+          "{:.0f} cm)".format(1000.0 * placed.gap, 100.0 * placed.outside))
+
+
 def test_place_speed():
     body, _rig, _joints, made = pieces()
     body_points, body_normals = surface(body)

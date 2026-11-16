@@ -48,6 +48,9 @@ INSIDE_WEIGHT = 2.0
 MAX_GAP = 0.030
 MAX_INSIDE = 0.35
 INSIDE = 0.005
+# Nor may it reach farther than this (m) past the body's bounds: the Lumi exports' 2.45 m helper hugs the legs
+# with rings but reaches 1.2-1.4 m past the feet. A hood rises 28-29 cm over the eBody, which has no head.
+MAX_OUTSIDE = 0.35
 
 # The body in the Second Life Body file: a mesh this tall (m) bent by a rig with mPelvis; its feet: meshes
 # of that rig smaller than FEET_SIZE whose bounds come within FEET_REACH of its lowest point.
@@ -270,15 +273,16 @@ def surface_normals(points, tris):
 
 @dataclass
 class Placement:
-    """Where `place` put a piece: moved by ``offset``, its median gap to the skin ``gap`` (m) and the part of
-    its points over 5 mm inside the body ``inside``."""
+    """Where `place` put a piece: moved by ``offset``, its median gap to the skin ``gap`` (m), the part of its
+    points over 5 mm inside the body ``inside``, and how far it reaches past the body's bounds ``outside`` (m)."""
     offset: np.ndarray
     gap: float
     inside: float
+    outside: float
 
     @property
     def ok(self):
-        return self.gap <= MAX_GAP and self.inside <= MAX_INSIDE
+        return self.gap <= MAX_GAP and self.inside <= MAX_INSIDE and self.outside <= MAX_OUTSIDE
 
 
 def _gaps(tree, points, body_points, body_normals, reach=None):
@@ -355,8 +359,11 @@ def place(points, body_points, body_normals, seed=0):
                 break
         results.append((float(_costs(_gaps(tree, fine + at, body_points, body_normals)[0])), at))
     _best, at = min(results, key=lambda result: result[0])
-    gaps, _normals = _gaps(tree, centred + at, body_points, body_normals)
-    return Placement(at - middle, float(np.median(np.abs(gaps))), float((gaps < -INSIDE).mean()))
+    placed = centred + at
+    gaps, _normals = _gaps(tree, placed, body_points, body_normals)
+    outside = max(0.0, float(np.max(body_points.min(axis=0) - placed.min(axis=0))),
+                  float(np.max(placed.max(axis=0) - body_points.max(axis=0))))
+    return Placement(at - middle, float(np.median(np.abs(gaps))), float((gaps < -INSIDE).mean()), outside)
 
 
 # -----------------------------------------------------------------------------
