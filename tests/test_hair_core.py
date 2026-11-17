@@ -997,6 +997,23 @@ def test_no_hair_note():
           "no hair note: 1 of 2 built says how many ({})".format(notes))
 
 
+def test_zero_chain_counts():
+    # A count of 0 builds no chains in its area and asks for none, so it gets no "No hair found" note; with every
+    # count 0 the build says so rather than that no hair hangs.
+    obj, _parts, _settings = own_skeleton_hair(hair_back_chains=0)
+    result, reports = hair_weights_reports()
+    armature = hair_armature(obj)
+    kinds = [kind for kind, _bones in rig_chains(armature)] if armature is not None else []
+    check(result == {'FINISHED'} and "back" not in kinds and kinds.count("side") >= 2
+          and not [text for text in reports if "Back Chains" in text],
+          "zero counts: Back Chains 0 builds no back chain and no note ({}; {})".format(kinds, reports))
+    use_settings(hair_skeleton_mode='CUSTOM', hair_back_chains=0, hair_side_chains_left=0, hair_side_chains_right=0,
+                 hair_bang_chains=0)
+    result, reports = hair_weights_reports(rebuild=True)
+    check(result == {'FINISHED'} and not own_bones(armature) and "Every chain count is 0: no chains built" in reports,
+          "zero counts: every count 0 builds no chains and says so ({})".format(reports))
+
+
 def test_detect_hair_chains():
     # Detect sets the counts to the ones the hair gets without any: on the long hair one chain per side lock and one
     # for the back, its tube (with Hair Type Loose a tube is hair of the area it hangs in, and narrower than Chain
@@ -1503,7 +1520,7 @@ def main():
                      test_existing_armature, test_customize_plus, test_armature_out_of_view_layer, test_parts,
                      test_selected, test_replace, test_masks, test_pick, test_brush, test_readiness,
                      test_custom_button, test_custom_reuses_rig, test_custom_chain_spacing, test_no_hair_note,
-                     test_detect_hair_chains,
+                     test_zero_chain_counts, test_detect_hair_chains,
                      test_race_change_rebuilds,
                      test_nothing_hangs,
                      test_custom_brush, test_custom_view_layer, test_custom_parts, test_custom_parts_one_after_another,

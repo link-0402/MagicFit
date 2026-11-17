@@ -774,15 +774,14 @@ def _detect(hair, label, short, spacing, ponytail):
     if short:
         bins = np.unique(np.floor(np.degrees(hair.phi) % 360.0 / RING_BIN))
         arc = len(bins) * math.radians(RING_BIN) * float(_quantiles(hair.far, hair.area + 1e-12, 0.5))
-        return {"bangs": int(np.clip(round(arc / spacing), *hairrig.COUNT_RANGES["bangs"]))}
+        return {"bangs": int(np.clip(round(arc / spacing), 1, hairrig.COUNT_RANGES["bangs"][1]))}
     found = {}
     for name, number, _kind, across in _rig_areas(ponytail):
         members = np.flatnonzero(label == number)
         # An area with no chain to run (too little hair, or too short) is left out, as `plan_area` builds none.
         if float(hair.area[members].sum()) < MIN_AREA or _levels(hair, members, hair.area[members] + 1e-12)[2] is None:
             continue
-        low, high = hairrig.COUNT_RANGES[name]
-        found[name] = int(np.clip(lane_count(hair, members, across(hair), spacing, high), low, high))
+        found[name] = lane_count(hair, members, across(hair), spacing, hairrig.COUNT_RANGES[name][1])
     return found
 
 

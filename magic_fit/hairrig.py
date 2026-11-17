@@ -89,8 +89,8 @@ CHAIN_SPACING = 0.08
 # and ``right`` across the side hair on the character's left (+X) and right, ``bangs`` across the bangs (around the
 # whole head on short hair, `hairlanes.areas`).
 ChainCounts = namedtuple("ChainCounts", "back ponytail left right bangs")
-# The fewest and most chains of each area (`ChainCounts`'s fields).
-COUNT_RANGES = {"back": (1, 4), "ponytail": (1, 3), "left": (1, 2), "right": (1, 2), "bangs": (1, 6)}
+# The fewest and most chains of each area (`ChainCounts`'s fields); 0 builds none there (Detect proposes 1 at least).
+COUNT_RANGES = {"back": (0, 4), "ponytail": (0, 3), "left": (0, 2), "right": (0, 2), "bangs": (0, 6)}
 # A rig over its budget (MAX_HAIR_BONES) keeps its chains and lengthens their bones: BONE_SPACING grows by this
 # and every chain is planned again, until the rig fits or every chain has CHAIN_BONES[0] bones (user ruling: scale
 # the bones up rather than drop back chains).

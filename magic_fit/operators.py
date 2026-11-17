@@ -2669,7 +2669,10 @@ class MAGIC_FIT_OT_hair_weights(bpy.types.Operator):
             chains = armature.magic_fit_hair_rig.chains
             bone_count = sum(len([name for name in chain.bones.split(",") if name]) for chain in chains)
             if built is not None and not len(chains):
-                self.report({'INFO'}, "No hair hangs from the head: no chains built")
+                if not any(getattr(settings, AREA_SETTINGS[area]) for area in hair_count_areas(settings, short)):
+                    self.report({'INFO'}, "Every chain count is 0: no chains built")
+                else:
+                    self.report({'INFO'}, "No hair hangs from the head: no chains built")
             elif built is not None:
                 self.report({'INFO'}, "Built {:s} with {:s} for the hair".format(
                     hairrig.counted(len(chains), "chain"), hairrig.counted(bone_count, "bone")))
